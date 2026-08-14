@@ -225,7 +225,7 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 		preserved++
 	}
 
-	// Download poster.jpg & fanart.jpg if missing
+	// Download poster.jpg & fanart.jpg into .strm item directory if missing/updated
 	artCreated := artwork.DownloadMovieArtwork(movieDir, movie)
 	created += artCreated
 

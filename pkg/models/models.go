@@ -7,9 +7,7 @@ type Config struct {
 	DispatcharrURL        string        `json:"dispatcharr_url"`
 	APIKey                string        `json:"api_key"`
 	OutputDir             string        `json:"output_dir"`
-	StateCacheFile        string        `json:"state_cache_file"`
 	StreamcacheURL        string        `json:"streamcache_url"`
-	EnableArtworkCache    bool          `json:"enable_artwork_cache"`
 	FetchAheadCount       int           `json:"fetch_ahead_count"`
 	RetentionGraceDays    int           `json:"retention_grace_days"`
 	ProxyPort             int           `json:"proxy_port"`

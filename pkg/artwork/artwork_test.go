@@ -21,7 +21,7 @@ func TestDownloadArtworkHashTracking(t *testing.T) {
 	posterPath := filepath.Join(tempDir, "poster.jpg")
 
 	urlV1 := ts.URL + "/image.jpg?v=1111"
-	urlV2 := ts.URL + "/image.jpg?v=2222" // New version hash!
+	urlV2 := ts.URL + "/image.jpg?v=2222"
 
 	// 1. Initial download with v=1111
 	created1, err := DownloadArtwork(posterPath, urlV1)

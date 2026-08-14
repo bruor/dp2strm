@@ -61,7 +61,7 @@ func DownloadArtwork(targetPath, imgURL string) (bool, error) {
 	return true, nil // Updated
 }
 
-// DownloadMovieArtwork saves poster.jpg and fanart.jpg for a movie, detecting Dispatcharr ?v=hash updates.
+// DownloadMovieArtwork saves poster.jpg and fanart.jpg for a movie in the .strm directory.
 func DownloadMovieArtwork(movieDir string, movie models.Movie) (postersCreated int) {
 	var posterURL string
 	if logo, ok := movie.CustomProperties["logo"].(map[string]any); ok {

@@ -11,13 +11,13 @@ import (
 	"dp2strm/pkg/models"
 )
 
-// Server is the embedded HTTP playback and activation proxy.
+// Server is the HTTP client playback handler (issues HTTP 302 redirects to Dispatcharr / streamcache).
 type Server struct {
 	cfg        *models.Config
 	httpServer *http.Server
 }
 
-// NewServer creates a new HTTP proxy server.
+// NewServer creates a new HTTP client playback handler server.
 func NewServer(cfg *models.Config) *Server {
 	srv := &Server{
 		cfg: cfg,

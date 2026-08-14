@@ -6,10 +6,10 @@ services:
     container_name: dp2strm
     restart: unless-stopped
     ports:
-      # Port mapping for the embedded HTTP playback proxy (Host:Container)
+      # Port mapping for HTTP playback handler (Host:Container)
       - "8080:8080"
     volumes:
-      # Persistent volume mount for generated .strm files, .nfo metadata, artwork, and cache
+      # Persistent volume mount for generated .strm files, .nfo metadata, and poster/fanart artwork
       - ./strm_output:/data/strm
     environment:
       # Dispatcharr REST API Base URL (Required)
@@ -21,24 +21,18 @@ services:
       # Target directory inside container for generated media tree
       - OUTPUT_DIR=/data/strm
 
-      # Port for the embedded HTTP playback proxy server
+      # Port for the embedded HTTP client playback handler (302 redirect server)
       - PROXY_PORT=8080
 
-      # Public URL of the playback proxy accessible by Emby/Jellyfin players
+      # Public URL of the playback handler accessible by Emby/Jellyfin players
       - PROXY_PUBLIC_URL=${PROXY_PUBLIC_URL:-http://localhost:8080}
 
       # Scheduled background sync interval (e.g., "1h", "2h", "30m", "0" for single run)
       - SYNC_INTERVAL=${SYNC_INTERVAL:-1h}
 
-      # --- Cache Options (streamcache & state cache) ---
-      # Optional streamcache service URL for on-disk stream proxy caching (e.g., "http://streamcache:8080")
+      # --- Streamcache Integration Options ---
+      # Transparent streamcache service URL for on-disk stream proxy caching (e.g., "http://streamcache:8080")
       - STREAMCACHE_URL=${STREAMCACHE_URL:-}
-
-      # Path to the on-disk state cache file (tracks soft-deleted items & stream IDs)
-      - STATE_CACHE_FILE=/data/strm/.dp2strm_state.json
-
-      # Enable/disable downloading artwork posters and backdrops (true/false, default: true)
-      - ENABLE_ARTWORK_CACHE=${ENABLE_ARTWORK_CACHE:-true}
 
       # Predictive fetch-ahead episode cache count for seamless TV playback (default: 2)
       - FETCH_AHEAD_COUNT=${FETCH_AHEAD_COUNT:-2}
