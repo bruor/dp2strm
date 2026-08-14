@@ -33,8 +33,5 @@ COPY --from=builder /build/dp2strm /app/dp2strm
 # Create default output data directory
 RUN mkdir -p /data/strm
 
-# Expose HTTP Playback Handler Port
-EXPOSE 8080
-
 # Run dp2strm daemon
 ENTRYPOINT ["/app/dp2strm"]
