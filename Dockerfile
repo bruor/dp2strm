@@ -41,6 +41,6 @@ RUN mkdir -p /data/strm
 # Expose HTTP Playback Proxy Port
 EXPOSE 8080
 
-# Default entrypoint runs dp2strm in daemon serving mode
+# Default entrypoint runs dp2strm in daemon serving mode using environment variables
 ENTRYPOINT ["/app/dp2strm"]
-CMD ["--config", "/app/config.yaml", "--sync-once=false", "--serve=true"]
+CMD ["--sync-once=false", "--serve=true"]

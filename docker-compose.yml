@@ -8,7 +8,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
       - ./strm_output:/data/strm
     environment:
       - DISPATCHARR_URL=${DISPATCHARR_URL:-https://your-dispatcharr-server.com}
@@ -16,3 +15,7 @@ services:
       - OUTPUT_DIR=/data/strm
       - PROXY_PORT=8080
       - PROXY_PUBLIC_URL=${PROXY_PUBLIC_URL:-http://localhost:8080}
+      - SYNC_INTERVAL=${SYNC_INTERVAL:-1h}
+      - RETENTION_GRACE_DAYS=${RETENTION_GRACE_DAYS:-7}
+      - EMBY_URL=${EMBY_URL:-}
+      - EMBY_API_KEY=${EMBY_API_KEY:-}
