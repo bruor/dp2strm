@@ -129,6 +129,7 @@ services:
 | `SYNC_INTERVAL` | `1h` | Background sync ticker duration (`1h`, `30m`, `0` for single run) |
 | `SYNC_CRON` | `""` | Optional 5-field cron schedule expression (e.g., `0 3 * * *`) |
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |
+| `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial sync pass on container startup |
 | `BATCH_SIZE` | `0` | Batch processing limit per sync pass (`0` = Unlimited) |
 | `EMBY_URL` | `""` | Optional Emby/Jellyfin server URL for library refresh hooks |
 | `EMBY_API_KEY` | `""` | Optional Emby/Jellyfin API key |

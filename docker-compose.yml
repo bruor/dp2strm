@@ -22,6 +22,7 @@ services:
       - TZ=America/Toronto
       - SYNC_INTERVAL=1h
       - SYNC_CRON= # Optional: e.g. "0 3 * * *" for 3:00 AM daily
+      - SKIP_STARTUP_SYNC=false # Set to true to skip initial sync pass on boot
       - BATCH_SIZE=0 # 0 = Unlimited full library sync
 
       # --- Streamcache Integration Options (Optional) ---

@@ -68,6 +68,9 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("TZ"); v != "" {
 		cfg.TZ = v
 	}
+	if v := os.Getenv("SKIP_STARTUP_SYNC"); v != "" {
+		cfg.SkipStartupSync = (v == "true" || v == "1")
+	}
 
 	if v := os.Getenv("PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil && p > 0 {

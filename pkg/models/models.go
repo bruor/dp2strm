@@ -16,6 +16,7 @@ type Config struct {
 	SyncCron              string        `json:"sync_cron"`
 	TZ                    string        `json:"tz"`
 	BatchSize             int           `json:"batch_size"`
+	SkipStartupSync       bool          `json:"skip_startup_sync"`
 	CircuitBreakerEnabled bool          `json:"circuit_breaker_enabled"`
 	MaxProbeConcurrency   int           `json:"max_probe_concurrency"`
 	EmbyURL               string        `json:"emby_url"`

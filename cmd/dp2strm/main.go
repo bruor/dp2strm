@@ -104,12 +104,17 @@ func main() {
 
 	log.Printf("[Main] Daemon active. Timezone: %s", cfg.TZ)
 
-	// Execute Initial Startup Sync Pass
-	if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
-		log.Printf("[Main] Error during initial movie sync: %v", err)
-	}
-	if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
-		log.Printf("[Main] Error during initial series sync: %v", err)
+	// Execute Initial Startup Sync Pass (unless SKIP_STARTUP_SYNC=true)
+	if !cfg.SkipStartupSync {
+		log.Println("[Main] Executing initial startup sync pass...")
+		if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
+			log.Printf("[Main] Error during initial movie sync: %v", err)
+		}
+		if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
+			log.Printf("[Main] Error during initial series sync: %v", err)
+		}
+	} else {
+		log.Println("[Main] SKIP_STARTUP_SYNC enabled. Skipping initial startup sync pass.")
 	}
 
 	// Determine Ticker Interval (Default 1h if interval is 0 or unspecified in daemon mode)
