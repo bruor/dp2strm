@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -70,7 +71,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 	return resp, nil
 }
 
-// FetchMoviePage retrieves a single page of movies from GET /api/vod/movies/
+// FetchMoviePage retrieves movies from GET /api/vod/movies/ supporting both paginated and raw array responses.
 func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.Movie], error) {
 	query := url.Values{}
 	query.Set("page", fmt.Sprintf("%d", page))
@@ -82,12 +83,31 @@ func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*model
 	}
 	defer resp.Body.Close()
 
-	var result models.PaginatedResponse[models.Movie]
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode movie list JSON: %w", err)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read movie page body: %w", err)
 	}
 
-	return &result, nil
+	// 1. Try decoding as paginated object {"results": [...]}
+	var paginated models.PaginatedResponse[models.Movie]
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && len(paginated.Results) > 0 {
+		return &paginated, nil
+	}
+
+	// 2. Try decoding as direct JSON array [...]
+	var list []models.Movie
+	if err := json.Unmarshal(bodyBytes, &list); err == nil && len(list) > 0 {
+		return &models.PaginatedResponse[models.Movie]{
+			Count:   len(list),
+			Next:    nil,
+			Results: list,
+		}, nil
+	}
+
+	log.Printf("[Client] Warning: /api/vod/movies/ page %d returned %d bytes (Empty or Unparseable)", page, len(bodyBytes))
+	return &models.PaginatedResponse[models.Movie]{
+		Results: []models.Movie{},
+	}, nil
 }
 
 // FetchMovieProviders retrieves provider streams for a movie via GET /api/vod/movies/{id}/providers/
