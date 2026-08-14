@@ -1,0 +1,44 @@
+# Environment & Configuration (Contains secrets / API keys)
+config.yaml
+config.yml
+config.json
+.env
+.env.*
+*.env
+
+# State & Cache Files
+.xctostrm_state.json
+*.log
+*.sqlite
+*.db
+
+# Build & Binary Artifacts
+xctostrm
+*.exe
+*.exe?
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+dist/
+bin/
+vendor/
+
+# Output Directories (.strm & .nfo test generations)
+output/
+strm_output/
+data/
+tmp/
+temp/
+
+# Large Sample Data & Local Discovery Dumps (Contains secrets & dumps)
+sample_data/
+
+# OS & Editor Artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
