@@ -15,6 +15,7 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 	os.Setenv("SYNC_INTERVAL", "2h")
 	os.Setenv("EMBY_URL", "http://emby.example.com")
 	os.Setenv("EMBY_API_KEY", "emby-token-456")
+	os.Setenv("STREAMCACHE_URL", "http://streamcache.local:8080")
 
 	defer func() {
 		os.Unsetenv("DISPATCHARR_URL")
@@ -24,6 +25,7 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 		os.Unsetenv("SYNC_INTERVAL")
 		os.Unsetenv("EMBY_URL")
 		os.Unsetenv("EMBY_API_KEY")
+		os.Unsetenv("STREAMCACHE_URL")
 	}()
 
 	// Load config strictly from environment variables
@@ -43,5 +45,8 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 	}
 	if cfg.EmbyURL != "http://emby.example.com" {
 		t.Errorf("EmbyURL = %q; want %q", cfg.EmbyURL, "http://emby.example.com")
+	}
+	if cfg.StreamcacheURL != "http://streamcache.local:8080" {
+		t.Errorf("StreamcacheURL = %q; want %q", cfg.StreamcacheURL, "http://streamcache.local:8080")
 	}
 }

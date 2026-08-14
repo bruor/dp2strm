@@ -9,7 +9,7 @@ services:
       # Port mapping for the embedded HTTP playback proxy (Host:Container)
       - "8080:8080"
     volumes:
-      # Persistent volume mount for generated .strm files, .nfo metadata, and artwork
+      # Persistent volume mount for generated .strm files, .nfo metadata, artwork, and cache
       - ./strm_output:/data/strm
     environment:
       # Dispatcharr REST API Base URL (Required)
@@ -29,6 +29,19 @@ services:
 
       # Scheduled background sync interval (e.g., "1h", "2h", "30m", "0" for single run)
       - SYNC_INTERVAL=${SYNC_INTERVAL:-1h}
+
+      # --- Cache Options (streamcache & state cache) ---
+      # Optional streamcache service URL for on-disk stream proxy caching (e.g., "http://streamcache:8080")
+      - STREAMCACHE_URL=${STREAMCACHE_URL:-}
+
+      # Path to the on-disk state cache file (tracks soft-deleted items & stream IDs)
+      - STATE_CACHE_FILE=/data/strm/.dp2strm_state.json
+
+      # Enable/disable downloading artwork posters and backdrops (true/false, default: true)
+      - ENABLE_ARTWORK_CACHE=${ENABLE_ARTWORK_CACHE:-true}
+
+      # Predictive fetch-ahead episode cache count for seamless TV playback (default: 2)
+      - FETCH_AHEAD_COUNT=${FETCH_AHEAD_COUNT:-2}
 
       # Number of grace days to buffer deleted streams before purging (Default: 7)
       - RETENTION_GRACE_DAYS=${RETENTION_GRACE_DAYS:-7}

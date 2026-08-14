@@ -15,6 +15,10 @@ func DefaultConfig() *models.Config {
 		DispatcharrURL:        "http://localhost:8000",
 		APIKey:                "",
 		OutputDir:             "/data/strm",
+		StateCacheFile:        "/data/strm/.dp2strm_state.json",
+		StreamcacheURL:        "",
+		EnableArtworkCache:    true,
+		FetchAheadCount:       2,
 		RetentionGraceDays:    7,
 		ProxyPort:             8080,
 		ProxyPublicURL:        "http://localhost:8080",
@@ -40,6 +44,20 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("OUTPUT_DIR"); v != "" {
 		cfg.OutputDir = v
+	}
+	if v := os.Getenv("STATE_CACHE_FILE"); v != "" {
+		cfg.StateCacheFile = v
+	}
+	if v := os.Getenv("STREAMCACHE_URL"); v != "" {
+		cfg.StreamcacheURL = v
+	}
+	if v := os.Getenv("ENABLE_ARTWORK_CACHE"); v != "" {
+		cfg.EnableArtworkCache = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("FETCH_AHEAD_COUNT"); v != "" {
+		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
+			cfg.FetchAheadCount = cnt
+		}
 	}
 	if v := os.Getenv("PROXY_PUBLIC_URL"); v != "" {
 		cfg.ProxyPublicURL = v
