@@ -41,12 +41,14 @@ This document tracks all completed features and remaining roadmap items for `dp2
 
 - [ ] **On-Demand TV Series Activation & Clean-Up Lifecycle (`S01E01 - Play to Activate Series.strm`)**:
   - **Pass 1 (Lightweight Initial Sync)**: For each TV show, generate `tvshow.nfo`, `poster.jpg`, `fanart.jpg`, and a single placeholder activation episode in `Season 01/`: `Show Name - S01E01 - Play to Activate Series.strm` and matching `.nfo` instructing the user to play the episode to activate full series content in Emby.
-  - **Pass 2 (On-Demand Activation & Population)**: When played:
-    1. Fetch full season/episode list for `series_id` from Dispatcharr (`/api/vod/series/{id}/episodes/`).
-    2. Populate real `.strm` files on disk for all seasons/episodes (`S01E01`, `S01E02`, etc.).
-    3. Automatically delete temporary placeholder files (`Show Name - S01E01 - Play to Activate Series.strm` & `.nfo`).
-    4. Issue targeted Emby library refresh (`POST /Items/{series_id}/Refresh?Recursive=true`).
-    5. Issue HTTP `302 Found` redirect directly to the real `S01E01` stream URL so video playback starts instantly.
+  - **Pass 2 (Ultra-Fast Immediate 302 Redirect + Async Background Population)**: When played:
+    1. **Immediate 302 Redirect (<50ms)**: `dp2strm` IMMEDIATELY issues the `HTTP 302 Found` redirect pointing to the playable `S01E01` stream URL (or `streamcache` Base64 path) so player playback starts with zero delay.
+    2. **Async Background Population (Goroutine)**: While playback is in progress:
+       a. Fetch full season/episode list for `series_id` from Dispatcharr (`/api/vod/series/{id}/episodes/`).
+       b. Populate real `.strm` files on disk for all seasons/episodes (`S01E01`, `S01E02`, etc.).
+       c. Automatically delete temporary placeholder files (`Show Name - S01E01 - Play to Activate Series.strm` & `.nfo`).
+       d. Issue targeted Emby library refresh (`POST /Items/{series_id}/Refresh?Recursive=true`).
+       e. Record `is_activated = 1` in SQLite.
 
 - [ ] **Smart Series Update Scheduling Engine (`modernc.org/sqlite`)**:
   - **Pure-Go CGO-Free SQLite Database**: Store state in `/data/strm/dp2strm.db` using `modernc.org/sqlite` (100% CGO-free, single static Alpine binary compatible).
