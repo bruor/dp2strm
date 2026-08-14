@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"dp2strm/pkg/models"
@@ -124,6 +127,16 @@ func LoadConfig() *models.Config {
 	// Clean output directory path
 	if absDir, err := filepath.Abs(cfg.OutputDir); err == nil {
 		cfg.OutputDir = absDir
+	}
+
+	// Normalize URL: Ensure port is appended if missing and non-standard (e.g. "http://dp2strm" -> "http://dp2strm:8080")
+	if parsed, err := url.Parse(cfg.URL); err == nil && parsed.Host != "" {
+		if parsed.Port() == "" && cfg.Port != 80 && cfg.Port != 443 {
+			if !strings.Contains(parsed.Host, ":") {
+				parsed.Host = fmt.Sprintf("%s:%d", parsed.Host, cfg.Port)
+				cfg.URL = parsed.String()
+			}
+		}
 	}
 
 	return cfg

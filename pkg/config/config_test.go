@@ -50,3 +50,18 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 		t.Errorf("StreamcacheURL = %q; want %q", cfg.StreamcacheURL, "http://streamcache.local:8080")
 	}
 }
+
+func TestURLPortNormalization(t *testing.T) {
+	os.Setenv("URL", "http://dp2strm")
+	os.Setenv("PORT", "9199")
+	defer func() {
+		os.Unsetenv("URL")
+		os.Unsetenv("PORT")
+	}()
+
+	cfg := LoadConfig()
+	want := "http://dp2strm:9199"
+	if cfg.URL != want {
+		t.Errorf("URL = %q; want %q", cfg.URL, want)
+	}
+}
