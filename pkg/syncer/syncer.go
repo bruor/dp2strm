@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"dp2strm/pkg/artwork"
 	"dp2strm/pkg/client"
 	"dp2strm/pkg/models"
 	"dp2strm/pkg/nfo"
@@ -223,6 +224,10 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 	} else {
 		preserved++
 	}
+
+	// Download poster.jpg & fanart.jpg if missing
+	artCreated := artwork.DownloadMovieArtwork(movieDir, movie)
+	created += artCreated
 
 	// Write .strm files for each version variant
 	for _, v := range classified {
