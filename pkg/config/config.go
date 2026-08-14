@@ -27,7 +27,7 @@ func DefaultConfig() *models.Config {
 		TZ:                    "UTC",
 		BatchSize:             0, // 0 = unlimited
 		CircuitBreakerEnabled: true,
-		MaxProbeConcurrency:   25,
+		MaxProbeConcurrency:   5,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
 	}

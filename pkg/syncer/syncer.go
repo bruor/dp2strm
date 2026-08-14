@@ -51,7 +51,7 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 
 	concurrency := s.cfg.MaxProbeConcurrency
 	if concurrency <= 0 {
-		concurrency = 25
+		concurrency = 5
 	}
 
 	for {
@@ -93,6 +93,8 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 			}(movie)
 		}
 		wg.Wait()
+
+		time.Sleep(100 * time.Millisecond) // Gentle CPU pause for Dispatcharr server
 
 		if resp.Next == nil {
 			break

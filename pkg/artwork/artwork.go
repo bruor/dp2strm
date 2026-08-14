@@ -7,9 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"dp2strm/pkg/models"
 )
+
+var artworkClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
 
 // DownloadArtwork downloads an image from imgURL to targetPath.
 // If the image file exists AND the recorded version URL matches imgURL (including ?v=hash), it skips the download.
@@ -35,7 +40,7 @@ func DownloadArtwork(targetPath, imgURL string) (bool, error) {
 		return false, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	resp, err := http.Get(imgURL)
+	resp, err := artworkClient.Get(imgURL)
 	if err != nil {
 		return false, fmt.Errorf("failed to download image %s: %w", imgURL, err)
 	}
