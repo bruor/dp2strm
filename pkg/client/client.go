@@ -26,7 +26,7 @@ func NewClient(baseURL, apiKey string) *Client {
 		baseURL: normalized,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 20,
