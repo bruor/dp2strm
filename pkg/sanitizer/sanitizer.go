@@ -7,9 +7,11 @@ import (
 )
 
 var (
-	illegalCharsRegex = regexp.MustCompile(`[\\/:*?"<>|]`)
-	qualityTagRegex   = regexp.MustCompile(`(?i)\b(4K|UHD|2160p|1080p|720p|480p|HDR|HDR10|DV|Dolby Vision|HEVC|H265|x265|REMUX|WEB-DL|BluRay|HDTV)\b`)
-	multipleSpaceRegex = regexp.MustCompile(`\s+`)
+	illegalCharsRegex         = regexp.MustCompile(`[\\/:*?"<>|]`)
+	qualityTagRegex           = regexp.MustCompile(`(?i)\b(4K|UHD|2160p|1080p|720p|480p|HDR|HDR10|DV|Dolby Vision|HEVC|H265|x265|REMUX|WEB-DL|BluRay|HDTV)\b`)
+	consecutiveYearGroupRegex = regexp.MustCompile(`(?:\s*[\(\[]\s*(?:19\d{2}|20\d{2})\s*[\)\]]){2,}`)
+	parenthesizedYearRegex    = regexp.MustCompile(`[\(\[]\s*(19\d{2}|20\d{2})\s*[\)\]]`)
+	multipleSpaceRegex        = regexp.MustCompile(`\s+`)
 )
 
 // SanitizeFileName cleans a string to be safe for Linux/Windows filesystems.
@@ -20,9 +22,20 @@ func SanitizeFileName(name string) string {
 	return cleaned
 }
 
-// CleanTitle removes quality/resolution/codec tags from a movie or series title for clean folder naming.
+// CleanTitle removes quality/resolution/codec tags and collapses duplicate parenthesized year tags.
 func CleanTitle(title string) string {
 	cleaned := qualityTagRegex.ReplaceAllString(title, "")
+
+	// Collapse repeated parenthesized/bracketed year groups (e.g. "(2022) (2022)" -> "(2022)")
+	cleaned = consecutiveYearGroupRegex.ReplaceAllStringFunc(cleaned, func(match string) string {
+		submatches := parenthesizedYearRegex.FindAllStringSubmatch(match, -1)
+		if len(submatches) > 0 {
+			// Extract first year and collapse to single "(YYYY)"
+			return fmt.Sprintf(" (%s)", submatches[0][1])
+		}
+		return match
+	})
+
 	cleaned = strings.TrimSpace(cleaned)
 	cleaned = strings.TrimPrefix(cleaned, ":")
 	cleaned = strings.TrimSuffix(cleaned, ":")

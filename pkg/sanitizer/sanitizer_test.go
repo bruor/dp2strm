@@ -14,6 +14,13 @@ func TestCleanTitle(t *testing.T) {
 		{"The Movie 1080p HEVC WEB-DL", "The Movie"},
 		{"Plain Title (2020)", "Plain Title (2020)"},
 		{"+1 (2013)", "+1 (2013)"},
+		{"Yahoo+ (2022) (2022)", "Yahoo+ (2022)"},
+		{"#Horror (2015) (2015)", "#Horror (2015)"},
+		{"102 Dalmatians (2000) (2000)", "102 Dalmatians (2000)"},
+		{"Deep Purple California Jam 1974 (1974) (1974)", "Deep Purple California Jam 1974 (1974)"},
+		{"Bracketed Year [2022] (2022)", "Bracketed Year (2022)"},
+		{"Fantasia 2000 (2000)", "Fantasia 2000 (2000)"},
+		{"Fear Street 1978 (2021)", "Fear Street 1978 (2021)"},
 	}
 
 	for _, tt := range tests {
@@ -35,6 +42,8 @@ func TestBuildMovieFolderName(t *testing.T) {
 		{"The Thing (1982)", 1982, "1091", "The Thing (1982) [tmdbid=1091]"}, // Prevents year duplication!
 		{"Becoming", 2020, "699280", "Becoming (2020) [tmdbid=699280]"},
 		{"Becoming", 2020, "526052", "Becoming (2020) [tmdbid=526052]"},
+		{CleanTitle("Yahoo+ (2022) (2022)"), 2022, "1002442", "Yahoo+ (2022) [tmdbid=1002442]"},
+		{CleanTitle("102 Dalmatians (2000) (2000)"), 2000, "10481", "102 Dalmatians (2000) [tmdbid=10481]"},
 	}
 
 	for _, tt := range tests {
