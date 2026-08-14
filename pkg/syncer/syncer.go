@@ -56,7 +56,9 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 
 	for {
 		log.Printf("[Syncer] Fetching movie page %d (size %d)...", page, pageSize)
+		apiStart := time.Now()
 		resp, err := s.client.FetchMoviePage(ctx, page, pageSize)
+		apiDuration := time.Since(apiStart)
 		if err != nil {
 			return fmt.Errorf("failed to fetch movie page %d: %w", page, err)
 		}
@@ -68,7 +70,10 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, concurrency)
 		var mu sync.Mutex
+		var totalArtDuration time.Duration
+		var totalDiskDuration time.Duration
 
+		pageStart := time.Now()
 		for _, movie := range resp.Results {
 			totalProcessed++
 
@@ -80,7 +85,7 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 					wg.Done()
 				}()
 
-				created, preserved, err := s.processSingleMovie(ctx, m, dryRun)
+				created, preserved, artDur, diskDur, err := s.processSingleMovieProfiled(ctx, m, dryRun)
 				if err != nil {
 					log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", m.Name, m.ID, err)
 					return
@@ -89,10 +94,16 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 				mu.Lock()
 				totalCreated += created
 				totalPreserved += preserved
+				totalArtDuration += artDur
+				totalDiskDuration += diskDur
 				mu.Unlock()
 			}(movie)
 		}
 		wg.Wait()
+		pageDuration := time.Since(pageStart)
+
+		log.Printf("[Syncer] Movie Page %d Complete (%d items) in %v | API Fetch: %v | Processing: %v (Artwork: %v, Disk: %v)",
+			page, len(resp.Results), apiDuration+pageDuration, apiDuration, pageDuration, totalArtDuration, totalDiskDuration)
 
 		time.Sleep(100 * time.Millisecond) // Gentle CPU pause for Dispatcharr server
 
@@ -304,82 +315,54 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 }
 
 func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, err error) {
+	c, p, _, _, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
+	return c, p, err
+}
+
+func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, artDur, diskDur time.Duration, err error) {
 	cleanTitle := sanitizer.CleanTitle(movie.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
 
-	relations := movie.Providers
-	if len(relations) == 0 {
-		var pErr error
-		relations, pErr = s.client.FetchMovieProviders(ctx, movie.ID)
-		if pErr != nil {
-			return 0, 0, fmt.Errorf("failed to fetch providers for movie ID %d: %w", movie.ID, pErr)
-		}
-	}
-
-	if len(relations) == 0 {
-		return 0, 0, nil
-	}
-
-	classified := versioning.ClassifyMovieStreams(relations, cleanTitle, movie.Year)
-
 	if dryRun {
-		log.Printf("[DRY-RUN] Movie '%s' (TMDB %s) -> Folder: %s (%d versions)", cleanTitle, movie.TMDBID, folderName, len(classified))
-		return len(classified), 0, nil
+		log.Printf("[DRY-RUN] Movie '%s' (TMDB %s) -> Folder: %s", cleanTitle, movie.TMDBID, folderName)
+		return 1, 0, 0, 0, nil
 	}
 
-	// Generate .nfo metadata file
+	diskStart := time.Now()
+	// 1. Generate .nfo metadata file
 	nfoPath := filepath.Join(movieDir, fmt.Sprintf("%s.nfo", sanitizer.SanitizeFileName(cleanTitle)))
 	nfoUpdated, err := nfo.WriteMovieNFO(nfoPath, movie)
-	if err != nil {
-		log.Printf("[Syncer] Error writing NFO for %s: %v", cleanTitle, err)
-	} else if nfoUpdated {
-		created++
-	} else {
-		preserved++
-	}
-
-	artCreated := artwork.DownloadMovieArtwork(movieDir, movie)
-	created += artCreated
-
-	// Save variants to database & write clean extensionless .strm files
-	for _, v := range classified {
-		variantKey := "base"
-		if strings.Contains(v.Filename, "- 4K") {
-			variantKey = "4k"
-		}
-
-		strmPath := filepath.Join(movieDir, v.Filename)
-		proxyURL := strm.GenerateMovieProxyURL(s.cfg, movie.ID, variantKey)
-
-		// Record real stream target URL in SQLite
-		realTargetURL := fmt.Sprintf("%s/movie/%s/%s/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, v.StreamID, v.Container)
-		if s.database != nil {
-			s.database.SaveStreamVariant(&db.StreamVariant{
-				ItemID:             movie.ID,
-				ItemType:           "movie",
-				VariantKey:         variantKey,
-				TargetURL:          realTargetURL,
-				Quality:            string(v.Quality),
-				StreamID:           v.StreamID,
-				ContainerExtension: v.Container,
-			})
-		}
-
-		updated, err := strm.WriteSTRMFile(strmPath, proxyURL)
-		if err != nil {
-			log.Printf("[Syncer] Error writing STRM file %s: %v", strmPath, err)
-			continue
-		}
-
-		if updated {
+	if err == nil {
+		if nfoUpdated {
 			created++
 		} else {
 			preserved++
 		}
 	}
 
-	return created, preserved, nil
+	// 2. Write clean extensionless .strm file pointing to /play/movie/{movie_id}
+	strmFilename := fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(cleanTitle))
+	strmPath := filepath.Join(movieDir, strmFilename)
+	proxyURL := strm.GenerateMovieProxyURL(s.cfg, movie.ID, "base")
+
+	updated, err := strm.WriteSTRMFile(strmPath, proxyURL)
+	if err != nil {
+		log.Printf("[Syncer] Error writing movie STRM %s: %v", strmPath, err)
+	} else if updated {
+		created++
+	} else {
+		preserved++
+	}
+	diskDur = time.Since(diskStart)
+
+	// 3. Download artwork if logo/backdrop present
+	artStart := time.Now()
+	artCreated := artwork.DownloadMovieArtwork(movieDir, movie)
+	artDur = time.Since(artStart)
+	created += artCreated
+
+	return created, preserved, artDur, diskDur, nil
 }
 
 func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
