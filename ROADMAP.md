@@ -25,6 +25,12 @@ This document tracks all completed features and remaining roadmap items for `dp2
 
 ## 🨨 Queued / Roadmap Features (Agreed Architecture Specifications)
 
+- [ ] **`dp2strm` Playback Handler & URL Obfuscation Architecture (`/play/...`)**:
+  - **Rule**: All `.strm` files written to disk MUST point strictly to `dp2strm`'s local playback endpoints (`http://dp2strm:8080/play/movie/...` and `http://dp2strm:8080/play/series/...`).
+  - **Zero Disk Edits on Upstream Changes**: When upstream stream IDs change in Dispatcharr or when `STREAMCACHE_URL` mode is toggled on/off, `.strm` files on disk remain 100% untouched. Disk files are ONLY modified on structural changes (e.g. new 4K version added/removed, or new episode released).
+  - **Dynamic 302 Redirect**: When a client requests playback (`GET /play/...`), `dp2strm` looks up the current backing stream URL in SQLite/memory. If `STREAMCACHE_URL` is set, it 302 redirects to `<STREAMCACHE_URL>/u/<base64_url>`; otherwise, it 302 redirects to the direct Dispatcharr URL.
+  - **Complete Credential Obfuscation**: Upstream subscriber credentials (`agy/agypassword`) and raw Dispatcharr URLs are NEVER written to disk or exposed in Emby's library.
+
 - [ ] **Primary Stream Defaulting for `streamcache` Deduplication**:
   - **Rule**: The base `.strm` file (`Movie.strm` / `S01E01.strm`) ALWAYS points to the primary standardized stream.
   - **Why**: 95%+ of users click "Play" without opening the Version dropdown menu. Forcing all base files to hit the primary stream URL maximizes shared `streamcache` hit ratios and prevents spinning up duplicate upstream provider streams.
@@ -48,7 +54,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - **`last_modified` Timestamp Check**: Check Dispatcharr's `last_modified` series timestamp. If unchanged, skip processing (`0 disk edits`, `0 Emby rescans`).
 
 - [ ] **Predictive Fetch-Ahead Engine ("Tap & Bail" for Next X Episodes)**:
-  - When a user plays `S01E01`, spawn an async background worker (500ms HTTP GET timeout) to pre-fetch upcoming episodes (`S01E02`, `S01E03` based on `FETCH_AHEAD_COUNT: 2`) to hydrate `streamcache`.
+  - When a user plays `S01E01`, spawn an async background worker (500ms HTTP GET timeout) targeting `http://localhost:8080/play/series/{series_id}/1/2.mkv` to pre-fetch upcoming episodes (`S01E02`, `S01E03` based on `FETCH_AHEAD_COUNT: 2`) to hydrate `streamcache`.
 
 - [ ] **Retention Grace Period & Cleanup Manager (`RETENTION_GRACE_DAYS`)**:
   - Soft-delete state tracker map in SQLite that buffers deleted streams for 7 days before removing `.strm` files from disk when content disappears from Dispatcharr.
@@ -63,7 +69,6 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - **Priority**: `SYNC_CRON` ➜ `SYNC_INTERVAL` ➜ `SYNC_INTERVAL=0` / `--sync-once`.
 
 - [ ] **`streamcache` Base64 URL Path Rewrite Rules**:
-  - **Rule**: When `STREAMCACHE_URL` is configured (e.g. `http://streamcache:8080`), `dp2strm` rewrites direct Dispatcharr content URLs into URL-safe Base64 encoded paths:
+  - **Rule**: When `STREAMCACHE_URL` is configured (e.g. `http://streamcache:8080`), `dp2strm`'s playback handler 302 redirects to Base64-encoded `streamcache` paths:
     `<STREAMCACHE_URL>/u/<base64_url>`
   - **Example**: `http://streamcache:8080/u/aHR0cHM6Ly9kcC5leGFtcGxlLmNvbS9tb3ZpZS9hZ3kvYWd5cGFzc3dvcmQvMTA1ODkwMi5ta3Y=`
-  - **Why**: Hides plain-text subscriber credentials from `.strm` files on disk and media player logs while providing a clean, character-safe URL path.
