@@ -175,48 +175,122 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 
 // SyncSeries Pass 1: Generates initial lightweight TV series tree with S01E01 Activation placeholder.
 func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
-	log.Println("[Syncer] Starting Pass 1 TV Series Sync Pass...")
+	log.Println("[Syncer] Starting Pass 1 Parallel TV Series Sync Pass...")
 	start := time.Now()
 
-	totalProcessed := 0
-	totalCreated := 0
-	totalPreserved := 0
-	page := 1
-	pageSize := 100
+	pageSize := s.cfg.PageSize
+	if pageSize <= 0 {
+		pageSize = 1000
+	}
+	concurrency := s.cfg.MaxProbeConcurrency
+	if concurrency <= 0 {
+		concurrency = 5
+	}
 
-	for {
-		log.Printf("[Syncer] Fetching series page %d (size %d)...", page, pageSize)
-		resp, err := s.client.FetchSeriesPage(ctx, page, pageSize)
-		if err != nil {
-			return fmt.Errorf("failed to fetch series page %d: %w", page, err)
+	// Fetch Page 1 to determine total count & pages
+	log.Printf("[Syncer] Fetching series page 1 (size %d)...", pageSize)
+	apiStart := time.Now()
+	firstResp, err := s.client.FetchSeriesPage(ctx, 1, pageSize)
+	apiDuration := time.Since(apiStart)
+	if err != nil {
+		return fmt.Errorf("failed to fetch series page 1: %w", err)
+	}
+	log.Printf("[Syncer] Series Page 1 API Fetch took %v", apiDuration)
+
+	if len(firstResp.Results) == 0 {
+		log.Println("[Syncer] Pass 1 Series Sync Complete: 0 series found.")
+		return nil
+	}
+
+	totalCount := firstResp.Count
+	if totalCount <= 0 {
+		totalCount = len(firstResp.Results)
+	}
+	totalPages := (totalCount + pageSize - 1) / pageSize
+
+	log.Printf("[Syncer] Found %d total series across %d pages.", totalCount, totalPages)
+
+	var totalProcessed int64
+	var totalCreated int64
+	var totalPreserved int64
+
+	processPage := func(pageNum int, seriesList []models.Series) {
+		atomic.AddInt64(&totalProcessed, int64(len(seriesList)))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, concurrency)
+
+		var pCreated, pPreserved int64
+		var mu sync.Mutex
+
+		pStart := time.Now()
+		for _, srs := range seriesList {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(series models.Series) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				c, p, err := s.processSingleSeriesPass1(ctx, series, dryRun)
+				if err != nil {
+					log.Printf("[Syncer] Warning: Error processing series '%s' (ID %d): %v", series.Name, series.ID, err)
+					return
+				}
+				mu.Lock()
+				pCreated += int64(c)
+				pPreserved += int64(p)
+				mu.Unlock()
+			}(srs)
 		}
+		wg.Wait()
+		pDuration := time.Since(pStart)
 
-		if len(resp.Results) == 0 {
-			break
+		atomic.AddInt64(&totalCreated, pCreated)
+		atomic.AddInt64(&totalPreserved, pPreserved)
+
+		log.Printf("[Syncer] Series Page %d/%d Complete (%d items) in %v",
+			pageNum, totalPages, len(seriesList), pDuration)
+	}
+
+	// Process Page 1 immediately
+	processPage(1, firstResp.Results)
+
+	// Fetch & process remaining pages using parallel page workers
+	if totalPages > 1 {
+		pageWorkers := s.cfg.PageWorkers
+		if pageWorkers <= 0 {
+			pageWorkers = 4
 		}
-
-		for _, series := range resp.Results {
-			totalProcessed++
-
-			created, preserved, err := s.processSingleSeriesPass1(ctx, series, dryRun)
-			if err != nil {
-				log.Printf("[Syncer] Warning: Error processing series '%s' (ID %d): %v", series.Name, series.ID, err)
-				continue
+		pageChan := make(chan int, totalPages)
+		for p := 2; p <= totalPages; p++ {
+			if s.cfg.BatchSize > 0 && (p-1)*pageSize >= s.cfg.BatchSize {
+				break
 			}
-
-			totalCreated += created
-			totalPreserved += preserved
+			pageChan <- p
 		}
+		close(pageChan)
 
-		if resp.Next == nil {
-			break
+		var pageWg sync.WaitGroup
+		for w := 0; w < pageWorkers; w++ {
+			pageWg.Add(1)
+			go func() {
+				defer pageWg.Done()
+				for pageNum := range pageChan {
+					fStart := time.Now()
+					resp, err := s.client.FetchSeriesPage(ctx, pageNum, pageSize)
+					fDuration := time.Since(fStart)
+					if err != nil {
+						log.Printf("[Syncer] Warning: Error fetching series page %d: %v", pageNum, err)
+						continue
+					}
+					if len(resp.Results) > 0 {
+						processPage(pageNum, resp.Results)
+						log.Printf("[Syncer] Series Page %d API Fetch took %v", pageNum, fDuration)
+					}
+				}
+			}()
 		}
-		page++
-
-		if s.cfg.BatchSize > 0 && totalProcessed >= s.cfg.BatchSize {
-			log.Printf("[Syncer] Reached configured batch size limit (%d series). Stopping series sync pass.", s.cfg.BatchSize)
-			break
-		}
+		pageWg.Wait()
 	}
 
 	duration := time.Since(start)
