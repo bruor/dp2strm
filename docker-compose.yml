@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   dp2strm:
     build:
