@@ -30,6 +30,16 @@ type SeriesState struct {
 	LastCheckedAt      *time.Time
 }
 
+// MovieState represents the database record for a movie activation state.
+type MovieState struct {
+	MovieID       int
+	TMDBID        string
+	Title         string
+	IsActivated   bool
+	ActivatedAt   *time.Time
+	LastCheckedAt *time.Time
+}
+
 // StreamVariant represents a 302 target stream mapping for a movie or episode variant.
 type StreamVariant struct {
 	ItemID             int
@@ -97,6 +107,15 @@ func (d *DB) initSchema() error {
 		last_checked_at DATETIME
 	);
 
+	CREATE TABLE IF NOT EXISTS movie_state (
+		movie_id INTEGER PRIMARY KEY,
+		tmdb_id TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL DEFAULT '',
+		is_activated BOOLEAN NOT NULL DEFAULT 0,
+		activated_at DATETIME,
+		last_checked_at DATETIME
+	);
+
 	CREATE TABLE IF NOT EXISTS stream_variants (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		item_id INTEGER NOT NULL,
@@ -120,6 +139,7 @@ func (d *DB) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_series_state_activated ON series_state(is_activated, status);
+	CREATE INDEX IF NOT EXISTS idx_movie_state_activated ON movie_state(is_activated);
 	CREATE INDEX IF NOT EXISTS idx_stream_variants_lookup ON stream_variants(item_id, item_type, season_num, episode_num, variant_key);
 	`
 
@@ -205,6 +225,46 @@ func (d *DB) GetActiveSeriesToSync(currentDate string) ([]int, error) {
 		}
 	}
 	return ids, nil
+}
+
+// --- Movie State Queries ---
+
+// GetMovieState retrieves the movie state by movie ID.
+func (d *DB) GetMovieState(movieID int) (*MovieState, error) {
+	query := `SELECT movie_id, tmdb_id, title, is_activated, activated_at, last_checked_at FROM movie_state WHERE movie_id = ?`
+	row := d.conn.QueryRow(query, movieID)
+
+	var m MovieState
+	var actAt, chkAt sql.NullTime
+	err := row.Scan(&m.MovieID, &m.TMDBID, &m.Title, &m.IsActivated, &actAt, &chkAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if actAt.Valid {
+		m.ActivatedAt = &actAt.Time
+	}
+	if chkAt.Valid {
+		m.LastCheckedAt = &chkAt.Time
+	}
+	return &m, nil
+}
+
+// SetMovieActivated marks a movie as activated by the user and records the activation timestamp.
+func (d *DB) SetMovieActivated(movieID int, tmdbID, title string) error {
+	now := time.Now()
+	query := `
+	INSERT INTO movie_state (movie_id, tmdb_id, title, is_activated, activated_at, last_checked_at)
+	VALUES (?, ?, ?, 1, ?, ?)
+	ON CONFLICT(movie_id) DO UPDATE SET
+		is_activated = 1,
+		activated_at = COALESCE(movie_state.activated_at, EXCLUDED.activated_at),
+		last_checked_at = EXCLUDED.last_checked_at;
+	`
+	_, err := d.conn.Exec(query, movieID, tmdbID, title, now, now)
+	return err
 }
 
 // --- Stream Variants Queries (Sub-50ms 302 Redirect Target Lookups) ---

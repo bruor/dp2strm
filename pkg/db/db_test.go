@@ -42,6 +42,28 @@ func TestSQLiteStateEngine(t *testing.T) {
 		t.Errorf("Expected IsActivated=true, got false")
 	}
 
+	// Test Movie Activation State
+	movieID := 1058902
+	mst, err := d.GetMovieState(movieID)
+	if err != nil {
+		t.Fatalf("Error querying unactivated movie: %v", err)
+	}
+	if mst != nil {
+		t.Fatalf("Expected nil state for unactivated movie, got: %+v", mst)
+	}
+
+	if err := d.SetMovieActivated(movieID, "19995", "Avatar"); err != nil {
+		t.Fatalf("Failed to set movie activated: %v", err)
+	}
+
+	mst, err = d.GetMovieState(movieID)
+	if err != nil || mst == nil {
+		t.Fatalf("Expected movie state after activation, got: %+v, err: %v", mst, err)
+	}
+	if !mst.IsActivated {
+		t.Errorf("Expected movie IsActivated=true, got false")
+	}
+
 	// Update metadata to Continuing
 	if err := d.UpdateSeriesMetadata(seriesID, "Continuing", 24, "2026-08-20", 1786616158); err != nil {
 		t.Fatalf("Failed to update series metadata: %v", err)

@@ -73,8 +73,24 @@ func main() {
 		syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
 	}
 
+	onMovieActivation := func(movieID int) (string, error) {
+		log.Printf("[Activation] User played Movie ID %d! Resolving provider streams and quality variants...", movieID)
+		mCtx, mCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer mCancel()
+
+		cleanTitle := fmt.Sprintf("Movie %d", movieID)
+		movieDir := filepath.Join(cfg.OutputDir, "Movies", cleanTitle)
+		_, _, baseTargetURL, err := syncEngine.PopulateActivatedMovie(mCtx, movieID, cleanTitle, movieDir, 0, "")
+		if err != nil {
+			log.Printf("[Activation] Error resolving movie ID %d: %v", movieID, err)
+			return "", err
+		}
+		return baseTargetURL, nil
+	}
+
 	// 2. Start HTTP Playback Handler Server
 	proxyServer := proxy.NewServer(cfg, database, onActivation)
+	proxyServer.SetMovieActivationCallback(onMovieActivation)
 	proxyServer.Start()
 
 	ctx, cancel := context.WithCancel(context.Background())

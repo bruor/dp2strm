@@ -105,4 +105,29 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Errorf("Expected activation callback to be triggered asynchronously")
 	}
+
+	// 4. Test Movie Activation Callback for Uncached Movie (Unactivated)
+	unactivatedMovieID := 99999
+	unactivatedTarget := "https://dp.example.com/movie/agy/agypassword/99999.mkv"
+	srv.SetMovieActivationCallback(func(mid int) (string, error) {
+		if mid == unactivatedMovieID {
+			database.SaveStreamVariant(&db.StreamVariant{
+				ItemID: mid, ItemType: "movie", VariantKey: "base", TargetURL: unactivatedTarget, StreamID: "99999",
+			})
+			return unactivatedTarget, nil
+		}
+		return "", nil
+	})
+
+	req = httptest.NewRequest("GET", "/play/movie/99999", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for unactivated movie play, got %d", rec.Code)
+	}
+	expectedUnactLoc := "http://streamcache:8080?url=" + url.QueryEscape(unactivatedTarget)
+	if loc := rec.Header().Get("Location"); loc != expectedUnactLoc {
+		t.Errorf("Expected 302 Location %s, got %s", expectedUnactLoc, loc)
+	}
 }

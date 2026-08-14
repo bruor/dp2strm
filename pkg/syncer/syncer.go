@@ -20,6 +20,7 @@ import (
 	"dp2strm/pkg/nfo"
 	"dp2strm/pkg/sanitizer"
 	"dp2strm/pkg/strm"
+	"dp2strm/pkg/versioning"
 )
 
 type Syncer struct {
@@ -490,6 +491,16 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	} else {
 		preserved++
 	}
+
+	// Check if this movie has already been activated by user
+	if s.database != nil {
+		st, _ := s.database.GetMovieState(movie.ID)
+		if st != nil && st.IsActivated {
+			c, p, _, err := s.PopulateActivatedMovie(ctx, movie.ID, cleanTitle, movieDir, movie.Year, movie.TMDBID)
+			diskDur = time.Since(diskStart)
+			return created + c, preserved + p, 0, diskDur, err
+		}
+	}
 	diskDur = time.Since(diskStart)
 
 	// 3. Download artwork if logo/backdrop present
@@ -499,6 +510,61 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	created += artCreated
 
 	return created, preserved, artDur, diskDur, nil
+}
+
+// PopulateActivatedMovie resolves backing provider streams for a movie, classifies quality tiers, saves variants to SQLite, writes secondary variant .strm files on disk, and marks movie as activated.
+func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanTitle, movieDir string, year int, tmdbID string) (created, preserved int, baseTargetURL string, err error) {
+	relations, err := s.client.FetchMovieProviders(ctx, movieID)
+	if err != nil {
+		log.Printf("[Syncer] Warning: Could not fetch provider relations for movie ID %d: %v", movieID, err)
+	}
+
+	if len(relations) > 0 {
+		classified := versioning.ClassifyMovieStreams(relations, cleanTitle, year)
+		for _, v := range classified {
+			varKey := "base"
+			if v.Quality == models.Quality4K {
+				varKey = "4k"
+			}
+
+			realTargetURL := fmt.Sprintf("%s/movie/%s/%s/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, v.StreamID, v.Container)
+			if varKey == "base" && baseTargetURL == "" {
+				baseTargetURL = realTargetURL
+			}
+
+			if s.database != nil {
+				_ = s.database.SaveStreamVariant(&db.StreamVariant{
+					ItemID:             movieID,
+					ItemType:           "movie",
+					VariantKey:         varKey,
+					TargetURL:          realTargetURL,
+					Quality:            string(v.Quality),
+					StreamID:           v.StreamID,
+					ContainerExtension: v.Container,
+				})
+			}
+
+			// If secondary variant (e.g. 4K), write secondary .strm file on disk for Emby's version dropdown menu
+			if varKey != "base" {
+				secStrmPath := filepath.Join(movieDir, v.Filename)
+				secProxyURL := strm.GenerateMovieProxyURL(s.cfg, movieID, varKey)
+				updated, wErr := strm.WriteSTRMFile(secStrmPath, secProxyURL)
+				if wErr == nil {
+					if updated {
+						created++
+					} else {
+						preserved++
+					}
+				}
+			}
+		}
+	}
+
+	if s.database != nil {
+		_ = s.database.SetMovieActivated(movieID, tmdbID, cleanTitle)
+	}
+
+	return created, preserved, baseTargetURL, nil
 }
 
 func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {

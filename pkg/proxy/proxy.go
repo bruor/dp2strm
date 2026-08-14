@@ -17,12 +17,16 @@ import (
 // ActivationCallback is a function signature for background series activation processing.
 type ActivationCallback func(seriesID int)
 
+// MovieActivationCallback is a function signature for background movie activation and provider resolution.
+type MovieActivationCallback func(movieID int) (baseTargetURL string, err error)
+
 // Server is the HTTP client playback handler (issues HTTP 302 redirects to Dispatcharr / streamcache).
 type Server struct {
-	cfg          *models.Config
-	database     *db.DB
-	onActivation ActivationCallback
-	httpServer   *http.Server
+	cfg               *models.Config
+	database          *db.DB
+	onActivation      ActivationCallback
+	onMovieActivation MovieActivationCallback
+	httpServer        *http.Server
 }
 
 // NewServer creates a new HTTP client playback handler server.
@@ -48,6 +52,11 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 	}
 
 	return srv
+}
+
+// SetMovieActivationCallback sets the callback function for movie provider resolution and activation.
+func (s *Server) SetMovieActivationCallback(cb MovieActivationCallback) {
+	s.onMovieActivation = cb
 }
 
 // Start launches the HTTP server asynchronously.
@@ -114,7 +123,19 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 		targetURL, _ = s.database.GetMovieTargetURL(movieID, variantKey)
 	}
 
-	// 2. Fallback to direct Dispatcharr URL if not found in database
+	// 2. If target URL is missing or unactivated, trigger provider resolution callback
+	if targetURL == "" && s.onMovieActivation != nil {
+		resolvedBaseURL, resErr := s.onMovieActivation(movieID)
+		if resErr == nil && resolvedBaseURL != "" {
+			if variantKey == "base" {
+				targetURL = resolvedBaseURL
+			} else if s.database != nil {
+				targetURL, _ = s.database.GetMovieTargetURL(movieID, variantKey)
+			}
+		}
+	}
+
+	// 3. Fallback to direct Dispatcharr URL if not found in database
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("%s/movie/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID)
 	}
