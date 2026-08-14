@@ -9,7 +9,6 @@ type Config struct {
 	XCUser                string        `json:"xc_user"`
 	XCPassword            string        `json:"xc_password"`
 	OutputDir             string        `json:"output_dir"`
-	DBPath                string        `json:"db_path"`
 	StreamcacheURL        string        `json:"streamcache_url"`
 	FetchAheadCount       int           `json:"fetch_ahead_count"`
 	RetentionGraceDays    int           `json:"retention_grace_days"`

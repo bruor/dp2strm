@@ -123,7 +123,6 @@ services:
 | `DISPATCHARR_XC_USER` | `""` | Dispatcharr XC user account username |
 | `DISPATCHARR_XC_PASSWORD` | `""` | Dispatcharr XC user account password |
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
-| `DB_PATH` | `/data/db/dp2strm.db` | Target container path for SQLite database file |
 | `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
 | `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |

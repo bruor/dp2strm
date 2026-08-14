@@ -19,7 +19,6 @@ services:
 
       # --- Path & Network Handler Options ---
       - OUTPUT_DIR=/data/strm
-      - DB_PATH=/data/db/dp2strm.db
       - PORT=8080
       - URL=http://dp2strm:8080
 

@@ -42,9 +42,9 @@ func main() {
 		log.Println("[Warning] No API key specified in DISPATCHARR_API_KEY environment variable.")
 	}
 
-	// 1. Open SQLite database engine
-	dbPath := cfg.DBPath
-	if dbPath == "" {
+	// 1. Open SQLite database engine (/data/db/dp2strm.db)
+	dbPath := "/data/db/dp2strm.db"
+	if _, err := os.Stat("/data/db"); os.IsNotExist(err) {
 		dbPath = filepath.Join(cfg.OutputDir, "dp2strm.db")
 	}
 	database, err := db.Open(dbPath)

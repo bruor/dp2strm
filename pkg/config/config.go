@@ -53,9 +53,6 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("OUTPUT_DIR"); v != "" {
 		cfg.OutputDir = v
 	}
-	if v := os.Getenv("DB_PATH"); v != "" {
-		cfg.DBPath = v
-	}
 	if v := os.Getenv("STREAMCACHE_URL"); v != "" {
 		cfg.StreamcacheURL = v
 	}
