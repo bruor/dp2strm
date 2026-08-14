@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,12 +107,36 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	targetURL := fmt.Sprintf("%s/series/agy/agypassword/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), targetID, ext)
 
 	log.Printf("[Proxy] Series %s (Target %s) -> HTTP 302 Redirect: %s", seriesID, targetID, targetURL)
+
+	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail)
+	if len(parts) >= 3 && s.cfg.FetchAheadCount > 0 {
+		seasonNum, sErr := strconv.Atoi(parts[1])
+		epNum, eErr := strconv.Atoi(targetID)
+		if sErr == nil && eErr == nil {
+			go func(sid string, s, e, count int) {
+				for i := 1; i <= count; i++ {
+					nextEp := e + i
+					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					prefetchURL := fmt.Sprintf("%s/play/series/%s/%d/%d.mkv", strings.TrimRight(s.cfg.ProxyPublicURL, "/"), sid, s, nextEp)
+					req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
+					if err == nil {
+						resp, pErr := http.DefaultClient.Do(req)
+						if pErr == nil && resp != nil {
+							resp.Body.Close()
+						}
+					}
+					cancel()
+				}
+			}(seriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+		}
+	}
+
 	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	seriesID := r.URL.Query().Get("series_id")
-	log.Printf("[Proxy] Activation episode (S00E00) triggered for Series ID: %s", seriesID)
+	log.Printf("[Proxy] Activation episode (S01E00) triggered for Series ID: %s", seriesID)
 
 	// Async pre-fetch S01E01 to hydrate Dispatcharr / streamcache ahead of time (500ms timeout)
 	if seriesID != "" {

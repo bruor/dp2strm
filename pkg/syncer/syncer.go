@@ -156,10 +156,10 @@ func (s *Syncer) processSingleSeries(ctx context.Context, series models.Series, 
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", series.ID, err)
 	}
 
-	// Write Season 00 Activation STRM file for cache pre-hydration
-	specialsDir := filepath.Join(seriesDir, "Season 00")
-	activateFilename := fmt.Sprintf("%s - S00E00 - Pre-Fetch Cache Activation.strm", sanitizer.SanitizeFileName(cleanTitle))
-	activatePath := filepath.Join(specialsDir, activateFilename)
+	// Write Season 01 Activation STRM file (S01E00) for cache pre-hydration
+	season1Dir := filepath.Join(seriesDir, "Season 01")
+	activateFilename := fmt.Sprintf("%s - S01E00 - Pre-Fetch Cache Activation.strm", sanitizer.SanitizeFileName(cleanTitle))
+	activatePath := filepath.Join(season1Dir, activateFilename)
 	activateURL := fmt.Sprintf("%s/activate?series_id=%d", s.cfg.ProxyPublicURL, series.ID)
 	if actUpdated, err := strm.WriteSTRMFile(activatePath, activateURL); err == nil {
 		if actUpdated {
