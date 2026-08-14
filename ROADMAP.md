@@ -19,7 +19,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **TV Series Activation Episode (`S00E00`)**: Creates `Season 00/Show Name - S00E00 - Pre-Fetch Cache Activation.strm` and fires async `S01E01` pre-fetch.
 - [x] **Cloud-Native Environment Variable Mode**: 100% configurable via Docker env vars without requiring `config.yaml`.
 - [x] **Docker Packaging (`Dockerfile` & `docker-compose.yml`)**: Multi-stage Docker build + well-commented `docker-compose.yml`.
-- [x] **Unit Test Suite (`100% PASS`)**: Sanitizer, versioning, STRM `mtime`, NFO updates, artwork hash tracking, configless env vars, and semantic URLs.
+- [x] **Category / Group / Adult Filtering Managed in Dispatcharr**: Category, group, and adult content filtering is configured and enforced directly within Dispatcharr's upstream VOD/Series management rules. `dp2strm` ingests the pre-filtered media tree returned by Dispatcharr's API.
 
 ---
 
