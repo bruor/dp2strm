@@ -62,5 +62,8 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - **Timezone Awareness**: Parse `TZ` environment variable (e.g. `TZ=America/New_York`) using Go's `import _ "time/tzdata"` to evaluate execution times in the user's local timezone with automatic Daylight Saving Time (DST) handling.
   - **Priority**: `SYNC_CRON` ➜ `SYNC_INTERVAL` ➜ `SYNC_INTERVAL=0` / `--sync-once`.
 
-- [ ] **`streamcache` Transparent URL Rewrite Rules**:
-  - Rewrite direct Dispatcharr content URLs to URL-encoded `STREAMCACHE_URL` endpoints (e.g., `http://streamcache:8080/stream?url=https%3A%2F%2F...`) when `STREAMCACHE_URL` is configured.
+- [ ] **`streamcache` Base64 URL Path Rewrite Rules**:
+  - **Rule**: When `STREAMCACHE_URL` is configured (e.g. `http://streamcache:8080`), `dp2strm` rewrites direct Dispatcharr content URLs into URL-safe Base64 encoded paths:
+    `<STREAMCACHE_URL>/u/<base64_url>`
+  - **Example**: `http://streamcache:8080/u/aHR0cHM6Ly9kcC5leGFtcGxlLmNvbS9tb3ZpZS9hZ3kvYWd5cGFzc3dvcmQvMTA1ODkwMi5ta3Y=`
+  - **Why**: Hides plain-text subscriber credentials from `.strm` files on disk and media player logs while providing a clean, character-safe URL path.
