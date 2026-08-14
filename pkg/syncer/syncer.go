@@ -228,6 +228,7 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 		sem := make(chan struct{}, concurrency)
 
 		var pCreated, pPreserved int64
+		var pArtDur, pDiskDur time.Duration
 		var mu sync.Mutex
 
 		pStart := time.Now()
@@ -239,7 +240,7 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 					<-sem
 					wg.Done()
 				}()
-				c, p, err := s.processSingleSeriesPass1(ctx, series, dryRun)
+				c, p, aDur, dDur, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
 				if err != nil {
 					log.Printf("[Syncer] Warning: Error processing series '%s' (ID %d): %v", series.Name, series.ID, err)
 					return
@@ -247,6 +248,8 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 				mu.Lock()
 				pCreated += int64(c)
 				pPreserved += int64(p)
+				pArtDur += aDur
+				pDiskDur += dDur
 				mu.Unlock()
 			}(srs)
 		}
@@ -256,8 +259,8 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 		atomic.AddInt64(&totalCreated, pCreated)
 		atomic.AddInt64(&totalPreserved, pPreserved)
 
-		log.Printf("[Syncer] Series Page %d/%d Complete (%d items) in %v",
-			pageNum, totalPages, len(seriesList), pDuration)
+		log.Printf("[Syncer] Series Page %d/%d Complete (%d items) in %v | Processing: %v (Artwork: %v, Disk: %v)",
+			pageNum, totalPages, len(seriesList), pDuration, pDuration, pArtDur, pDiskDur)
 	}
 
 	// Process Page 1 immediately
@@ -312,17 +315,22 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	return nil
 }
 
-// processSingleSeriesPass1 creates the lightweight initial folder, tvshow.nfo, poster/fanart, and Season 01 Activation placeholder.
 func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, err error) {
+	c, p, _, _, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
+	return c, p, err
+}
+
+func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, artDur, diskDur time.Duration, err error) {
 	cleanTitle := sanitizer.CleanTitle(series.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
 
 	if dryRun {
 		log.Printf("[DRY-RUN] Pass 1 Series '%s' (TMDB %s) -> Folder: %s", cleanTitle, series.TMDBID, folderName)
-		return 1, 0, nil
+		return 1, 0, 0, 0, nil
 	}
 
+	diskStart := time.Now()
 	// 1. Write tvshow.nfo
 	tvshowNFOPath := filepath.Join(seriesDir, "tvshow.nfo")
 	nfoUpdated, err := nfo.WriteTVShowNFO(tvshowNFOPath, series)
@@ -334,20 +342,17 @@ func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Ser
 		}
 	}
 
-	// 2. Download poster.jpg & fanart.jpg
-	artCreated := artwork.DownloadSeriesArtwork(seriesDir, series)
-	created += artCreated
-
 	// Check if this series has already been activated by user
 	if s.database != nil {
 		st, _ := s.database.GetSeriesState(series.ID)
 		if st != nil && st.IsActivated {
-			// Already activated! Execute full episode sync for this series
-			return s.PopulateActivatedSeries(ctx, series.ID, cleanTitle, seriesDir)
+			c, p, err := s.PopulateActivatedSeries(ctx, series.ID, cleanTitle, seriesDir)
+			diskDur = time.Since(diskStart)
+			return c, p, 0, diskDur, err
 		}
 	}
 
-	// 3. Write Pass 1 Season 01 Activation Episode placeholder
+	// 2. Write Pass 1 Season 01 Activation Episode placeholder
 	season1Dir := filepath.Join(seriesDir, "Season 01")
 	actStrmFilename := fmt.Sprintf("%s - S01E01 - Play to Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle))
 	actStrmPath := filepath.Join(season1Dir, actStrmFilename)
@@ -355,7 +360,6 @@ func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Ser
 	actNFOFilename := fmt.Sprintf("%s - S01E01 - Play to Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle))
 	actNFOPath := filepath.Join(season1Dir, actNFOFilename)
 
-	// Playback URL points to dp2strm clean extensionless endpoint
 	actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, series.ID, 1, 1, "base")
 
 	strmUpdated, err := strm.WriteSTRMFile(actStrmPath, actProxyURL)
@@ -376,8 +380,15 @@ func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Ser
 			preserved++
 		}
 	}
+	diskDur = time.Since(diskStart)
 
-	return created, preserved, nil
+	// 3. Download poster.jpg & fanart.jpg
+	artStart := time.Now()
+	artCreated := artwork.DownloadSeriesArtwork(seriesDir, series)
+	artDur = time.Since(artStart)
+	created += artCreated
+
+	return created, preserved, artDur, diskDur, nil
 }
 
 // PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm files on disk.

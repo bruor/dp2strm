@@ -11,11 +11,11 @@ import (
 
 func TestGenerateSeriesProxyURL(t *testing.T) {
 	cfg := &models.Config{
-		ProxyPublicURL: "http://localhost:8080",
+		URL: "http://localhost:8080",
 	}
 
-	url := GenerateSeriesProxyURL(cfg, 30998, 1, 1, "mkv")
-	want := "http://localhost:8080/play/series/30998/1/1.mkv"
+	url := GenerateSeriesProxyURL(cfg, 30998, 1, 1, "base")
+	want := "http://localhost:8080/play/series/30998/1/1"
 	if url != want {
 		t.Errorf("GenerateSeriesProxyURL got %q; want %q", url, want)
 	}
