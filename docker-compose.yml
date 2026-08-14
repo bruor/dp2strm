@@ -10,7 +10,7 @@ services:
       - "8080:8080"
     volumes:
       # Persistent volume mount for generated .strm files, .nfo metadata, and poster/fanart artwork
-      - ./strm_output:/data/strm
+      - ./strm:/data/strm
     environment:
       # Dispatcharr REST API Base URL (Required)
       - DISPATCHARR_URL=${DISPATCHARR_URL:-https://your-dispatcharr-server.com}

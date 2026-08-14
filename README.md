@@ -40,7 +40,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - /mnt/media/strm_output:/data/strm
+      - ./strm:/data/strm
     environment:
       # Required Dispatcharr Connection
       - DISPATCHARR_URL=https://your-dispatcharr-server.com
@@ -48,8 +48,8 @@ services:
 
       # Path & Handler Options
       - OUTPUT_DIR=/data/strm
-      - PROXY_PORT=8080
-      - PROXY_PUBLIC_URL=http://dp2strm:8080
+      - PORT=8080
+      - URL=http://dp2strm:8080
 
       # Timezone & Scheduling
       - TZ=America/Toronto
