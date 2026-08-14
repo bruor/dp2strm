@@ -19,7 +19,6 @@ import (
 	"dp2strm/pkg/nfo"
 	"dp2strm/pkg/sanitizer"
 	"dp2strm/pkg/strm"
-	"dp2strm/pkg/versioning"
 )
 
 type Syncer struct {
