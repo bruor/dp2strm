@@ -49,6 +49,11 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	page := 1
 	pageSize := 100
 
+	concurrency := s.cfg.MaxProbeConcurrency
+	if concurrency <= 0 {
+		concurrency = 25
+	}
+
 	for {
 		log.Printf("[Syncer] Fetching movie page %d (size %d)...", page, pageSize)
 		resp, err := s.client.FetchMoviePage(ctx, page, pageSize)
@@ -60,18 +65,34 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 			break
 		}
 
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, concurrency)
+		var mu sync.Mutex
+
 		for _, movie := range resp.Results {
 			totalProcessed++
 
-			created, preserved, err := s.processSingleMovie(ctx, movie, dryRun)
-			if err != nil {
-				log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", movie.Name, movie.ID, err)
-				continue
-			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(m models.Movie) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
 
-			totalCreated += created
-			totalPreserved += preserved
+				created, preserved, err := s.processSingleMovie(ctx, m, dryRun)
+				if err != nil {
+					log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", m.Name, m.ID, err)
+					return
+				}
+
+				mu.Lock()
+				totalCreated += created
+				totalPreserved += preserved
+				mu.Unlock()
+			}(movie)
 		}
+		wg.Wait()
 
 		if resp.Next == nil {
 			break

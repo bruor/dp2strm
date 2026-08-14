@@ -28,6 +28,7 @@ services:
       - SYNC_CRON= # Optional: e.g. "0 3 * * *" for 3:00 AM daily
       - SKIP_STARTUP_SYNC=false # Set to true to skip initial sync pass on boot
       - BATCH_SIZE=0 # 0 = Unlimited full library sync
+      - MAX_PROBE_CONCURRENCY=25 # Number of parallel worker goroutines for movie sync
 
       # --- Streamcache Integration Options (Optional) ---
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
