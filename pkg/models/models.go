@@ -4,18 +4,18 @@ import "time"
 
 // Config represents the application configuration.
 type Config struct {
-	DispatcharrURL        string        `yaml:"dispatcharr_url" json:"dispatcharr_url"`
-	APIKey                string        `yaml:"api_key" json:"api_key"`
-	OutputDir             string        `yaml:"output_dir" json:"output_dir"`
-	RetentionGraceDays    int           `yaml:"retention_grace_days" json:"retention_grace_days"`
-	ProxyPort             int           `yaml:"proxy_port" json:"proxy_port"`
-	ProxyPublicURL        string        `yaml:"proxy_public_url" json:"proxy_public_url"`
-	SyncInterval          time.Duration `yaml:"sync_interval" json:"sync_interval"`
-	BatchSize             int           `yaml:"batch_size" json:"batch_size"`
-	CircuitBreakerEnabled bool          `yaml:"circuit_breaker_enabled" json:"circuit_breaker_enabled"`
-	MaxProbeConcurrency   int           `yaml:"max_probe_concurrency" json:"max_probe_concurrency"`
-	EmbyURL               string        `yaml:"emby_url" json:"emby_url"`
-	EmbyAPIKey            string        `yaml:"emby_api_key" json:"emby_api_key"`
+	DispatcharrURL        string        `json:"dispatcharr_url"`
+	APIKey                string        `json:"api_key"`
+	OutputDir             string        `json:"output_dir"`
+	RetentionGraceDays    int           `json:"retention_grace_days"`
+	ProxyPort             int           `json:"proxy_port"`
+	ProxyPublicURL        string        `json:"proxy_public_url"`
+	SyncInterval          time.Duration `json:"sync_interval"`
+	BatchSize             int           `json:"batch_size"`
+	CircuitBreakerEnabled bool          `json:"circuit_breaker_enabled"`
+	MaxProbeConcurrency   int           `json:"max_probe_concurrency"`
+	EmbyURL               string        `json:"emby_url"`
+	EmbyAPIKey            string        `json:"emby_api_key"`
 }
 
 // Category represents a VOD category.

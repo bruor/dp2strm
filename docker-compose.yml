@@ -6,16 +6,35 @@ services:
     container_name: dp2strm
     restart: unless-stopped
     ports:
+      # Port mapping for the embedded HTTP playback proxy (Host:Container)
       - "8080:8080"
     volumes:
+      # Persistent volume mount for generated .strm files, .nfo metadata, and artwork
       - ./strm_output:/data/strm
     environment:
+      # Dispatcharr REST API Base URL (Required)
       - DISPATCHARR_URL=${DISPATCHARR_URL:-https://your-dispatcharr-server.com}
+
+      # Dispatcharr API Key (Admin level recommended for bulk listing, Required)
       - DISPATCHARR_API_KEY=${DISPATCHARR_API_KEY:-YOUR_DISPATCHARR_API_KEY}
+
+      # Target directory inside container for generated media tree
       - OUTPUT_DIR=/data/strm
+
+      # Port for the embedded HTTP playback proxy server
       - PROXY_PORT=8080
+
+      # Public URL of the playback proxy accessible by Emby/Jellyfin players
       - PROXY_PUBLIC_URL=${PROXY_PUBLIC_URL:-http://localhost:8080}
+
+      # Scheduled background sync interval (e.g., "1h", "2h", "30m", "0" for single run)
       - SYNC_INTERVAL=${SYNC_INTERVAL:-1h}
+
+      # Number of grace days to buffer deleted streams before purging (Default: 7)
       - RETENTION_GRACE_DAYS=${RETENTION_GRACE_DAYS:-7}
+
+      # Optional: Emby/Jellyfin Server URL for automated library rescan triggers
       - EMBY_URL=${EMBY_URL:-}
+
+      # Optional: Emby/Jellyfin API Key for automated library rescan triggers
       - EMBY_API_KEY=${EMBY_API_KEY:-}

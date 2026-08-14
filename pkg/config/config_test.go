@@ -26,11 +26,8 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 		os.Unsetenv("EMBY_API_KEY")
 	}()
 
-	// Load config without config.yaml file
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
-	}
+	// Load config strictly from environment variables
+	cfg := LoadConfig()
 
 	if cfg.DispatcharrURL != "https://dp.example.com" {
 		t.Errorf("DispatcharrURL = %q; want %q", cfg.DispatcharrURL, "https://dp.example.com")

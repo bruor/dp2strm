@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"dp2strm/pkg/models"
-	"gopkg.in/yaml.v3"
 )
 
 // DefaultConfig returns safe default configuration parameters.
@@ -28,18 +27,11 @@ func DefaultConfig() *models.Config {
 	}
 }
 
-// LoadConfig reads configuration from a YAML file (if present) and applies environment variable overrides.
-func LoadConfig(path string) (*models.Config, error) {
+// LoadConfig loads configuration strictly from environment variables.
+func LoadConfig() *models.Config {
 	cfg := DefaultConfig()
 
-	if path != "" {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			_ = yaml.Unmarshal(data, cfg)
-		}
-	}
-
-	// Environment Variable Parsing (Cloud-Native Configless Mode)
+	// Environment Variable Parsing (Strict Configless Mode)
 	if v := os.Getenv("DISPATCHARR_URL"); v != "" {
 		cfg.DispatcharrURL = v
 	}
@@ -88,10 +80,10 @@ func LoadConfig(path string) (*models.Config, error) {
 		cfg.CircuitBreakerEnabled = (v == "true" || v == "1")
 	}
 
-	// Ensure output directory path is cleaned
+	// Clean output directory path
 	if absDir, err := filepath.Abs(cfg.OutputDir); err == nil {
 		cfg.OutputDir = absDir
 	}
 
-	return cfg, nil
+	return cfg
 }

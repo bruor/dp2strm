@@ -16,7 +16,6 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "Path to YAML configuration file (optional)")
 	syncOnce := flag.Bool("sync-once", true, "Execute a single sync pass and exit")
 	dryRun := flag.Bool("dry-run", false, "Perform dry-run (log actions without modifying disk)")
 	serveProxy := flag.Bool("serve", false, "Run HTTP playback proxy server in background")
@@ -27,10 +26,7 @@ func main() {
 	log.Println("             dp2strm Daemon (Go Edition)          ")
 	log.Println("==================================================")
 
-	cfg, err := config.LoadConfig(*configPath)
-	if err != nil {
-		log.Fatalf("Fatal: Failed to load configuration: %v", err)
-	}
+	cfg := config.LoadConfig()
 
 	if *batchSize > 0 {
 		cfg.BatchSize = *batchSize
