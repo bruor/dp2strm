@@ -6,15 +6,20 @@ services:
     container_name: dp2strm
     restart: unless-stopped
     volumes:
-      # Persistent volume mount for generated .strm files, .nfo metadata, poster/fanart artwork, and SQLite db
+      # Generated .strm media tree mount
       - ./strm:/data/strm
+      # Dedicated SQLite database mount
+      - ./data:/data/db
     environment:
       # --- Required Connection Parameters ---
       - DISPATCHARR_URL=https://your-dispatcharr-server.com
       - DISPATCHARR_API_KEY=YOUR_DISPATCHARR_API_KEY
+      - DISPATCHARR_XC_USER=your_xc_username
+      - DISPATCHARR_XC_PASSWORD=your_xc_password
 
       # --- Path & Network Handler Options ---
       - OUTPUT_DIR=/data/strm
+      - DB_PATH=/data/db/dp2strm.db
       - PORT=8080
       - URL=http://dp2strm:8080
 

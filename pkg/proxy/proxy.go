@@ -116,7 +116,7 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Fallback to direct Dispatcharr URL if not found in database
 	if targetURL == "" {
-		targetURL = fmt.Sprintf("%s/movie/agy/agypassword/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), movieID)
+		targetURL = fmt.Sprintf("%s/movie/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID)
 	}
 
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
@@ -175,7 +175,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Fallback to direct Dispatcharr URL if not found in database
 	if targetURL == "" {
-		targetURL = fmt.Sprintf("%s/series/agy/agypassword/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), seriesID)
+		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
 	}
 
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
@@ -220,7 +220,7 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
 	}
 	if targetURL == "" {
-		targetURL = fmt.Sprintf("%s/series/agy/agypassword/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), seriesID)
+		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
 	}
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
 

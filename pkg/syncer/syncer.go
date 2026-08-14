@@ -244,7 +244,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesID, ep.SeasonNumber, ep.EpisodeNumber, "base")
 
 		// Record real stream 302 target URL in SQLite
-		realTargetURL := fmt.Sprintf("%s/series/agy/agypassword/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), ep.ID, ep.ContainerExtension)
+		realTargetURL := fmt.Sprintf("%s/series/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ep.ContainerExtension)
 		if s.database != nil {
 			s.database.SaveStreamVariant(&db.StreamVariant{
 				ItemID:             seriesID,
@@ -326,7 +326,7 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 		proxyURL := strm.GenerateMovieProxyURL(s.cfg, movie.ID, variantKey)
 
 		// Record real stream target URL in SQLite
-		realTargetURL := fmt.Sprintf("%s/movie/agy/agypassword/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), v.StreamID, v.Container)
+		realTargetURL := fmt.Sprintf("%s/movie/%s/%s/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, v.StreamID, v.Container)
 		if s.database != nil {
 			s.database.SaveStreamVariant(&db.StreamVariant{
 				ItemID:             movie.ID,

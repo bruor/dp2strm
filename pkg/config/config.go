@@ -14,6 +14,8 @@ func DefaultConfig() *models.Config {
 	return &models.Config{
 		DispatcharrURL:        "http://localhost:8000",
 		APIKey:                "",
+		XCUser:                "username",
+		XCPassword:            "password",
 		OutputDir:             "/data/strm",
 		StreamcacheURL:        "",
 		FetchAheadCount:       2,
@@ -42,8 +44,17 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("DISPATCHARR_API_KEY"); v != "" {
 		cfg.APIKey = v
 	}
+	if v := os.Getenv("DISPATCHARR_XC_USER"); v != "" {
+		cfg.XCUser = v
+	}
+	if v := os.Getenv("DISPATCHARR_XC_PASSWORD"); v != "" {
+		cfg.XCPassword = v
+	}
 	if v := os.Getenv("OUTPUT_DIR"); v != "" {
 		cfg.OutputDir = v
+	}
+	if v := os.Getenv("DB_PATH"); v != "" {
+		cfg.DBPath = v
 	}
 	if v := os.Getenv("STREAMCACHE_URL"); v != "" {
 		cfg.StreamcacheURL = v

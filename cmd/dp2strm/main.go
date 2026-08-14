@@ -42,8 +42,11 @@ func main() {
 		log.Println("[Warning] No API key specified in DISPATCHARR_API_KEY environment variable.")
 	}
 
-	// 1. Open SQLite database engine (/data/strm/dp2strm.db)
-	dbPath := filepath.Join(cfg.OutputDir, "dp2strm.db")
+	// 1. Open SQLite database engine
+	dbPath := cfg.DBPath
+	if dbPath == "" {
+		dbPath = filepath.Join(cfg.OutputDir, "dp2strm.db")
+	}
 	database, err := db.Open(dbPath)
 	if err != nil {
 		log.Fatalf("[DB] Fatal: Failed to initialize SQLite database: %v", err)
