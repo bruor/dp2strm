@@ -14,8 +14,8 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY pkg/ ./pkg/
 
-# Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Build statically linked binary (0 CGO, pure Go modernc.org/sqlite)
+RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-w -s" \
     -o /build/dp2strm \
     ./cmd/dp2strm
@@ -30,17 +30,11 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/dp2strm /app/dp2strm
 
-# Default environment variables
-ENV OUTPUT_DIR="/data/strm" \
-    PROXY_PORT="8080" \
-    PROXY_PUBLIC_URL="http://localhost:8080"
-
-# Create output data directory
+# Create default output data directory
 RUN mkdir -p /data/strm
 
-# Expose HTTP Playback Proxy Port
+# Expose HTTP Playback Handler Port
 EXPOSE 8080
 
-# Default entrypoint runs dp2strm in daemon serving mode using environment variables
+# Run dp2strm daemon
 ENTRYPOINT ["/app/dp2strm"]
-CMD ["--sync-once=false", "--serve=true"]
