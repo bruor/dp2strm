@@ -71,7 +71,11 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	if totalCount <= 0 {
 		totalCount = len(firstResp.Results)
 	}
-	totalPages := (totalCount + pageSize - 1) / pageSize
+	actualPageSize := len(firstResp.Results)
+	if actualPageSize <= 0 {
+		actualPageSize = pageSize
+	}
+	totalPages := (totalCount + actualPageSize - 1) / actualPageSize
 
 	log.Printf("[Syncer] Found %d total movies across %d pages.", totalCount, totalPages)
 
@@ -206,7 +210,11 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	if totalCount <= 0 {
 		totalCount = len(firstResp.Results)
 	}
-	totalPages := (totalCount + pageSize - 1) / pageSize
+	actualPageSize := len(firstResp.Results)
+	if actualPageSize <= 0 {
+		actualPageSize = pageSize
+	}
+	totalPages := (totalCount + actualPageSize - 1) / actualPageSize
 
 	log.Printf("[Syncer] Found %d total series across %d pages.", totalCount, totalPages)
 
