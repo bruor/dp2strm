@@ -181,8 +181,8 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
 	log.Printf("[Proxy] Series %d S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
 
-	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail)
-	if s.cfg.FetchAheadCount > 0 {
+	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
+	if s.cfg.FetchAheadCount > 0 && s.cfg.StreamcacheURL != "" {
 		go func(sid, sNum, eNum, count int) {
 			for i := 1; i <= count; i++ {
 				nextEp := eNum + i

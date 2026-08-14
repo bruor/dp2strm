@@ -30,11 +30,11 @@
 ## 🚀 Quick Start with Docker Compose
 
 ```yaml
-version: '3.8'
-
 services:
   dp2strm:
-    image: dp2strm:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: dp2strm
     restart: unless-stopped
     ports:
@@ -43,7 +43,7 @@ services:
       - /mnt/media/strm_output:/data/strm
     environment:
       # Required Dispatcharr Connection
-      - DISPATCHARR_URL=https://dp.example.com
+      - DISPATCHARR_URL=https://your-dispatcharr-server.com
       - DISPATCHARR_API_KEY=your_dispatcharr_api_key_here
 
       # Path & Handler Options
@@ -52,18 +52,18 @@ services:
       - PROXY_PUBLIC_URL=http://dp2strm:8080
 
       # Timezone & Scheduling
-      - TZ=America/New_York
+      - TZ=America/Toronto
       - SYNC_INTERVAL=1h
       - BATCH_SIZE=0 # 0 = Unlimited full library sync
 
       # Streamcache Integration (Optional)
-      - STREAMCACHE_URL=http://streamcache:8080
-      - FETCH_AHEAD_COUNT=2
+      - STREAMCACHE_URL= # e.g. http://streamcache:8080
+      - FETCH_AHEAD_COUNT=2 # Only active when STREAMCACHE_URL is set
 
       # Retention & Emby Hooks
       - RETENTION_GRACE_DAYS=7
-      - EMBY_URL=http://emby:8096
-      - EMBY_API_KEY=your_emby_api_key_here
+      - EMBY_URL=
+      - EMBY_API_KEY=
 ```
 
 ---
