@@ -47,7 +47,7 @@ type StreamVariant struct {
 // Open initializes the SQLite database at dbPath, enabling WAL mode and applying schema migrations.
 func Open(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0777); err != nil {
 		return nil, fmt.Errorf("failed to create db directory %s: %w", dir, err)
 	}
 

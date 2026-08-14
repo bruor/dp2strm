@@ -117,7 +117,7 @@ func writeNFOData(filePath string, nfoStruct interface{}) (bool, error) {
 	xmlHeader := []byte(xml.Header + string(output))
 
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0777); err != nil {
 		return false, fmt.Errorf("failed to create NFO directory %s: %w", dir, err)
 	}
 
@@ -132,7 +132,7 @@ func writeNFOData(filePath string, nfoStruct interface{}) (bool, error) {
 		}
 	}
 
-	if err := os.WriteFile(filePath, xmlHeader, 0644); err != nil {
+	if err := os.WriteFile(filePath, xmlHeader, 0666); err != nil {
 		return false, fmt.Errorf("failed to write NFO file %s: %w", filePath, err)
 	}
 

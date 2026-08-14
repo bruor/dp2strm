@@ -36,7 +36,7 @@ func DownloadArtwork(targetPath, imgURL string) (bool, error) {
 	}
 
 	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0777); err != nil {
 		return false, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
@@ -61,7 +61,7 @@ func DownloadArtwork(targetPath, imgURL string) (bool, error) {
 	}
 
 	// Record current image URL (including ?v=hash) to track future updates
-	_ = os.WriteFile(urlTrackerPath, []byte(imgURL), 0644)
+	_ = os.WriteFile(urlTrackerPath, []byte(imgURL), 0666)
 
 	return true, nil // Updated
 }

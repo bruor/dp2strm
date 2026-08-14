@@ -33,7 +33,7 @@ func GenerateSeriesProxyURL(cfg *models.Config, seriesID int, season int, episod
 // Returns (updated bool, err error).
 func WriteSTRMFile(filePath string, content string) (bool, error) {
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0777); err != nil {
 		return false, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
@@ -48,7 +48,7 @@ func WriteSTRMFile(filePath string, content string) (bool, error) {
 		}
 	}
 
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0666); err != nil {
 		return false, fmt.Errorf("failed to write strm file %s: %w", filePath, err)
 	}
 
