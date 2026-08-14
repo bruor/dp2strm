@@ -53,8 +53,9 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [ ] **Retention Grace Period & Cleanup Manager (`RETENTION_GRACE_DAYS`)**:
   - Soft-delete state tracker map in SQLite that buffers deleted streams for 7 days before removing `.strm` files from disk when content disappears from Dispatcharr.
 
-- [ ] **Category Filtering (`INCLUDE_CATEGORIES` / `EXCLUDE_CATEGORIES`)**:
-  - Filter out unwanted VOD/Series categories (e.g. adult content or unneeded provider groups).
+- [ ] **Conditional Emby Refresh Trigger Rules**:
+  - **Rule**: Trigger Emby library refresh (`POST {emby_url}/Library/Refresh`) **ONLY** if `createdCount > 0` or `deletedCount > 0`.
+  - **URL Edits & Unchanged Files**: If a sync run only updates text inside existing `.strm` files or preserves timestamps via `os.Chtimes` (`createdCount == 0 && deletedCount == 0`), `dp2strm` **skips calling Emby**.
 
 - [ ] **`streamcache` Transparent URL Rewrite Rules**:
   - Rewrite direct Dispatcharr content URLs to URL-encoded `STREAMCACHE_URL` endpoints (e.g., `http://streamcache:8080/stream?url=https%3A%2F%2F...`) when `STREAMCACHE_URL` is configured.
