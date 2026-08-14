@@ -57,5 +57,10 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - **Rule**: Trigger Emby library refresh (`POST {emby_url}/Library/Refresh`) **ONLY** if `createdCount > 0` or `deletedCount > 0`.
   - **URL Edits & Unchanged Files**: If a sync run only updates text inside existing `.strm` files or preserves timestamps via `os.Chtimes` (`createdCount == 0 && deletedCount == 0`), `dp2strm` **skips calling Emby**.
 
+- [ ] **Cron Expression & Timezone Scheduler (`SYNC_CRON` & `TZ`)**:
+  - **Cron Syntax**: Support standard 5-field cron syntax (`SYNC_CRON="0 3 * * *"` for 3:00 AM daily sync).
+  - **Timezone Awareness**: Parse `TZ` environment variable (e.g. `TZ=America/New_York`) using Go's `import _ "time/tzdata"` to evaluate execution times in the user's local timezone with automatic Daylight Saving Time (DST) handling.
+  - **Priority**: `SYNC_CRON` ➜ `SYNC_INTERVAL` ➜ `SYNC_INTERVAL=0` / `--sync-once`.
+
 - [ ] **`streamcache` Transparent URL Rewrite Rules**:
   - Rewrite direct Dispatcharr content URLs to URL-encoded `STREAMCACHE_URL` endpoints (e.g., `http://streamcache:8080/stream?url=https%3A%2F%2F...`) when `STREAMCACHE_URL` is configured.
