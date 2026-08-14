@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dp2strm/pkg/artwork"
@@ -37,84 +38,127 @@ func NewSyncer(cfg *models.Config, client *client.Client, database *db.DB) *Sync
 	}
 }
 
-// SyncMovies executes a full movie sync pass from Dispatcharr REST API to disk.
+// SyncMovies executes a full movie sync pass from Dispatcharr REST API to disk with parallel page fetching.
 func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
-	log.Println("[Syncer] Starting Movie Sync Pass...")
+	log.Println("[Syncer] Starting Parallel Movie Sync Pass...")
 	start := time.Now()
 
-	totalProcessed := 0
-	totalCreated := 0
-	totalPreserved := 0
-	page := 1
-	pageSize := 100
-
+	pageSize := s.cfg.PageSize
+	if pageSize <= 0 {
+		pageSize = 1000
+	}
 	concurrency := s.cfg.MaxProbeConcurrency
 	if concurrency <= 0 {
 		concurrency = 5
 	}
 
-	for {
-		log.Printf("[Syncer] Fetching movie page %d (size %d)...", page, pageSize)
-		apiStart := time.Now()
-		resp, err := s.client.FetchMoviePage(ctx, page, pageSize)
-		apiDuration := time.Since(apiStart)
-		if err != nil {
-			return fmt.Errorf("failed to fetch movie page %d: %w", page, err)
-		}
+	// Fetch Page 1 to determine total count & pages
+	log.Printf("[Syncer] Fetching movie page 1 (size %d)...", pageSize)
+	apiStart := time.Now()
+	firstResp, err := s.client.FetchMoviePage(ctx, 1, pageSize)
+	apiDuration := time.Since(apiStart)
+	if err != nil {
+		return fmt.Errorf("failed to fetch movie page 1: %w", err)
+	}
+	log.Printf("[Syncer] Movie Page 1 API Fetch took %v", apiDuration)
 
-		if len(resp.Results) == 0 {
-			break
-		}
+	if len(firstResp.Results) == 0 {
+		log.Println("[Syncer] Movie Sync Complete: 0 movies found.")
+		return nil
+	}
 
+	totalCount := firstResp.Count
+	if totalCount <= 0 {
+		totalCount = len(firstResp.Results)
+	}
+	totalPages := (totalCount + pageSize - 1) / pageSize
+
+	log.Printf("[Syncer] Found %d total movies across %d pages.", totalCount, totalPages)
+
+	var totalProcessed int64
+	var totalCreated int64
+	var totalPreserved int64
+
+	processPage := func(pageNum int, movies []models.Movie) {
+		atomic.AddInt64(&totalProcessed, int64(len(movies)))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, concurrency)
+
+		var pCreated, pPreserved int64
+		var pArtDur, pDiskDur time.Duration
 		var mu sync.Mutex
-		var totalArtDuration time.Duration
-		var totalDiskDuration time.Duration
 
-		pageStart := time.Now()
-		for _, movie := range resp.Results {
-			totalProcessed++
-
+		pStart := time.Now()
+		for _, m := range movies {
 			wg.Add(1)
 			sem <- struct{}{}
-			go func(m models.Movie) {
+			go func(movie models.Movie) {
 				defer func() {
 					<-sem
 					wg.Done()
 				}()
-
-				created, preserved, artDur, diskDur, err := s.processSingleMovieProfiled(ctx, m, dryRun)
+				c, p, aDur, dDur, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
 				if err != nil {
-					log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", m.Name, m.ID, err)
+					log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", movie.Name, movie.ID, err)
 					return
 				}
-
 				mu.Lock()
-				totalCreated += created
-				totalPreserved += preserved
-				totalArtDuration += artDur
-				totalDiskDuration += diskDur
+				pCreated += int64(c)
+				pPreserved += int64(p)
+				pArtDur += aDur
+				pDiskDur += dDur
 				mu.Unlock()
-			}(movie)
+			}(m)
 		}
 		wg.Wait()
-		pageDuration := time.Since(pageStart)
+		pDuration := time.Since(pStart)
 
-		log.Printf("[Syncer] Movie Page %d Complete (%d items) in %v | API Fetch: %v | Processing: %v (Artwork: %v, Disk: %v)",
-			page, len(resp.Results), apiDuration+pageDuration, apiDuration, pageDuration, totalArtDuration, totalDiskDuration)
+		atomic.AddInt64(&totalCreated, pCreated)
+		atomic.AddInt64(&totalPreserved, pPreserved)
 
-		time.Sleep(100 * time.Millisecond) // Gentle CPU pause for Dispatcharr server
+		log.Printf("[Syncer] Movie Page %d/%d Complete (%d items) in %v | Processing: %v (Artwork: %v, Disk: %v)",
+			pageNum, totalPages, len(movies), pDuration, pDuration, pArtDur, pDiskDur)
+	}
 
-		if resp.Next == nil {
-			break
+	// Process Page 1 immediately
+	processPage(1, firstResp.Results)
+
+	// Fetch & process remaining pages using parallel page workers
+	if totalPages > 1 {
+		pageWorkers := s.cfg.PageWorkers
+		if pageWorkers <= 0 {
+			pageWorkers = 4
 		}
-		page++
-
-		if s.cfg.BatchSize > 0 && totalProcessed >= s.cfg.BatchSize {
-			log.Printf("[Syncer] Reached configured batch size limit (%d movies). Stopping sync pass.", s.cfg.BatchSize)
-			break
+		pageChan := make(chan int, totalPages)
+		for p := 2; p <= totalPages; p++ {
+			if s.cfg.BatchSize > 0 && (p-1)*pageSize >= s.cfg.BatchSize {
+				break
+			}
+			pageChan <- p
 		}
+		close(pageChan)
+
+		var pageWg sync.WaitGroup
+		for w := 0; w < pageWorkers; w++ {
+			pageWg.Add(1)
+			go func() {
+				defer pageWg.Done()
+				for pageNum := range pageChan {
+					fStart := time.Now()
+					resp, err := s.client.FetchMoviePage(ctx, pageNum, pageSize)
+					fDuration := time.Since(fStart)
+					if err != nil {
+						log.Printf("[Syncer] Warning: Error fetching movie page %d: %v", pageNum, err)
+						continue
+					}
+					if len(resp.Results) > 0 {
+						processPage(pageNum, resp.Results)
+						log.Printf("[Syncer] Movie Page %d API Fetch took %v", pageNum, fDuration)
+					}
+				}
+			}()
+		}
+		pageWg.Wait()
 	}
 
 	duration := time.Since(start)

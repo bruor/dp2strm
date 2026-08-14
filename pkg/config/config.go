@@ -28,6 +28,8 @@ func DefaultConfig() *models.Config {
 		BatchSize:             0, // 0 = unlimited
 		CircuitBreakerEnabled: true,
 		MaxProbeConcurrency:   5,
+		PageSize:              1000,
+		PageWorkers:           4,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
 	}
@@ -98,6 +100,16 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("MAX_PROBE_CONCURRENCY"); v != "" {
 		if c, err := strconv.Atoi(v); err == nil && c > 0 {
 			cfg.MaxProbeConcurrency = c
+		}
+	}
+	if v := os.Getenv("PAGE_SIZE"); v != "" {
+		if ps, err := strconv.Atoi(v); err == nil && ps > 0 {
+			cfg.PageSize = ps
+		}
+	}
+	if v := os.Getenv("PAGE_WORKERS"); v != "" {
+		if pw, err := strconv.Atoi(v); err == nil && pw > 0 {
+			cfg.PageWorkers = pw
 		}
 	}
 	if v := os.Getenv("SYNC_INTERVAL"); v != "" {

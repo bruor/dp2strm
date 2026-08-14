@@ -21,6 +21,8 @@ type Config struct {
 	SkipStartupSync       bool          `json:"skip_startup_sync"`
 	CircuitBreakerEnabled bool          `json:"circuit_breaker_enabled"`
 	MaxProbeConcurrency   int           `json:"max_probe_concurrency"`
+	PageSize              int           `json:"page_size"`
+	PageWorkers           int           `json:"page_workers"`
 	EmbyURL               string        `json:"emby_url"`
 	EmbyAPIKey            string        `json:"emby_api_key"`
 }
