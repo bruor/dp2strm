@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"dp2strm/pkg/db"
 	"dp2strm/pkg/models"
@@ -43,7 +44,7 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	cfg := &models.Config{
 		DispatcharrURL:  "https://dp.example.com",
 		StreamcacheURL:  "http://streamcache:8080",
-		ProxyPort:       8080,
+		Port:            8080,
 		FetchAheadCount: 0,
 	}
 
@@ -101,7 +102,7 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 		if sid != 30998 {
 			t.Errorf("Expected activation for series 30998, got %d", sid)
 		}
-	default:
+	case <-time.After(1 * time.Second):
 		t.Errorf("Expected activation callback to be triggered asynchronously")
 	}
 }

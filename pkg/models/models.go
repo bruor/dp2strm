@@ -10,8 +10,8 @@ type Config struct {
 	StreamcacheURL        string        `json:"streamcache_url"`
 	FetchAheadCount       int           `json:"fetch_ahead_count"`
 	RetentionGraceDays    int           `json:"retention_grace_days"`
-	ProxyPort             int           `json:"proxy_port"`
-	ProxyPublicURL        string        `json:"proxy_public_url"`
+	Port                  int           `json:"port"`
+	URL                   string        `json:"url"`
 	SyncInterval          time.Duration `json:"sync_interval"`
 	SyncCron              string        `json:"sync_cron"`
 	TZ                    string        `json:"tz"`

@@ -40,7 +40,7 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 	mux.HandleFunc("/healthz", srv.handleHealth)
 
 	srv.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.ProxyPort),
+		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -53,7 +53,7 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 // Start launches the HTTP server asynchronously.
 func (s *Server) Start() {
 	go func() {
-		log.Printf("[Proxy] Starting Extensionless Playback Handler on port %d...", s.cfg.ProxyPort)
+		log.Printf("[Proxy] Starting Extensionless Playback Handler on port %d...", s.cfg.Port)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[Proxy] HTTP Playback Handler error: %v", err)
 		}
@@ -187,7 +187,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 			for i := 1; i <= count; i++ {
 				nextEp := eNum + i
 				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				prefetchURL := fmt.Sprintf("%s/play/series/%d/%d/%d", strings.TrimRight(s.cfg.ProxyPublicURL, "/"), sid, sNum, nextEp)
+				prefetchURL := fmt.Sprintf("%s/play/series/%d/%d/%d", strings.TrimRight(s.cfg.URL, "/"), sid, sNum, nextEp)
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
 				if err == nil {
 					resp, pErr := http.DefaultClient.Do(req)

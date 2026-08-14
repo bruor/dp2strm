@@ -18,8 +18,8 @@ func DefaultConfig() *models.Config {
 		StreamcacheURL:        "",
 		FetchAheadCount:       2,
 		RetentionGraceDays:    7,
-		ProxyPort:             8080,
-		ProxyPublicURL:        "http://localhost:8080",
+		Port:                  8080,
+		URL:                   "http://localhost:8080",
 		SyncInterval:          0, // 0 = run once by default
 		SyncCron:              "",
 		TZ:                    "UTC",
@@ -53,8 +53,10 @@ func LoadConfig() *models.Config {
 			cfg.FetchAheadCount = cnt
 		}
 	}
-	if v := os.Getenv("PROXY_PUBLIC_URL"); v != "" {
-		cfg.ProxyPublicURL = v
+	if v := os.Getenv("URL"); v != "" {
+		cfg.URL = v
+	} else if v := os.Getenv("PROXY_PUBLIC_URL"); v != "" {
+		cfg.URL = v
 	}
 	if v := os.Getenv("EMBY_URL"); v != "" {
 		cfg.EmbyURL = v
@@ -69,9 +71,13 @@ func LoadConfig() *models.Config {
 		cfg.TZ = v
 	}
 
-	if v := os.Getenv("PROXY_PORT"); v != "" {
+	if v := os.Getenv("PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil && p > 0 {
-			cfg.ProxyPort = p
+			cfg.Port = p
+		}
+	} else if v := os.Getenv("PROXY_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			cfg.Port = p
 		}
 	}
 	if v := os.Getenv("RETENTION_GRACE_DAYS"); v != "" {

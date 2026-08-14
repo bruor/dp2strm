@@ -12,7 +12,7 @@ import (
 // GenerateMovieProxyURL builds the clean extensionless playback URL pointing to dp2strm playback handler.
 // Format: /play/movie/{movie_id} or /play/movie/{movie_id}/{variant_key}
 func GenerateMovieProxyURL(cfg *models.Config, movieID int, variantKey string) string {
-	base := strings.TrimRight(cfg.ProxyPublicURL, "/")
+	base := strings.TrimRight(cfg.URL, "/")
 	if variantKey == "" || variantKey == "base" {
 		return fmt.Sprintf("%s/play/movie/%d", base, movieID)
 	}
@@ -22,7 +22,7 @@ func GenerateMovieProxyURL(cfg *models.Config, movieID int, variantKey string) s
 // GenerateSeriesProxyURL builds the clean extensionless playback URL for TV episodes.
 // Format: /play/series/{series_id}/{season}/{episode} or /play/series/{series_id}/{season}/{episode}/{variant_key}
 func GenerateSeriesProxyURL(cfg *models.Config, seriesID int, season int, episode int, variantKey string) string {
-	base := strings.TrimRight(cfg.ProxyPublicURL, "/")
+	base := strings.TrimRight(cfg.URL, "/")
 	if variantKey == "" || variantKey == "base" {
 		return fmt.Sprintf("%s/play/series/%d/%d/%d", base, seriesID, season, episode)
 	}
