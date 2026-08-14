@@ -31,8 +31,8 @@ func DefaultConfig() *models.Config {
 		BatchSize:             0, // 0 = unlimited
 		CircuitBreakerEnabled: true,
 		MaxProbeConcurrency:   5,
-		PageSize:              1000,
-		PageWorkers:           4,
+		PageSize:              100,
+		PageWorkers:           5,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
 	}

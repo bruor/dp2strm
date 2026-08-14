@@ -130,4 +130,16 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != expectedUnactLoc {
 		t.Errorf("Expected 302 Location %s, got %s", expectedUnactLoc, loc)
 	}
+
+	// 5. Test Variant Extension Stripping (/play/movie/1058902/4k.mkv)
+	req = httptest.NewRequest("GET", "/play/movie/1058902/4k.mkv", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for 4k.mkv movie play, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != expectedLocation4k {
+		t.Errorf("Expected 302 Location %s for stripped 4k.mkv, got %s", expectedLocation4k, loc)
+	}
 }

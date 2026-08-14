@@ -14,6 +14,8 @@ import (
 	"dp2strm/pkg/models"
 )
 
+var ErrRateLimited = fmt.Errorf("HTTP 429 Too Many Requests (Rate Limited)")
+
 // Client handles REST API interactions with the Dispatcharr server.
 type Client struct {
 	baseURL    string
@@ -60,7 +62,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP 429 Too Many Requests (Rate Limited)")
+		return nil, ErrRateLimited
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -90,13 +92,13 @@ func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*model
 
 	// 1. Try decoding as paginated object {"results": [...]}
 	var paginated models.PaginatedResponse[models.Movie]
-	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && len(paginated.Results) > 0 {
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && paginated.Results != nil {
 		return &paginated, nil
 	}
 
 	// 2. Try decoding as direct JSON array [...]
 	var list []models.Movie
-	if err := json.Unmarshal(bodyBytes, &list); err == nil && len(list) > 0 {
+	if err := json.Unmarshal(bodyBytes, &list); err == nil {
 		return &models.PaginatedResponse[models.Movie]{
 			Count:   len(list),
 			Next:    nil,
@@ -108,6 +110,23 @@ func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*model
 	return &models.PaginatedResponse[models.Movie]{
 		Results: []models.Movie{},
 	}, nil
+}
+
+// FetchSingleMovie retrieves a single movie by ID via GET /api/vod/movies/{id}/
+func (c *Client) FetchSingleMovie(ctx context.Context, movieID int) (*models.Movie, error) {
+	path := fmt.Sprintf("/api/vod/movies/%d/", movieID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var movie models.Movie
+	if err := json.NewDecoder(resp.Body).Decode(&movie); err != nil {
+		return nil, fmt.Errorf("failed to decode movie JSON for ID %d: %w", movieID, err)
+	}
+
+	return &movie, nil
 }
 
 // FetchMovieProviders retrieves provider streams for a movie via GET /api/vod/movies/{id}/providers/
@@ -163,7 +182,7 @@ func (c *Client) TriggerMovieProviderInfo(ctx context.Context, movieID, relation
 	return result, nil
 }
 
-// FetchSeriesPage retrieves a single page of TV series from GET /api/vod/series/
+// FetchSeriesPage retrieves a single page of TV series from GET /api/vod/series/ supporting both paginated and raw array responses.
 func (c *Client) FetchSeriesPage(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.Series], error) {
 	query := url.Values{}
 	query.Set("page", fmt.Sprintf("%d", page))
@@ -175,12 +194,48 @@ func (c *Client) FetchSeriesPage(ctx context.Context, page, pageSize int) (*mode
 	}
 	defer resp.Body.Close()
 
-	var result models.PaginatedResponse[models.Series]
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode series list JSON: %w", err)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read series page body: %w", err)
 	}
 
-	return &result, nil
+	// 1. Try decoding as paginated object {"results": [...]}
+	var paginated models.PaginatedResponse[models.Series]
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && paginated.Results != nil {
+		return &paginated, nil
+	}
+
+	// 2. Try decoding as direct JSON array [...]
+	var list []models.Series
+	if err := json.Unmarshal(bodyBytes, &list); err == nil {
+		return &models.PaginatedResponse[models.Series]{
+			Count:   len(list),
+			Next:    nil,
+			Results: list,
+		}, nil
+	}
+
+	log.Printf("[Client] Warning: /api/vod/series/ page %d returned %d bytes (Empty or Unparseable)", page, len(bodyBytes))
+	return &models.PaginatedResponse[models.Series]{
+		Results: []models.Series{},
+	}, nil
+}
+
+// FetchSingleSeries retrieves a single series by ID via GET /api/vod/series/{id}/
+func (c *Client) FetchSingleSeries(ctx context.Context, seriesID int) (*models.Series, error) {
+	path := fmt.Sprintf("/api/vod/series/%d/", seriesID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var series models.Series
+	if err := json.NewDecoder(resp.Body).Decode(&series); err != nil {
+		return nil, fmt.Errorf("failed to decode series JSON for ID %d: %w", seriesID, err)
+	}
+
+	return &series, nil
 }
 
 // FetchSeriesEpisodes retrieves episodes for a series via GET /api/vod/series/{id}/episodes/

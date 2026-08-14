@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	_ "time/tzdata"
+
+	"github.com/robfig/cron/v3"
 
 	"dp2strm/pkg/client"
 	"dp2strm/pkg/config"
@@ -57,15 +58,13 @@ func main() {
 	restClient := client.NewClient(cfg.DispatcharrURL, cfg.APIKey)
 	syncEngine := syncer.NewSyncer(cfg, restClient, database)
 
-	// Async Series Activation Callback Worker
+	// Async Series Activation Callback Worker (auto-resolves canonical title & folder)
 	onActivation := func(seriesID int) {
 		log.Printf("[Activation] Async worker activated for Series ID %d...", seriesID)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		cleanTitle := fmt.Sprintf("Series %d", seriesID)
-		seriesDir := filepath.Join(cfg.OutputDir, "TV Shows", cleanTitle)
-		_, _, err := syncEngine.PopulateActivatedSeries(ctx, seriesID, cleanTitle, seriesDir)
+		_, _, err := syncEngine.PopulateActivatedSeries(ctx, seriesID, "", "")
 		if err != nil {
 			log.Printf("[Activation] Error populating series ID %d: %v", seriesID, err)
 			return
@@ -73,14 +72,13 @@ func main() {
 		syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
 	}
 
+	// Movie Activation Callback Worker (auto-resolves canonical title & folder)
 	onMovieActivation := func(movieID int) (string, error) {
 		log.Printf("[Activation] User played Movie ID %d! Resolving provider streams and quality variants...", movieID)
 		mCtx, mCancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer mCancel()
 
-		cleanTitle := fmt.Sprintf("Movie %d", movieID)
-		movieDir := filepath.Join(cfg.OutputDir, "Movies", cleanTitle)
-		_, _, baseTargetURL, err := syncEngine.PopulateActivatedMovie(mCtx, movieID, cleanTitle, movieDir, 0, "")
+		_, _, baseTargetURL, err := syncEngine.PopulateActivatedMovie(mCtx, movieID, "", "", 0, "")
 		if err != nil {
 			log.Printf("[Activation] Error resolving movie ID %d: %v", movieID, err)
 			return "", err
@@ -121,7 +119,13 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("[Main] Daemon active. Timezone: %s", cfg.TZ)
+	// Load IANA Timezone
+	loc, err := time.LoadLocation(cfg.TZ)
+	if err != nil {
+		log.Printf("[Main] Warning: Could not load timezone %q (%v). Defaulting to UTC.", cfg.TZ, err)
+		loc = time.UTC
+	}
+	log.Printf("[Main] Daemon active. Timezone: %s", loc.String())
 
 	// Execute Initial Startup Sync Pass (unless SKIP_STARTUP_SYNC=true)
 	if !cfg.SkipStartupSync {
@@ -136,7 +140,31 @@ func main() {
 		log.Println("[Main] SKIP_STARTUP_SYNC enabled. Skipping initial startup sync pass.")
 	}
 
-	// Determine Ticker Interval (Default 1h if interval is 0 or unspecified in daemon mode)
+	// Setup Cron Scheduler or Duration Ticker
+	if cfg.SyncCron != "" {
+		cronRunner := cron.New(cron.WithLocation(loc))
+		_, err := cronRunner.AddFunc(cfg.SyncCron, func() {
+			log.Printf("[Main] Cron schedule '%s' triggered (Time: %s). Executing sync pass...", cfg.SyncCron, time.Now().In(loc).Format(time.RFC3339))
+			if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
+				log.Printf("[Main] Error during scheduled movie sync: %v", err)
+			}
+			if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
+				log.Printf("[Main] Error during scheduled series sync: %v", err)
+			}
+		})
+		if err == nil {
+			cronRunner.Start()
+			defer cronRunner.Stop()
+			log.Printf("[Main] Scheduled cron active: %q (Timezone: %s)", cfg.SyncCron, loc.String())
+
+			<-ctx.Done()
+			log.Println("[Main] Context cancelled. Exiting daemon.")
+			return
+		}
+		log.Printf("[Main] Warning: Failed to parse SYNC_CRON %q (%v). Falling back to interval ticker.", cfg.SyncCron, err)
+	}
+
+	// Fallback to Ticker Interval (Default 1h if interval is 0 or unspecified)
 	syncInterval := cfg.SyncInterval
 	if syncInterval <= 0 {
 		syncInterval = 1 * time.Hour

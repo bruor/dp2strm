@@ -135,8 +135,8 @@ services:
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
 | `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
 | `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
-| `PAGE_SIZE` | `1000` | Number of items fetched per API page request |
-| `PAGE_WORKERS` | `4` | Number of concurrent page fetch workers |
+| `PAGE_SIZE` | `100` | Number of items fetched per API page request |
+| `PAGE_WORKERS` | `5` | Number of concurrent page fetch workers |
 | `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |

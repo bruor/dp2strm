@@ -30,6 +30,21 @@ func TestSQLiteStateEngine(t *testing.T) {
 		t.Fatalf("Expected nil state for unactivated series, got: %+v", st)
 	}
 
+	// Test UpsertInitialSeriesState
+	if err := d.UpsertInitialSeriesState(seriesID, "61381", "black-ish", 2014, "black-ish (2014) [tmdbid=61381]"); err != nil {
+		t.Fatalf("Failed to upsert initial series state: %v", err)
+	}
+	st, err = d.GetSeriesState(seriesID)
+	if err != nil || st == nil {
+		t.Fatalf("Expected series state after upsert: %v", err)
+	}
+	if st.IsActivated {
+		t.Errorf("Expected IsActivated=false before activation")
+	}
+	if st.FolderName != "black-ish (2014) [tmdbid=61381]" {
+		t.Errorf("Expected FolderName %q, got %q", "black-ish (2014) [tmdbid=61381]", st.FolderName)
+	}
+
 	if err := d.SetSeriesActivated(seriesID, "61381", "black-ish"); err != nil {
 		t.Fatalf("Failed to set series activated: %v", err)
 	}
@@ -40,6 +55,9 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 	if !st.IsActivated {
 		t.Errorf("Expected IsActivated=true, got false")
+	}
+	if st.FolderName != "black-ish (2014) [tmdbid=61381]" {
+		t.Errorf("Expected FolderName preserved after activation, got %q", st.FolderName)
 	}
 
 	// Test Movie Activation State
@@ -52,6 +70,20 @@ func TestSQLiteStateEngine(t *testing.T) {
 		t.Fatalf("Expected nil state for unactivated movie, got: %+v", mst)
 	}
 
+	if err := d.UpsertInitialMovieState(movieID, "19995", "Avatar", 2009, "Avatar (2009) [tmdbid=19995]"); err != nil {
+		t.Fatalf("Failed to upsert initial movie state: %v", err)
+	}
+	mst, err = d.GetMovieState(movieID)
+	if err != nil || mst == nil {
+		t.Fatalf("Expected movie state after initial upsert: %v", err)
+	}
+	if mst.IsActivated {
+		t.Errorf("Expected movie IsActivated=false before activation")
+	}
+	if mst.FolderName != "Avatar (2009) [tmdbid=19995]" {
+		t.Errorf("Expected movie FolderName %q, got %q", "Avatar (2009) [tmdbid=19995]", mst.FolderName)
+	}
+
 	if err := d.SetMovieActivated(movieID, "19995", "Avatar"); err != nil {
 		t.Fatalf("Failed to set movie activated: %v", err)
 	}
@@ -62,6 +94,9 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 	if !mst.IsActivated {
 		t.Errorf("Expected movie IsActivated=true, got false")
+	}
+	if mst.FolderName != "Avatar (2009) [tmdbid=19995]" {
+		t.Errorf("Expected movie FolderName preserved after activation, got %q", mst.FolderName)
 	}
 
 	// Update metadata to Continuing

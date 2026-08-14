@@ -39,14 +39,36 @@ func NewSyncer(cfg *models.Config, client *client.Client, database *db.DB) *Sync
 	}
 }
 
+func (s *Syncer) isCircuitTripped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.circuitTripped
+}
+
+func (s *Syncer) tripCircuitBreaker() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.circuitTripped {
+		s.circuitTripped = true
+		log.Println("[Syncer] ⚠️ Circuit breaker tripped due to HTTP 429 Rate Limit from Dispatcharr! Halting current sync pass.")
+	}
+}
+
+func (s *Syncer) resetCircuitBreaker() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.circuitTripped = false
+}
+
 // SyncMovies executes a full movie sync pass from Dispatcharr REST API to disk with parallel page fetching.
 func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	log.Println("[Syncer] Starting Parallel Movie Sync Pass...")
 	start := time.Now()
+	s.resetCircuitBreaker()
 
 	pageSize := s.cfg.PageSize
 	if pageSize <= 0 {
-		pageSize = 1000
+		pageSize = 100
 	}
 	concurrency := s.cfg.MaxProbeConcurrency
 	if concurrency <= 0 {
@@ -59,6 +81,9 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	firstResp, err := s.client.FetchMoviePage(ctx, 1, pageSize)
 	apiDuration := time.Since(apiStart)
 	if err != nil {
+		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+			s.tripCircuitBreaker()
+		}
 		return fmt.Errorf("failed to fetch movie page 1: %w", err)
 	}
 	log.Printf("[Syncer] Movie Page 1 API Fetch took %v", apiDuration)
@@ -85,6 +110,9 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	var totalPreserved int64
 
 	processPage := func(pageNum int, movies []models.Movie) {
+		if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+			return
+		}
 		atomic.AddInt64(&totalProcessed, int64(len(movies)))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, concurrency)
@@ -95,6 +123,9 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 
 		pStart := time.Now()
 		for _, m := range movies {
+			if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+				break
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(movie models.Movie) {
@@ -102,8 +133,14 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 					<-sem
 					wg.Done()
 				}()
+				if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+					return
+				}
 				c, p, aDur, dDur, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
 				if err != nil {
+					if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+						s.tripCircuitBreaker()
+					}
 					log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", movie.Name, movie.ID, err)
 					return
 				}
@@ -129,10 +166,10 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	processPage(1, firstResp.Results)
 
 	// Fetch & process remaining pages using parallel page workers
-	if totalPages > 1 {
+	if totalPages > 1 && (!s.cfg.CircuitBreakerEnabled || !s.isCircuitTripped()) {
 		pageWorkers := s.cfg.PageWorkers
 		if pageWorkers <= 0 {
-			pageWorkers = 4
+			pageWorkers = 5
 		}
 		pageChan := make(chan int, totalPages)
 		for p := 2; p <= totalPages; p++ {
@@ -149,10 +186,16 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 			go func() {
 				defer pageWg.Done()
 				for pageNum := range pageChan {
+					if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+						return
+					}
 					fStart := time.Now()
 					resp, err := s.client.FetchMoviePage(ctx, pageNum, pageSize)
 					fDuration := time.Since(fStart)
 					if err != nil {
+						if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+							s.tripCircuitBreaker()
+						}
 						log.Printf("[Syncer] Warning: Error fetching movie page %d: %v", pageNum, err)
 						continue
 					}
@@ -182,10 +225,11 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	log.Println("[Syncer] Starting Pass 1 Parallel TV Series Sync Pass...")
 	start := time.Now()
+	s.resetCircuitBreaker()
 
 	pageSize := s.cfg.PageSize
 	if pageSize <= 0 {
-		pageSize = 1000
+		pageSize = 100
 	}
 	concurrency := s.cfg.MaxProbeConcurrency
 	if concurrency <= 0 {
@@ -198,6 +242,9 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	firstResp, err := s.client.FetchSeriesPage(ctx, 1, pageSize)
 	apiDuration := time.Since(apiStart)
 	if err != nil {
+		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+			s.tripCircuitBreaker()
+		}
 		return fmt.Errorf("failed to fetch series page 1: %w", err)
 	}
 	log.Printf("[Syncer] Series Page 1 API Fetch took %v", apiDuration)
@@ -224,6 +271,9 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	var totalPreserved int64
 
 	processPage := func(pageNum int, seriesList []models.Series) {
+		if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+			return
+		}
 		atomic.AddInt64(&totalProcessed, int64(len(seriesList)))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, concurrency)
@@ -234,6 +284,9 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 
 		pStart := time.Now()
 		for _, srs := range seriesList {
+			if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+				break
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(series models.Series) {
@@ -241,8 +294,14 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 					<-sem
 					wg.Done()
 				}()
+				if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+					return
+				}
 				c, p, aDur, dDur, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
 				if err != nil {
+					if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+						s.tripCircuitBreaker()
+					}
 					log.Printf("[Syncer] Warning: Error processing series '%s' (ID %d): %v", series.Name, series.ID, err)
 					return
 				}
@@ -268,10 +327,10 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	processPage(1, firstResp.Results)
 
 	// Fetch & process remaining pages using parallel page workers
-	if totalPages > 1 {
+	if totalPages > 1 && (!s.cfg.CircuitBreakerEnabled || !s.isCircuitTripped()) {
 		pageWorkers := s.cfg.PageWorkers
 		if pageWorkers <= 0 {
-			pageWorkers = 4
+			pageWorkers = 5
 		}
 		pageChan := make(chan int, totalPages)
 		for p := 2; p <= totalPages; p++ {
@@ -288,10 +347,16 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 			go func() {
 				defer pageWg.Done()
 				for pageNum := range pageChan {
+					if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+						return
+					}
 					fStart := time.Now()
 					resp, err := s.client.FetchSeriesPage(ctx, pageNum, pageSize)
 					fDuration := time.Since(fStart)
 					if err != nil {
+						if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+							s.tripCircuitBreaker()
+						}
 						log.Printf("[Syncer] Warning: Error fetching series page %d: %v", pageNum, err)
 						continue
 					}
@@ -326,6 +391,10 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
 
+	if s.database != nil {
+		_ = s.database.UpsertInitialSeriesState(series.ID, series.TMDBID, cleanTitle, series.Year, folderName)
+	}
+
 	if dryRun {
 		log.Printf("[DRY-RUN] Pass 1 Series '%s' (TMDB %s) -> Folder: %s", cleanTitle, series.TMDBID, folderName)
 		return 1, 0, 0, 0, nil
@@ -343,7 +412,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		}
 	}
 
-	// Check if this series has already been activated by user
+	// Check if this series has already been activated by user; if so, keep all episodes up-to-date
 	if s.database != nil {
 		st, _ := s.database.GetSeriesState(series.ID)
 		if st != nil && st.IsActivated {
@@ -385,7 +454,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 
 	// 3. Download poster.jpg & fanart.jpg
 	artStart := time.Now()
-	artCreated := artwork.DownloadSeriesArtwork(seriesDir, series)
+	artCreated := artwork.DownloadSeriesArtwork(seriesDir, series, s.cfg)
 	artDur = time.Since(artStart)
 	created += artCreated
 
@@ -394,17 +463,50 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 
 // PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm files on disk.
 func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, cleanTitle, seriesDir string) (created, preserved int, err error) {
+	// Auto-resolve canonical seriesDir and cleanTitle if not provided
+	if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
+		if s.database != nil {
+			st, _ := s.database.GetSeriesState(seriesID)
+			if st != nil && st.FolderName != "" {
+				seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", st.FolderName)
+				cleanTitle = st.Title
+			}
+		}
+		if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
+			if srs, fetchErr := s.client.FetchSingleSeries(ctx, seriesID); fetchErr == nil && srs != nil {
+				cleanTitle = sanitizer.CleanTitle(srs.Name)
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID)
+				seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
+				if s.database != nil {
+					_ = s.database.UpsertInitialSeriesState(seriesID, srs.TMDBID, cleanTitle, srs.Year, folderName)
+				}
+			}
+		}
+	}
+	if seriesDir == "" {
+		seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", fmt.Sprintf("Series %d", seriesID))
+	}
+	if cleanTitle == "" {
+		cleanTitle = fmt.Sprintf("Series %d", seriesID)
+	}
+
 	episodes, err := s.client.FetchSeriesEpisodes(ctx, seriesID)
 	if err != nil {
+		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+			s.tripCircuitBreaker()
+		}
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
 	}
 
-	// Delete Pass 1 Activation placeholder files if present
+	// Delete Pass 1 Activation placeholder files if present in Season 01
 	season1Dir := filepath.Join(seriesDir, "Season 01")
-	actStrmFilename := fmt.Sprintf("%s - S01E01 - Play to Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle))
-	actNFOFilename := fmt.Sprintf("%s - S01E01 - Play to Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle))
-	_ = os.Remove(filepath.Join(season1Dir, actStrmFilename))
-	_ = os.Remove(filepath.Join(season1Dir, actNFOFilename))
+	if entries, readErr := os.ReadDir(season1Dir); readErr == nil {
+		for _, entry := range entries {
+			if strings.Contains(entry.Name(), "Play to Activate Series") {
+				_ = os.Remove(filepath.Join(season1Dir, entry.Name()))
+			}
+		}
+	}
 
 	for _, ep := range episodes {
 		seasonDir := filepath.Join(seriesDir, fmt.Sprintf("Season %02d", ep.SeasonNumber))
@@ -414,8 +516,13 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 
 		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesID, ep.SeasonNumber, ep.EpisodeNumber, "base")
 
+		ext := ep.ContainerExtension
+		if ext == "" {
+			ext = "mkv"
+		}
+
 		// Record real stream 302 target URL in SQLite
-		realTargetURL := fmt.Sprintf("%s/series/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ep.ContainerExtension)
+		realTargetURL := fmt.Sprintf("%s/series/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
 		if s.database != nil {
 			s.database.SaveStreamVariant(&db.StreamVariant{
 				ItemID:             seriesID,
@@ -426,7 +533,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 				TargetURL:          realTargetURL,
 				Quality:            "1080p",
 				StreamID:           fmt.Sprintf("%d", ep.ID),
-				ContainerExtension: ep.ContainerExtension,
+				ContainerExtension: ext,
 			})
 		}
 
@@ -461,6 +568,10 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
 
+	if s.database != nil {
+		_ = s.database.UpsertInitialMovieState(movie.ID, movie.TMDBID, cleanTitle, movie.Year, folderName)
+	}
+
 	if dryRun {
 		log.Printf("[DRY-RUN] Movie '%s' (TMDB %s) -> Folder: %s", cleanTitle, movie.TMDBID, folderName)
 		return 1, 0, 0, 0, nil
@@ -492,7 +603,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		preserved++
 	}
 
-	// Check if this movie has already been activated by user
+	// Check if this movie has already been activated by user; if so, maintain its quality variants
 	if s.database != nil {
 		st, _ := s.database.GetMovieState(movie.ID)
 		if st != nil && st.IsActivated {
@@ -505,7 +616,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 
 	// 3. Download artwork if logo/backdrop present
 	artStart := time.Now()
-	artCreated := artwork.DownloadMovieArtwork(movieDir, movie)
+	artCreated := artwork.DownloadMovieArtwork(movieDir, movie, s.cfg)
 	artDur = time.Since(artStart)
 	created += artCreated
 
@@ -514,8 +625,42 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 
 // PopulateActivatedMovie resolves backing provider streams for a movie, classifies quality tiers, saves variants to SQLite, writes secondary variant .strm files on disk, and marks movie as activated.
 func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanTitle, movieDir string, year int, tmdbID string) (created, preserved int, baseTargetURL string, err error) {
+	// Auto-resolve canonical movieDir and cleanTitle if not provided
+	if movieDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Movie ") {
+		if s.database != nil {
+			st, _ := s.database.GetMovieState(movieID)
+			if st != nil && st.FolderName != "" {
+				movieDir = filepath.Join(s.cfg.OutputDir, "Movies", st.FolderName)
+				cleanTitle = st.Title
+				year = st.Year
+				tmdbID = st.TMDBID
+			}
+		}
+		if movieDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Movie ") {
+			if mv, fetchErr := s.client.FetchSingleMovie(ctx, movieID); fetchErr == nil && mv != nil {
+				cleanTitle = sanitizer.CleanTitle(mv.Name)
+				year = mv.Year
+				tmdbID = mv.TMDBID
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID)
+				movieDir = filepath.Join(s.cfg.OutputDir, "Movies", folderName)
+				if s.database != nil {
+					_ = s.database.UpsertInitialMovieState(movieID, mv.TMDBID, cleanTitle, mv.Year, folderName)
+				}
+			}
+		}
+	}
+	if movieDir == "" {
+		movieDir = filepath.Join(s.cfg.OutputDir, "Movies", fmt.Sprintf("Movie %d", movieID))
+	}
+	if cleanTitle == "" {
+		cleanTitle = fmt.Sprintf("Movie %d", movieID)
+	}
+
 	relations, err := s.client.FetchMovieProviders(ctx, movieID)
 	if err != nil {
+		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+			s.tripCircuitBreaker()
+		}
 		log.Printf("[Syncer] Warning: Could not fetch provider relations for movie ID %d: %v", movieID, err)
 	}
 
@@ -592,28 +737,10 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
-// TriggerTargetedEmbySeriesRefresh sends a targeted item refresh to Emby when a series is activated.
+// TriggerTargetedEmbySeriesRefresh sends a library refresh to Emby when a series is activated.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
-
-	embyEndpoint := fmt.Sprintf("%s/Items/%d/Refresh", strings.TrimRight(s.cfg.EmbyURL, "/"), seriesID)
-	query := url.Values{}
-	query.Set("Recursive", "true")
-	query.Set("ImageRefreshMode", "Full")
-	query.Set("MetadataRefreshMode", "Full")
-	query.Set("api_key", s.cfg.EmbyAPIKey)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, embyEndpoint+"?"+query.Encode(), nil)
-	if err != nil {
-		log.Printf("[Emby] Failed to create targeted series refresh request: %v", err)
-		return
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err == nil && resp != nil {
-		resp.Body.Close()
-		log.Printf("[Emby] Triggered targeted Emby series refresh for Series ID %d", seriesID)
-	}
+	s.triggerEmbyRefresh(ctx)
 }

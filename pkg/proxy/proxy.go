@@ -114,7 +114,13 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 
 	variantKey := "base"
 	if len(parts) > 1 && parts[1] != "" {
-		variantKey = parts[1]
+		v := parts[1]
+		if idx := strings.Index(v, "."); idx != -1 {
+			v = v[:idx]
+		}
+		if v != "" {
+			variantKey = v
+		}
 	}
 
 	// 1. Query SQLite database for 302 target URL
@@ -174,17 +180,12 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 
 	variantKey := "base"
 	if len(parts) > 3 && parts[3] != "" {
-		variantKey = parts[3]
-	}
-
-	// Check if this series is activated in DB
-	if s.database != nil {
-		st, _ := s.database.GetSeriesState(seriesID)
-		if st == nil || !st.IsActivated {
-			// Trigger async background activation worker while playback starts!
-			if s.onActivation != nil {
-				go s.onActivation(seriesID)
-			}
+		v := parts[3]
+		if idx := strings.Index(v, "."); idx != -1 {
+			v = v[:idx]
+		}
+		if v != "" {
+			variantKey = v
 		}
 	}
 
@@ -194,7 +195,29 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
 	}
 
-	// 2. Fallback to direct Dispatcharr URL if not found in database
+	// Check if this series is activated in DB
+	isActivated := false
+	if s.database != nil {
+		if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.IsActivated {
+			isActivated = true
+		}
+	}
+
+	// If unactivated or target URL not found in cache, run activation
+	if (!isActivated || targetURL == "") && s.onActivation != nil {
+		if targetURL == "" {
+			// Synchronously populate to ensure we redirect to the real Episode ID rather than 404
+			s.onActivation(seriesID)
+			if s.database != nil {
+				targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+			}
+		} else {
+			// Already have S01E01 cached, run remaining episode population in background
+			go s.onActivation(seriesID)
+		}
+	}
+
+	// 2. Fallback to direct Dispatcharr URL if still not found
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
 	}
@@ -235,20 +258,27 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Proxy] Activation request received for Series ID: %d", seriesID)
 
-	// 1. Immediate sub-50ms 302 redirect to Episode 1 stream!
 	targetURL := ""
 	if s.database != nil {
 		targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
 	}
+
+	// Trigger activation to populate real episode target streams
+	if s.onActivation != nil {
+		if targetURL == "" {
+			s.onActivation(seriesID)
+			if s.database != nil {
+				targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+			}
+		} else {
+			go s.onActivation(seriesID)
+		}
+	}
+
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
 	}
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
-
-	// 2. Trigger async background activation worker while player starts streaming!
-	if s.onActivation != nil {
-		go s.onActivation(seriesID)
-	}
 
 	// Sub-50ms Immediate 302 Redirect!
 	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
