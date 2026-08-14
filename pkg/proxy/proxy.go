@@ -111,7 +111,23 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	seriesID := r.URL.Query().Get("series_id")
-	log.Printf("[Proxy] Activation dummy episode triggered for Series ID: %s", seriesID)
+	log.Printf("[Proxy] Activation episode (S00E00) triggered for Series ID: %s", seriesID)
+
+	// Async pre-fetch S01E01 to hydrate Dispatcharr / streamcache ahead of time (500ms timeout)
+	if seriesID != "" {
+		go func(sid string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			prefetchURL := fmt.Sprintf("%s/play/series/%s/1/1.mkv", strings.TrimRight(s.cfg.ProxyPublicURL, "/"), sid)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
+			if err == nil {
+				resp, pErr := http.DefaultClient.Do(req)
+				if pErr == nil && resp != nil {
+					resp.Body.Close()
+				}
+			}
+		}(seriesID)
+	}
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("Series activation event received"))

@@ -156,9 +156,17 @@ func (s *Syncer) processSingleSeries(ctx context.Context, series models.Series, 
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", series.ID, err)
 	}
 
-	if dryRun {
-		log.Printf("[DRY-RUN] Series '%s' (TMDB %s) -> Folder: %s (%d episodes)", cleanTitle, series.TMDBID, folderName, len(episodes))
-		return len(episodes), 0, nil
+	// Write Season 00 Activation STRM file for cache pre-hydration
+	specialsDir := filepath.Join(seriesDir, "Season 00")
+	activateFilename := fmt.Sprintf("%s - S00E00 - Pre-Fetch Cache Activation.strm", sanitizer.SanitizeFileName(cleanTitle))
+	activatePath := filepath.Join(specialsDir, activateFilename)
+	activateURL := fmt.Sprintf("%s/activate?series_id=%d", s.cfg.ProxyPublicURL, series.ID)
+	if actUpdated, err := strm.WriteSTRMFile(activatePath, activateURL); err == nil {
+		if actUpdated {
+			created++
+		} else {
+			preserved++
+		}
 	}
 
 	for _, ep := range episodes {
