@@ -5,9 +5,6 @@ services:
       dockerfile: Dockerfile
     container_name: dp2strm
     restart: unless-stopped
-    ports:
-      # Host:Container port mapping for HTTP 302 redirect handler
-      - "8080:8080"
     volumes:
       # Persistent volume mount for generated .strm files, .nfo metadata, poster/fanart artwork, and SQLite db
       - ./strm:/data/strm
@@ -19,7 +16,7 @@ services:
       # --- Path & Network Handler Options ---
       - OUTPUT_DIR=/data/strm
       - PORT=8080
-      - URL=http://localhost:8080
+      - URL=http://dp2strm:8080
 
       # --- Scheduling & Timezone Options ---
       - TZ=America/Toronto
