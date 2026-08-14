@@ -167,7 +167,7 @@ func (s *Syncer) processSingleSeries(ctx context.Context, series models.Series, 
 		filename := fmt.Sprintf("%s - S%02dE%02d - %s.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber, epTitle)
 		strmPath := filepath.Join(seasonDir, filename)
 
-		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, series.ID, fmt.Sprintf("%d", ep.ID), "mp4")
+		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, series.ID, ep.SeasonNumber, ep.EpisodeNumber, ep.ContainerExtension)
 
 		updated, err := strm.WriteSTRMFile(strmPath, proxyURL)
 		if err != nil {

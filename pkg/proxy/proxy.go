@@ -43,9 +43,9 @@ func NewServer(cfg *models.Config) *Server {
 // Start launches the HTTP server asynchronously.
 func (s *Server) Start() {
 	go func() {
-		log.Printf("[Proxy] Starting HTTP Proxy Server on port %d...", s.cfg.ProxyPort)
+		log.Printf("[Proxy] Starting HTTP Playback Handler on port %d...", s.cfg.ProxyPort)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[Proxy] HTTP Server error: %v", err)
+			log.Printf("[Proxy] HTTP Playback Handler error: %v", err)
 		}
 	}()
 }
@@ -71,7 +71,7 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(path, ".")
 	streamID := parts[0]
 	ext := "mkv"
-	if len(parts) > 1 {
+	if len(parts) > 1 && parts[1] != "" {
 		ext = parts[1]
 	}
 
@@ -83,7 +83,9 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
-	// Path format: /play/series/{series_id}/{stream_id}.{ext}
+	// Semantic path formats:
+	// 1. /play/series/{series_id}/{season}/{episode}.{ext}
+	// 2. /play/series/{series_id}/{stream_id}.{ext}
 	path := strings.TrimPrefix(r.URL.Path, "/play/series/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
@@ -91,16 +93,19 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fileParts := strings.Split(parts[1], ".")
-	streamID := fileParts[0]
-	ext := "mp4"
-	if len(fileParts) > 1 {
+	seriesID := parts[0]
+	lastPart := parts[len(parts)-1]
+	fileParts := strings.Split(lastPart, ".")
+	targetID := fileParts[0]
+	ext := "mkv"
+	if len(fileParts) > 1 && fileParts[1] != "" {
 		ext = fileParts[1]
 	}
 
-	targetURL := fmt.Sprintf("%s/series/agy/agypassword/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), streamID, ext)
+	// Construct Dispatcharr XC playback URL
+	targetURL := fmt.Sprintf("%s/series/agy/agypassword/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), targetID, ext)
 
-	log.Printf("[Proxy] Series Stream %s -> HTTP 302 Redirect: %s", streamID, targetURL)
+	log.Printf("[Proxy] Series %s (Target %s) -> HTTP 302 Redirect: %s", seriesID, targetID, targetURL)
 	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 

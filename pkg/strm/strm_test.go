@@ -5,7 +5,21 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"dp2strm/pkg/models"
 )
+
+func TestGenerateSeriesProxyURL(t *testing.T) {
+	cfg := &models.Config{
+		ProxyPublicURL: "http://localhost:8080",
+	}
+
+	url := GenerateSeriesProxyURL(cfg, 30998, 1, 1, "mkv")
+	want := "http://localhost:8080/play/series/30998/1/1.mkv"
+	if url != want {
+		t.Errorf("GenerateSeriesProxyURL got %q; want %q", url, want)
+	}
+}
 
 func TestWriteSTRMFileAndMtimePreservation(t *testing.T) {
 	tempDir := t.TempDir()
