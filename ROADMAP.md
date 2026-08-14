@@ -25,8 +25,11 @@ This document tracks all completed features and remaining roadmap items for `dp2
 
 ## 🨨 Queued / Roadmap Features (Agreed Architecture Specifications)
 
-- [ ] **`dp2strm` Playback Handler & URL Obfuscation Architecture (`/play/...`)**:
-  - **Rule**: All `.strm` files written to disk MUST point strictly to `dp2strm`'s local playback endpoints (`http://dp2strm:8080/play/movie/...` and `http://dp2strm:8080/play/series/...`).
+- [ ] **`dp2strm` Playback Handler & Clean Extensionless URL Architecture (`/play/...`)**:
+  - **Rule**: All `.strm` files written to disk MUST point strictly to `dp2strm`'s local playback endpoints using **Clean Extensionless URLs**:
+    - Movies: `http://dp2strm:8080/play/movie/{movie_id}` (e.g. `http://dp2strm:8080/play/movie/1058902`)
+    - Series: `http://dp2strm:8080/play/series/{series_id}/{season}/{episode}` (e.g. `http://dp2strm:8080/play/series/30998/1/1`)
+  - **Why Extensionless**: Avoids hardcoding container extensions (`.mkv`/`.mp4`) that could mislead players if upstream sources change containers. Media players handle playback formatting via the HTTP `Content-Type` header delivered during the initial stream handshake.
   - **Zero Disk Edits on Upstream Changes**: When upstream stream IDs change in Dispatcharr or when `STREAMCACHE_URL` mode is toggled on/off, `.strm` files on disk remain 100% untouched. Disk files are ONLY modified on structural changes (e.g. new 4K version added/removed, or new episode released).
   - **Dynamic 302 Redirect**: When a client requests playback (`GET /play/...`), `dp2strm` looks up the current backing stream URL in SQLite/memory. If `STREAMCACHE_URL` is set, it 302 redirects to `<STREAMCACHE_URL>/u/<base64_url>`; otherwise, it 302 redirects to the direct Dispatcharr URL.
   - **Complete Credential Obfuscation**: Upstream subscriber credentials (`agy/agypassword`) and raw Dispatcharr URLs are NEVER written to disk or exposed in Emby's library.
