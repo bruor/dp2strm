@@ -16,13 +16,18 @@
 - **On-Demand TV Series Activation Lifecycle**:
   - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01 - Play to Activate Series.strm` & `.nfo`. Keeps initial library indexing fast across thousands of series.
   - **Pass 2 (On Play)**: Playing Episode 1 **immediately (<50ms)** 302 redirects to playable video while asynchronously populating all real episode `.strm` files, purging placeholders, and updating Emby in the background.
-- **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/strm/dp2strm.db` using WAL (Write-Ahead Logging) mode.
+- **On-Demand Movie Quality Activation**:
+  - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with 100% real NFO metadata and artwork.
+  - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
+  - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
+- **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` (or output dir) using WAL (Write-Ahead Logging) mode (`series_state`, `movie_state`, `stream_variants`).
 - **Smart Series Update Scheduling Engine**:
   - Unactivated & `Ended` series skip fetching episode lists on scheduled sync runs (0 API calls!).
   - `Continuing` series skip checks until `current_date >= next_episode_air_date`.
   - Millisecond `last_modified` checks prevent unnecessary disk writes (`os.Chtimes` preservation).
 - **Emby Multi-Version Hierarchy Support**: Automatically classifies 1080p base default versions (`Movie.strm`) vs 4K secondary versions (`Movie - 4K.strm`) for Emby's version dropdown menu.
-- **`streamcache` Base64 URL Rewriter**: Optional integration with `streamcache` transparent proxy using URL-safe Base64 encoded paths (`<STREAMCACHE_URL>/u/<base64_url>`).
+- **Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preventing port 80 connection errors in FFmpeg/Emby.
+- **`streamcache` Base64 URL Rewriter**: Optional integration with `streamcache` transparent proxy using URL-safe Base64 encoded query paths (`<STREAMCACHE_URL>?url=<escaped_target>`).
 - **Timezone-Aware Cron Scheduler**: Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).
 
 ---
@@ -41,6 +46,7 @@ services:
       - "8080:8080"
     volumes:
       - ./strm:/data/strm
+      - ./data:/data/db
     environment:
       # Required Dispatcharr Connection
       - DISPATCHARR_URL=https://your-dispatcharr-server.com
@@ -55,6 +61,9 @@ services:
       - TZ=America/Toronto
       - SYNC_INTERVAL=1h
       - BATCH_SIZE=0 # 0 = Unlimited full library sync
+      - PAGE_SIZE=1000 # Number of items fetched per API page request
+      - PAGE_WORKERS=4 # Number of concurrent page fetch workers
+      - MAX_PROBE_CONCURRENCY=5 # Max concurrent movie processing workers
 
       # Streamcache Integration (Optional)
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
@@ -72,31 +81,32 @@ services:
 
 When mounting a shared host directory into Docker containers, permissions can become tricky if different containers run under different User IDs (e.g. `root`, `appuser`, or `emby` `uid=1000`).
 
-To ensure **any container or host user can read and write files** into the shared folder, while keeping read-only protection for Emby, follow this guide:
+To ensure **any container or host user can read and write files** into the shared folder, follow this guide:
 
 ### 1. Configure Host POSIX Default ACLs (One-Time Host Setup)
 
 Run the following commands on your Linux host machine targeting your output directory (e.g. `/mnt/media/strm_output`):
 
 ```bash
-# Step 1: Grant full read/write/execute permissions to existing files and folders
-sudo chmod -R 777 /mnt/media/strm_output
-
-# Step 2: Set POSIX Default Access Control Lists (ACLs)
+# Step 1: Set POSIX Default Access Control Lists (ACLs)
 # This forces ALL newly created files and subdirectories to inherit full rwx permissions automatically!
-sudo setfacl -R -d -m u::rwx,g::rwx,o::rwx /mnt/media/strm_output
-sudo setfacl -R -m u::rwx,g::rwx,o::rwx /mnt/media/strm_output
+sudo setfacl -R -d -m g::rwx /mnt/media/strm_output
+sudo setfacl -R -d -m m::rwx /mnt/media/strm_output
+
+# Step 2: Apply ACLs to existing files/directories
+sudo setfacl -R -m g::rwx /mnt/media/strm_output
+sudo setfacl -R -m m::rwx /mnt/media/strm_output
 ```
 
 #### **How This Works**:
-- **Automatic Inheritance**: Every new `.strm`, `.nfo`, or `poster.jpg` created by `dp2strm` (or any host user) inherits `777` permissions automatically.
-- **Zero Permission Conflicts**: Prevents permission denied errors when multiple containers access the directory.
+- **Automatic Inheritance**: Every new `.strm`, `.nfo`, or `poster.jpg` created by `dp2strm` inherits group `rwx` permissions automatically.
+- **`0666` / `0777` Creation Modes**: `dp2strm` creates files with `0666` mode and directories with `0777` mode so Linux kernel POSIX ACL inheritance works without permission masking.
 
 ---
 
 ### 2. Read-Only Protection for Emby (`:ro` Mount)
 
-Even though POSIX ACLs grant `777` permissions on disk, you can mount the directory as **Read-Only (`:ro`)** in Emby's container definition:
+Even though POSIX ACLs grant `rwx` permissions on disk, you can mount the directory as **Read-Only (`:ro`)** in Emby's container definition:
 
 ```yaml
 services:
@@ -125,6 +135,9 @@ services:
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
 | `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
 | `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
+| `PAGE_SIZE` | `1000` | Number of items fetched per API page request |
+| `PAGE_WORKERS` | `4` | Number of concurrent page fetch workers |
+| `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
