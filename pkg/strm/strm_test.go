@@ -21,6 +21,37 @@ func TestGenerateSeriesProxyURL(t *testing.T) {
 	}
 }
 
+func TestGenerateMovieProxyURL(t *testing.T) {
+	cfg := &models.Config{
+		URL:  "http://dp2strm:9199",
+		Port: 9199,
+	}
+
+	// Base version
+	baseURL := GenerateMovieProxyURL(cfg, 1086665, "base")
+	wantBase := "http://dp2strm:9199/play/movie/1086665"
+	if baseURL != wantBase {
+		t.Errorf("GenerateMovieProxyURL base got %q; want %q", baseURL, wantBase)
+	}
+
+	// 4K variant version
+	fourKURL := GenerateMovieProxyURL(cfg, 1086665, "4k")
+	wantFourK := "http://dp2strm:9199/play/movie/1086665/4k"
+	if fourKURL != wantFourK {
+		t.Errorf("GenerateMovieProxyURL 4k got %q; want %q", fourKURL, wantFourK)
+	}
+
+	// URL missing port with custom port configured
+	cfgNoPort := &models.Config{
+		URL:  "http://dp2strm",
+		Port: 9199,
+	}
+	fourKURLNormalized := GenerateMovieProxyURL(cfgNoPort, 1086665, "4k")
+	if fourKURLNormalized != wantFourK {
+		t.Errorf("GenerateMovieProxyURL normalized 4k got %q; want %q", fourKURLNormalized, wantFourK)
+	}
+}
+
 func TestWriteSTRMFileAndMtimePreservation(t *testing.T) {
 	tempDir := t.TempDir()
 	strmPath := filepath.Join(tempDir, "test.strm")

@@ -66,8 +66,10 @@ func LoadConfig() *models.Config {
 			cfg.FetchAheadCount = cnt
 		}
 	}
+	urlEnvSet := false
 	if v := os.Getenv("URL"); v != "" {
 		cfg.URL = v
+		urlEnvSet = true
 	}
 	if v := os.Getenv("EMBY_URL"); v != "" {
 		cfg.EmbyURL = v
@@ -88,6 +90,9 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil && p > 0 {
 			cfg.Port = p
+			if !urlEnvSet {
+				cfg.URL = fmt.Sprintf("http://localhost:%d", p)
+			}
 		}
 	}
 	if v := os.Getenv("RETENTION_GRACE_DAYS"); v != "" {
@@ -130,11 +135,12 @@ func LoadConfig() *models.Config {
 	}
 
 	// Normalize URL: Ensure port is appended if missing and non-standard (e.g. "http://dp2strm" -> "http://dp2strm:8080")
+	cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
 	if parsed, err := url.Parse(cfg.URL); err == nil && parsed.Host != "" {
 		if parsed.Port() == "" && cfg.Port != 80 && cfg.Port != 443 {
 			if !strings.Contains(parsed.Host, ":") {
 				parsed.Host = fmt.Sprintf("%s:%d", parsed.Host, cfg.Port)
-				cfg.URL = parsed.String()
+				cfg.URL = strings.TrimRight(parsed.String(), "/")
 			}
 		}
 	}

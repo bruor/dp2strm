@@ -52,16 +52,31 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 }
 
 func TestURLPortNormalization(t *testing.T) {
+	// Case 1: Hostname without port and non-standard PORT
 	os.Setenv("URL", "http://dp2strm")
 	os.Setenv("PORT", "9199")
-	defer func() {
-		os.Unsetenv("URL")
-		os.Unsetenv("PORT")
-	}()
-
 	cfg := LoadConfig()
 	want := "http://dp2strm:9199"
 	if cfg.URL != want {
 		t.Errorf("URL = %q; want %q", cfg.URL, want)
 	}
+
+	// Case 2: URL with trailing slash and custom PORT
+	os.Setenv("URL", "http://dp2strm/")
+	os.Setenv("PORT", "9199")
+	cfg = LoadConfig()
+	if cfg.URL != want {
+		t.Errorf("URL with trailing slash = %q; want %q", cfg.URL, want)
+	}
+
+	// Case 3: PORT set without URL env var
+	os.Unsetenv("URL")
+	os.Setenv("PORT", "9199")
+	cfg = LoadConfig()
+	wantPortOnly := "http://localhost:9199"
+	if cfg.URL != wantPortOnly {
+		t.Errorf("URL without URL env = %q; want %q", cfg.URL, wantPortOnly)
+	}
+
+	os.Unsetenv("PORT")
 }
