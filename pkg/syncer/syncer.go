@@ -308,13 +308,16 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
 
-	relations, err := s.client.FetchMovieProviders(ctx, movie.ID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to fetch providers for movie ID %d: %w", movie.ID, err)
+	relations := movie.Providers
+	if len(relations) == 0 {
+		var pErr error
+		relations, pErr = s.client.FetchMovieProviders(ctx, movie.ID)
+		if pErr != nil {
+			return 0, 0, fmt.Errorf("failed to fetch providers for movie ID %d: %w", movie.ID, pErr)
+		}
 	}
 
 	if len(relations) == 0 {
-		log.Printf("[Syncer] Warning: Movie '%s' (ID %d) returned 0 provider streams from Dispatcharr", cleanTitle, movie.ID)
 		return 0, 0, nil
 	}
 
