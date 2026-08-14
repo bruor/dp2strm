@@ -42,8 +42,8 @@ services:
       dockerfile: Dockerfile
     container_name: dp2strm
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # ports:
+    #   - "8080:8080"
     volumes:
       - ./strm:/data/strm
       - ./data:/data/db
@@ -61,8 +61,8 @@ services:
       - TZ=America/Toronto
       - SYNC_INTERVAL=1h
       - BATCH_SIZE=0 # 0 = Unlimited full library sync
-      - PAGE_SIZE=1000 # Number of items fetched per API page request
-      - PAGE_WORKERS=4 # Number of concurrent page fetch workers
+      - PAGE_SIZE=100 # Number of items fetched per API page request (Dispatcharr max: 100)
+      - PAGE_WORKERS=5 # Number of concurrent page fetch workers
       - MAX_PROBE_CONCURRENCY=5 # Max concurrent movie processing workers
 
       # Streamcache Integration (Optional)
