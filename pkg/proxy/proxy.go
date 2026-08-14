@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -70,13 +70,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
-// format302Target formats the final 302 target URL, applying Base64 streamcache rewriting if configured.
+// format302Target formats the final 302 target URL, appending ?url= parameter for streamcache if configured.
 func format302Target(rawURL, streamcacheURL string) string {
 	if streamcacheURL == "" {
 		return rawURL
 	}
-	encoded := base64.URLEncoding.EncodeToString([]byte(rawURL))
-	return fmt.Sprintf("%s/u/%s", strings.TrimRight(streamcacheURL, "/"), encoded)
+	escapedURL := url.QueryEscape(rawURL)
+	return fmt.Sprintf("%s?url=%s", strings.TrimRight(streamcacheURL, "/"), escapedURL)
 }
 
 func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {

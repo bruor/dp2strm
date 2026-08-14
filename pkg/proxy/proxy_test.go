@@ -1,9 +1,9 @@
 package proxy
 
 import (
-	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +12,7 @@ import (
 	"dp2strm/pkg/models"
 )
 
-func TestProxyServerExtensionlessAndBase64(t *testing.T) {
+func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "dp2strm_proxy_test_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -54,7 +54,7 @@ func TestProxyServerExtensionlessAndBase64(t *testing.T) {
 
 	srv := NewServer(cfg, database, onActivation)
 
-	// 1. Test Extensionless Movie Base Playback
+	// 1. Test Extensionless Movie Base Playback with ?url= parameter
 	req := httptest.NewRequest("GET", "/play/movie/1058902", nil)
 	rec := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
@@ -62,13 +62,13 @@ func TestProxyServerExtensionlessAndBase64(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Errorf("Expected 302 Found for movie play, got %d", rec.Code)
 	}
-	expectedBase64Movie := base64.URLEncoding.EncodeToString([]byte(movieTarget))
-	expectedLocation := "http://streamcache:8080/u/" + expectedBase64Movie
+	expectedQueryMovie := url.QueryEscape(movieTarget)
+	expectedLocation := "http://streamcache:8080?url=" + expectedQueryMovie
 	if loc := rec.Header().Get("Location"); loc != expectedLocation {
 		t.Errorf("Expected 302 Location %s, got %s", expectedLocation, loc)
 	}
 
-	// 2. Test Extensionless Movie 4K Variant Playback
+	// 2. Test Extensionless Movie 4K Variant Playback with ?url= parameter
 	req = httptest.NewRequest("GET", "/play/movie/1058902/4k", nil)
 	rec = httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
@@ -76,8 +76,8 @@ func TestProxyServerExtensionlessAndBase64(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Errorf("Expected 302 Found for 4k movie play, got %d", rec.Code)
 	}
-	expectedBase644k := base64.URLEncoding.EncodeToString([]byte(movie4kTarget))
-	expectedLocation4k := "http://streamcache:8080/u/" + expectedBase644k
+	expectedQuery4k := url.QueryEscape(movie4kTarget)
+	expectedLocation4k := "http://streamcache:8080?url=" + expectedQuery4k
 	if loc := rec.Header().Get("Location"); loc != expectedLocation4k {
 		t.Errorf("Expected 302 Location %s, got %s", expectedLocation4k, loc)
 	}
@@ -90,8 +90,8 @@ func TestProxyServerExtensionlessAndBase64(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Errorf("Expected 302 Found for series play, got %d", rec.Code)
 	}
-	expectedBase64Series := base64.URLEncoding.EncodeToString([]byte(seriesTarget))
-	expectedSeriesLoc := "http://streamcache:8080/u/" + expectedBase64Series
+	expectedQuerySeries := url.QueryEscape(seriesTarget)
+	expectedSeriesLoc := "http://streamcache:8080?url=" + expectedQuerySeries
 	if loc := rec.Header().Get("Location"); loc != expectedSeriesLoc {
 		t.Errorf("Expected 302 Location %s, got %s", expectedSeriesLoc, loc)
 	}
