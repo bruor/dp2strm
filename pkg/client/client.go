@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -98,12 +99,26 @@ func (c *Client) FetchMovieProviders(ctx context.Context, movieID int) ([]models
 	}
 	defer resp.Body.Close()
 
-	var relations []models.ProviderRelation
-	if err := json.NewDecoder(resp.Body).Decode(&relations); err != nil {
-		return nil, fmt.Errorf("failed to decode movie providers JSON: %w", err)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read movie providers body: %w", err)
 	}
 
-	return relations, nil
+	// 1. Try decoding as direct JSON array [...]
+	var relations []models.ProviderRelation
+	if err := json.Unmarshal(bodyBytes, &relations); err == nil {
+		return relations, nil
+	}
+
+	// 2. Try decoding as paginated object {"results": [...]}
+	var paginated struct {
+		Results []models.ProviderRelation `json:"results"`
+	}
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil {
+		return paginated.Results, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse movie providers response for movie ID %d", movieID)
 }
 
 // TriggerMovieProviderInfo fetches detailed provider info via GET /api/vod/movies/{id}/provider-info/
@@ -120,12 +135,12 @@ func (c *Client) TriggerMovieProviderInfo(ctx context.Context, movieID, relation
 	}
 	defer resp.Body.Close()
 
-	var details map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode provider info JSON: %w", err)
 	}
 
-	return details, nil
+	return result, nil
 }
 
 // FetchSeriesPage retrieves a single page of TV series from GET /api/vod/series/
@@ -157,10 +172,24 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 	}
 	defer resp.Body.Close()
 
-	var episodes []models.Episode
-	if err := json.NewDecoder(resp.Body).Decode(&episodes); err != nil {
-		return nil, fmt.Errorf("failed to decode series episodes JSON: %w", err)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read series episodes body: %w", err)
 	}
 
-	return episodes, nil
+	// 1. Try decoding as direct JSON array [...]
+	var episodes []models.Episode
+	if err := json.Unmarshal(bodyBytes, &episodes); err == nil {
+		return episodes, nil
+	}
+
+	// 2. Try decoding as paginated object {"results": [...]}
+	var paginated struct {
+		Results []models.Episode `json:"results"`
+	}
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil {
+		return paginated.Results, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse series episodes response for series ID %d", seriesID)
 }

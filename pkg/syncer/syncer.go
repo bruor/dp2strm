@@ -291,6 +291,7 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 	}
 
 	if len(relations) == 0 {
+		log.Printf("[Syncer] Warning: Movie '%s' (ID %d) returned 0 provider streams from Dispatcharr", cleanTitle, movie.ID)
 		return 0, 0, nil
 	}
 
