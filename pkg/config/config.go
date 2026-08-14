@@ -21,6 +21,8 @@ func DefaultConfig() *models.Config {
 		ProxyPort:             8080,
 		ProxyPublicURL:        "http://localhost:8080",
 		SyncInterval:          0, // 0 = run once by default
+		SyncCron:              "",
+		TZ:                    "UTC",
 		BatchSize:             0, // 0 = unlimited
 		CircuitBreakerEnabled: true,
 		MaxProbeConcurrency:   5,
@@ -59,6 +61,12 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("EMBY_API_KEY"); v != "" {
 		cfg.EmbyAPIKey = v
+	}
+	if v := os.Getenv("SYNC_CRON"); v != "" {
+		cfg.SyncCron = v
+	}
+	if v := os.Getenv("TZ"); v != "" {
+		cfg.TZ = v
 	}
 
 	if v := os.Getenv("PROXY_PORT"); v != "" {

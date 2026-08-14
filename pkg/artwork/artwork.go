@@ -90,3 +90,33 @@ func DownloadMovieArtwork(movieDir string, movie models.Movie) (postersCreated i
 
 	return postersCreated
 }
+
+// DownloadSeriesArtwork saves poster.jpg and fanart.jpg for a TV series in the item directory.
+func DownloadSeriesArtwork(seriesDir string, series models.Series) (artworkCreated int) {
+	var posterURL string
+	if logo, ok := series.CustomProperties["logo"].(map[string]any); ok {
+		if urlStr, ok := logo["url"].(string); ok && urlStr != "" {
+			posterURL = urlStr
+		} else if cacheStr, ok := logo["cache_url"].(string); ok && cacheStr != "" {
+			posterURL = cacheStr
+		}
+	}
+
+	if posterURL != "" {
+		posterPath := filepath.Join(seriesDir, "poster.jpg")
+		if created, err := DownloadArtwork(posterPath, posterURL); err == nil && created {
+			artworkCreated++
+		}
+	}
+
+	if backdrops, ok := series.CustomProperties["backdrop_path"].([]any); ok && len(backdrops) > 0 {
+		if backdropURL, ok := backdrops[0].(string); ok && backdropURL != "" {
+			fanartPath := filepath.Join(seriesDir, "fanart.jpg")
+			if created, err := DownloadArtwork(fanartPath, backdropURL); err == nil && created {
+				artworkCreated++
+			}
+		}
+	}
+
+	return artworkCreated
+}

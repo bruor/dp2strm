@@ -4,27 +4,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"dp2strm/pkg/models"
 )
 
-// GenerateMovieProxyURL builds the generic credential-free playback URL pointing to dp2strm playback handler.
-func GenerateMovieProxyURL(cfg *models.Config, streamID, container string) string {
-	ext := container
-	if ext == "" {
-		ext = "mkv"
+// GenerateMovieProxyURL builds the clean extensionless playback URL pointing to dp2strm playback handler.
+// Format: /play/movie/{movie_id} or /play/movie/{movie_id}/{variant_key}
+func GenerateMovieProxyURL(cfg *models.Config, movieID int, variantKey string) string {
+	base := strings.TrimRight(cfg.ProxyPublicURL, "/")
+	if variantKey == "" || variantKey == "base" {
+		return fmt.Sprintf("%s/play/movie/%d", base, movieID)
 	}
-	return fmt.Sprintf("%s/play/movie/%s.%s", cfg.ProxyPublicURL, streamID, ext)
+	return fmt.Sprintf("%s/play/movie/%d/%s", base, movieID, variantKey)
 }
 
-// GenerateSeriesProxyURL builds the semantic credential-free playback URL for TV episodes.
-// Format: /play/series/<series_id>/<season>/<episode>.<ext>
-func GenerateSeriesProxyURL(cfg *models.Config, seriesID int, season int, episode int, container string) string {
-	ext := container
-	if ext == "" {
-		ext = "mkv"
+// GenerateSeriesProxyURL builds the clean extensionless playback URL for TV episodes.
+// Format: /play/series/{series_id}/{season}/{episode} or /play/series/{series_id}/{season}/{episode}/{variant_key}
+func GenerateSeriesProxyURL(cfg *models.Config, seriesID int, season int, episode int, variantKey string) string {
+	base := strings.TrimRight(cfg.ProxyPublicURL, "/")
+	if variantKey == "" || variantKey == "base" {
+		return fmt.Sprintf("%s/play/series/%d/%d/%d", base, seriesID, season, episode)
 	}
-	return fmt.Sprintf("%s/play/series/%d/%d/%d.%s", cfg.ProxyPublicURL, seriesID, season, episode, ext)
+	return fmt.Sprintf("%s/play/series/%d/%d/%d/%s", base, seriesID, season, episode, variantKey)
 }
 
 // WriteSTRMFile writes a .strm file on disk, preserving mtime if the content is identical.

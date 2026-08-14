@@ -13,6 +13,8 @@ type Config struct {
 	ProxyPort             int           `json:"proxy_port"`
 	ProxyPublicURL        string        `json:"proxy_public_url"`
 	SyncInterval          time.Duration `json:"sync_interval"`
+	SyncCron              string        `json:"sync_cron"`
+	TZ                    string        `json:"tz"`
 	BatchSize             int           `json:"batch_size"`
 	CircuitBreakerEnabled bool          `json:"circuit_breaker_enabled"`
 	MaxProbeConcurrency   int           `json:"max_probe_concurrency"`
@@ -29,53 +31,54 @@ type Category struct {
 
 // Movie represents a Dispatcharr movie entity.
 type Movie struct {
-	ID               int               `json:"id"`
-	UUID             string            `json:"uuid"`
-	Name             string            `json:"name"`
-	Description      string            `json:"description"`
-	Year             int               `json:"year"`
-	Rating           string            `json:"rating"`
-	Genre            string            `json:"genre"`
-	DurationSecs     int               `json:"duration_secs"`
-	TMDBID           string            `json:"tmdb_id"`
-	IMDBID           string            `json:"imdb_id"`
-	IsAdult          bool              `json:"is_adult"`
-	CustomProperties map[string]any    `json:"custom_properties"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID               int                `json:"id"`
+	UUID             string             `json:"uuid"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description"`
+	Year             int                `json:"year"`
+	Rating           string             `json:"rating"`
+	Genre            string             `json:"genre"`
+	DurationSecs     int                `json:"duration_secs"`
+	TMDBID           string             `json:"tmdb_id"`
+	IMDBID           string             `json:"imdb_id"`
+	IsAdult          bool               `json:"is_adult"`
+	CustomProperties map[string]any     `json:"custom_properties"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
 	Providers        []ProviderRelation `json:"providers,omitempty"`
 }
 
 // Series represents a Dispatcharr TV series entity.
 type Series struct {
-	ID               int               `json:"id"`
-	UUID             string            `json:"uuid"`
-	Name             string            `json:"name"`
-	Description      string            `json:"description"`
-	Year             int               `json:"year"`
-	Rating           string            `json:"rating"`
-	Genre            string            `json:"genre"`
-	TMDBID           string            `json:"tmdb_id"`
-	IMDBID           string            `json:"imdb_id"`
-	CustomProperties map[string]any    `json:"custom_properties"`
-	EpisodeCount     int               `json:"episode_count"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID               int                `json:"id"`
+	UUID             string             `json:"uuid"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description"`
+	Year             int                `json:"year"`
+	Rating           string             `json:"rating"`
+	Genre            string             `json:"genre"`
+	TMDBID           string             `json:"tmdb_id"`
+	IMDBID           string             `json:"imdb_id"`
+	CustomProperties map[string]any     `json:"custom_properties"`
+	EpisodeCount     int                `json:"episode_count"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
 	Providers        []ProviderRelation `json:"providers,omitempty"`
 }
 
 // Episode represents an episode of a TV series.
 type Episode struct {
-	ID            int    `json:"id"`
-	UUID          string `json:"uuid"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	SeasonNumber  int    `json:"season_number"`
-	EpisodeNumber int    `json:"episode_number"`
-	DurationSecs  int    `json:"duration_secs"`
-	TMDBID        string `json:"tmdb_id"`
-	IMDBID        string `json:"imdb_id"`
-	SeriesID      int    `json:"series_id"`
+	ID                 int    `json:"id"`
+	UUID               string `json:"uuid"`
+	Name               string `json:"name"`
+	Description        string `json:"description"`
+	SeasonNumber       int    `json:"season_number"`
+	EpisodeNumber      int    `json:"episode_number"`
+	DurationSecs       int    `json:"duration_secs"`
+	TMDBID             string `json:"tmdb_id"`
+	IMDBID             string `json:"imdb_id"`
+	SeriesID           int    `json:"series_id"`
+	ContainerExtension string `json:"container_extension"`
 }
 
 // ProviderRelation represents an M3UMovieRelation or M3UEpisodeRelation.

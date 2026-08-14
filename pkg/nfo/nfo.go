@@ -19,6 +19,26 @@ type MovieNFO struct {
 	UniqueID []UniqueID `xml:"uniqueid"`
 }
 
+type TVShowNFO struct {
+	XMLName       xml.Name   `xml:"tvshow"`
+	Title         string     `xml:"title"`
+	OriginalTitle string     `xml:"originaltitle,omitempty"`
+	Year          int        `xml:"year,omitempty"`
+	Plot          string     `xml:"plot,omitempty"`
+	Genre         string     `xml:"genre,omitempty"`
+	Rating        string     `xml:"rating,omitempty"`
+	UniqueID      []UniqueID `xml:"uniqueid"`
+}
+
+type EpisodeNFO struct {
+	XMLName  xml.Name   `xml:"episodedetails"`
+	Title    string     `xml:"title"`
+	Season   int        `xml:"season"`
+	Episode  int        `xml:"episode"`
+	Plot     string     `xml:"plot,omitempty"`
+	UniqueID []UniqueID `xml:"uniqueid"`
+}
+
 type UniqueID struct {
 	Type    string `xml:"type,attr"`
 	Default string `xml:"default,attr,omitempty"`
@@ -44,7 +64,52 @@ func WriteMovieNFO(filePath string, movie models.Movie) (bool, error) {
 		UniqueID: uniqueIDs,
 	}
 
-	output, err := xml.MarshalIndent(nfoData, "", "  ")
+	return writeNFOData(filePath, nfoData)
+}
+
+// WriteTVShowNFO generates a Kodi/Emby compatible tvshow.nfo file for a TV series.
+func WriteTVShowNFO(filePath string, series models.Series) (bool, error) {
+	uniqueIDs := []UniqueID{}
+	if series.TMDBID != "" {
+		uniqueIDs = append(uniqueIDs, UniqueID{Type: "tmdb", Default: "true", Value: series.TMDBID})
+	}
+	if series.IMDBID != "" {
+		uniqueIDs = append(uniqueIDs, UniqueID{Type: "imdb", Value: series.IMDBID})
+	}
+
+	nfoData := TVShowNFO{
+		Title:         series.Name,
+		OriginalTitle: series.Name,
+		Year:          series.Year,
+		Plot:          series.Description,
+		Genre:         series.Genre,
+		Rating:        series.Rating,
+		UniqueID:      uniqueIDs,
+	}
+
+	return writeNFOData(filePath, nfoData)
+}
+
+// WriteEpisodeNFO generates a Kodi/Emby compatible episode .nfo file.
+func WriteEpisodeNFO(filePath string, title string, season, ep int, plot string, tmdbID string) (bool, error) {
+	uniqueIDs := []UniqueID{}
+	if tmdbID != "" {
+		uniqueIDs = append(uniqueIDs, UniqueID{Type: "tmdb", Default: "true", Value: tmdbID})
+	}
+
+	nfoData := EpisodeNFO{
+		Title:    title,
+		Season:   season,
+		Episode:  ep,
+		Plot:     plot,
+		UniqueID: uniqueIDs,
+	}
+
+	return writeNFOData(filePath, nfoData)
+}
+
+func writeNFOData(filePath string, nfoStruct interface{}) (bool, error) {
+	output, err := xml.MarshalIndent(nfoStruct, "", "  ")
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal NFO XML: %w", err)
 	}

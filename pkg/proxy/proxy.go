@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,19 +10,27 @@ import (
 	"strings"
 	"time"
 
+	"dp2strm/pkg/db"
 	"dp2strm/pkg/models"
 )
 
+// ActivationCallback is a function signature for background series activation processing.
+type ActivationCallback func(seriesID int)
+
 // Server is the HTTP client playback handler (issues HTTP 302 redirects to Dispatcharr / streamcache).
 type Server struct {
-	cfg        *models.Config
-	httpServer *http.Server
+	cfg          *models.Config
+	database     *db.DB
+	onActivation ActivationCallback
+	httpServer   *http.Server
 }
 
 // NewServer creates a new HTTP client playback handler server.
-func NewServer(cfg *models.Config) *Server {
+func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallback) *Server {
 	srv := &Server{
-		cfg: cfg,
+		cfg:          cfg,
+		database:     database,
+		onActivation: onActivation,
 	}
 
 	mux := http.NewServeMux()
@@ -44,7 +53,7 @@ func NewServer(cfg *models.Config) *Server {
 // Start launches the HTTP server asynchronously.
 func (s *Server) Start() {
 	go func() {
-		log.Printf("[Proxy] Starting HTTP Playback Handler on port %d...", s.cfg.ProxyPort)
+		log.Printf("[Proxy] Starting Extensionless Playback Handler on port %d...", s.cfg.ProxyPort)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[Proxy] HTTP Playback Handler error: %v", err)
 		}
@@ -61,99 +70,165 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
+// format302Target formats the final 302 target URL, applying Base64 streamcache rewriting if configured.
+func format302Target(rawURL, streamcacheURL string) string {
+	if streamcacheURL == "" {
+		return rawURL
+	}
+	encoded := base64.URLEncoding.EncodeToString([]byte(rawURL))
+	return fmt.Sprintf("%s/u/%s", strings.TrimRight(streamcacheURL, "/"), encoded)
+}
+
 func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
-	// Path format: /play/movie/{stream_id}.{ext}
+	// Extensionless Path formats:
+	// 1. /play/movie/{movie_id}
+	// 2. /play/movie/{movie_id}/{variant} (e.g. 4k)
 	path := strings.TrimPrefix(r.URL.Path, "/play/movie/")
+	path = strings.TrimSuffix(path, "/")
 	if path == "" {
-		http.Error(w, "Stream ID required", http.StatusBadRequest)
+		http.Error(w, "Movie ID required", http.StatusBadRequest)
 		return
 	}
 
-	parts := strings.Split(path, ".")
-	streamID := parts[0]
-	ext := "mkv"
-	if len(parts) > 1 && parts[1] != "" {
-		ext = parts[1]
+	parts := strings.Split(path, "/")
+	rawID := parts[0]
+	// Strip trailing extensions if present for legacy compatibility
+	if idx := strings.Index(rawID, "."); idx != -1 {
+		rawID = rawID[:idx]
 	}
 
-	// Construct Dispatcharr XC playback URL
-	targetURL := fmt.Sprintf("%s/movie/agy/agypassword/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), streamID, ext)
+	movieID, err := strconv.Atoi(rawID)
+	if err != nil {
+		http.Error(w, "Invalid movie ID", http.StatusBadRequest)
+		return
+	}
 
-	log.Printf("[Proxy] Movie Stream %s -> HTTP 302 Redirect: %s", streamID, targetURL)
-	http.Redirect(w, r, targetURL, http.StatusFound)
+	variantKey := "base"
+	if len(parts) > 1 && parts[1] != "" {
+		variantKey = parts[1]
+	}
+
+	// 1. Query SQLite database for 302 target URL
+	targetURL := ""
+	if s.database != nil {
+		targetURL, _ = s.database.GetMovieTargetURL(movieID, variantKey)
+	}
+
+	// 2. Fallback to direct Dispatcharr URL if not found in database
+	if targetURL == "" {
+		targetURL = fmt.Sprintf("%s/movie/agy/agypassword/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), movieID)
+	}
+
+	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+	log.Printf("[Proxy] Movie %d (Variant '%s') -> HTTP 302 Redirect: %s", movieID, variantKey, finalRedirectURL)
+	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
 }
 
 func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
-	// Semantic path formats:
-	// 1. /play/series/{series_id}/{season}/{episode}.{ext}
-	// 2. /play/series/{series_id}/{stream_id}.{ext}
+	// Extensionless Path formats:
+	// 1. /play/series/{series_id}/{season}/{episode}
+	// 2. /play/series/{series_id}/{season}/{episode}/{variant} (e.g. 4k)
 	path := strings.TrimPrefix(r.URL.Path, "/play/series/")
+	path = strings.TrimSuffix(path, "/")
 	parts := strings.Split(path, "/")
-	if len(parts) < 2 {
-		http.Error(w, "Invalid series stream path", http.StatusBadRequest)
+	if len(parts) < 3 {
+		http.Error(w, "Invalid series stream path (expected /play/series/{id}/{season}/{episode})", http.StatusBadRequest)
 		return
 	}
 
-	seriesID := parts[0]
-	lastPart := parts[len(parts)-1]
-	fileParts := strings.Split(lastPart, ".")
-	targetID := fileParts[0]
-	ext := "mkv"
-	if len(fileParts) > 1 && fileParts[1] != "" {
-		ext = fileParts[1]
+	rawSeriesID := parts[0]
+	seriesID, sErr := strconv.Atoi(rawSeriesID)
+	seasonNum, seErr := strconv.Atoi(parts[1])
+
+	rawEp := parts[2]
+	if idx := strings.Index(rawEp, "."); idx != -1 {
+		rawEp = rawEp[:idx]
+	}
+	epNum, epErr := strconv.Atoi(rawEp)
+
+	if sErr != nil || seErr != nil || epErr != nil {
+		http.Error(w, "Invalid numeric parameters in series path", http.StatusBadRequest)
+		return
 	}
 
-	// Construct Dispatcharr XC playback URL
-	targetURL := fmt.Sprintf("%s/series/agy/agypassword/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), targetID, ext)
+	variantKey := "base"
+	if len(parts) > 3 && parts[3] != "" {
+		variantKey = parts[3]
+	}
 
-	log.Printf("[Proxy] Series %s (Target %s) -> HTTP 302 Redirect: %s", seriesID, targetID, targetURL)
-
-	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail)
-	if len(parts) >= 3 && s.cfg.FetchAheadCount > 0 {
-		seasonNum, sErr := strconv.Atoi(parts[1])
-		epNum, eErr := strconv.Atoi(targetID)
-		if sErr == nil && eErr == nil {
-			go func(sid string, s, e, count int) {
-				for i := 1; i <= count; i++ {
-					nextEp := e + i
-					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-					prefetchURL := fmt.Sprintf("%s/play/series/%s/%d/%d.mkv", strings.TrimRight(s.cfg.ProxyPublicURL, "/"), sid, s, nextEp)
-					req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
-					if err == nil {
-						resp, pErr := http.DefaultClient.Do(req)
-						if pErr == nil && resp != nil {
-							resp.Body.Close()
-						}
-					}
-					cancel()
-				}
-			}(seriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+	// Check if this series is activated in DB
+	if s.database != nil {
+		st, _ := s.database.GetSeriesState(seriesID)
+		if st == nil || !st.IsActivated {
+			// Trigger async background activation worker while playback starts!
+			if s.onActivation != nil {
+				go s.onActivation(seriesID)
+			}
 		}
 	}
 
-	http.Redirect(w, r, targetURL, http.StatusFound)
+	// 1. Query SQLite database for 302 target URL
+	targetURL := ""
+	if s.database != nil {
+		targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+	}
+
+	// 2. Fallback to direct Dispatcharr URL if not found in database
+	if targetURL == "" {
+		targetURL = fmt.Sprintf("%s/series/agy/agypassword/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), seriesID)
+	}
+
+	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+	log.Printf("[Proxy] Series %d S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
+
+	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail)
+	if s.cfg.FetchAheadCount > 0 {
+		go func(sid, sNum, eNum, count int) {
+			for i := 1; i <= count; i++ {
+				nextEp := eNum + i
+				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				prefetchURL := fmt.Sprintf("%s/play/series/%d/%d/%d", strings.TrimRight(s.cfg.ProxyPublicURL, "/"), sid, sNum, nextEp)
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
+				if err == nil {
+					resp, pErr := http.DefaultClient.Do(req)
+					if pErr == nil && resp != nil {
+						resp.Body.Close()
+					}
+				}
+				cancel()
+			}
+		}(seriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+	}
+
+	// Sub-50ms Immediate 302 Redirect!
+	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
 }
 
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
-	seriesID := r.URL.Query().Get("series_id")
-	log.Printf("[Proxy] Activation episode (S01E00) triggered for Series ID: %s", seriesID)
-
-	// Async pre-fetch S01E01 to hydrate Dispatcharr / streamcache ahead of time (500ms timeout)
-	if seriesID != "" {
-		go func(sid string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			defer cancel()
-			prefetchURL := fmt.Sprintf("%s/play/series/%s/1/1.mkv", strings.TrimRight(s.cfg.ProxyPublicURL, "/"), sid)
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
-			if err == nil {
-				resp, pErr := http.DefaultClient.Do(req)
-				if pErr == nil && resp != nil {
-					resp.Body.Close()
-				}
-			}
-		}(seriesID)
+	rawSeriesID := r.URL.Query().Get("series_id")
+	seriesID, err := strconv.Atoi(rawSeriesID)
+	if err != nil || seriesID <= 0 {
+		http.Error(w, "Valid series_id query parameter required", http.StatusBadRequest)
+		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Series activation event received"))
+	log.Printf("[Proxy] Activation request received for Series ID: %d", seriesID)
+
+	// 1. Immediate sub-50ms 302 redirect to Episode 1 stream!
+	targetURL := ""
+	if s.database != nil {
+		targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+	}
+	if targetURL == "" {
+		targetURL = fmt.Sprintf("%s/series/agy/agypassword/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), seriesID)
+	}
+	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+
+	// 2. Trigger async background activation worker while player starts streaming!
+	if s.onActivation != nil {
+		go s.onActivation(seriesID)
+	}
+
+	// Sub-50ms Immediate 302 Redirect!
+	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
 }
