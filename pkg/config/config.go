@@ -55,8 +55,6 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("URL"); v != "" {
 		cfg.URL = v
-	} else if v := os.Getenv("PROXY_PUBLIC_URL"); v != "" {
-		cfg.URL = v
 	}
 	if v := os.Getenv("EMBY_URL"); v != "" {
 		cfg.EmbyURL = v
@@ -72,10 +70,6 @@ func LoadConfig() *models.Config {
 	}
 
 	if v := os.Getenv("PORT"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil && p > 0 {
-			cfg.Port = p
-		}
-	} else if v := os.Getenv("PROXY_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil && p > 0 {
 			cfg.Port = p
 		}

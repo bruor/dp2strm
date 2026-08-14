@@ -121,8 +121,8 @@ services:
 | `DISPATCHARR_URL` | `http://localhost:8000` | Base URL of your Dispatcharr server (**Required**) |
 | `DISPATCHARR_API_KEY` | `""` | Dispatcharr API Key (**Required**) |
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
-| `PROXY_PORT` | `8080` | Port for the HTTP 302 redirect handler |
-| `PROXY_PUBLIC_URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
+| `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
+| `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
