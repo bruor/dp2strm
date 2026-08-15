@@ -1336,28 +1336,13 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 		return
 	}
 
-	hasTV := false
-	hasMovies := false
-	for _, t := range tasks {
-		if t.ItemType == "series" {
-			hasTV = true
-		} else {
-			hasMovies = true
-		}
-	}
+	log.Printf("[Worker #%d] Batch of %d item(s) written to disk (%d total tasks). Triggering Emby library scan...", workerID, newCount, len(tasks))
 
-	log.Printf("[Worker #%d] Batch of %d item(s) written to disk (%d total tasks). Triggering Emby scan...", workerID, newCount, len(tasks))
+	// 1. Trigger global Emby media library scan (activates ScheduledTask Key: RefreshLibrary)
+	_ = s.embyClient.TriggerGlobalRefresh(ctx)
 
-	// 1. Tell Emby to scan the updated libraries
-	if hasTV {
-		_ = s.embyClient.RefreshTVLibrary(ctx)
-	}
-	if hasMovies {
-		_ = s.embyClient.RefreshMoviesLibrary(ctx)
-	}
-
-	// 2. Wait 1s for Emby task state to flip to Running
-	time.Sleep(1 * time.Second)
+	// 2. Wait 2s for Emby task state to transition to Running
+	time.Sleep(2 * time.Second)
 
 	// 3. Wait until Emby finishes scanning and returns to 100% Idle
 	log.Printf("[Worker #%d] Waiting for Emby to complete scan and reach Idle before next batch...", workerID)
