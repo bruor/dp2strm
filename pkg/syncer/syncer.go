@@ -1193,13 +1193,32 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 	return nil
 }
 
-// embyWorkerLoop processes queue items one-by-one with round-robin balancing and Emby verification.
+type itemSummary struct {
+	ItemType string
+	ItemID   int
+	TMDBID   string
+	IMDBID   string
+	Title    string
+}
+
+// embyWorkerLoop processes queue items in adaptive batches with idle debounce and Emby verification.
 func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 	defer s.workerWg.Done()
 	log.Printf("[Worker #%d] Emby worker online.", workerID)
 
 	preferredType := "series" // Start alternating with series
 	processedCount := 0
+	batchSize := s.cfg.EmbyBatchSize
+	if batchSize <= 0 {
+		batchSize = 25
+	}
+	batchIdleDelay := s.cfg.EmbyBatchIdleDelay
+	if batchIdleDelay <= 0 {
+		batchIdleDelay = 10 * time.Second
+	}
+
+	var batchTasks []*models.QueueItem
+	var lastProcessedItem *itemSummary
 
 	for {
 		select {
@@ -1222,13 +1241,11 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		}
 
 		if task == nil {
-			if processedCount > 0 {
-				log.Printf("[Worker #%d] Queue finished (%d total items processed). Flushed library updates to Emby.", workerID, processedCount)
-				if s.embyClient.IsConfigured() {
-					_ = s.embyClient.RefreshTVLibrary(ctx)
-					_ = s.embyClient.RefreshMoviesLibrary(ctx)
-				}
-				processedCount = 0
+			// If we have items in the current unverified batch, finish verification now
+			if len(batchTasks) > 0 {
+				s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastProcessedItem, batchIdleDelay)
+				batchTasks = nil
+				lastProcessedItem = nil
 			}
 			time.Sleep(1 * time.Second)
 			continue
@@ -1243,28 +1260,97 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 
 		processedCount++
 		// Process task
-		pErr := s.processQueueTask(ctx, task)
+		pErr, summary := s.processQueueTask(ctx, task)
 		if pErr != nil {
 			log.Printf("[Worker #%d] Task %d failed (%s %d: %s): %v", workerID, task.ID, task.ItemType, task.ItemID, task.Action, pErr)
 			_ = s.database.MarkTaskFailed(task.ID, pErr.Error())
 		} else {
-			_ = s.database.MarkTaskComplete(task.ID)
+			batchTasks = append(batchTasks, task)
+			if summary != nil {
+				lastProcessedItem = summary
+			}
 		}
 
-		// Log progress every 50 items
-		if processedCount%50 == 0 {
-			pending, inProg, _, _ := s.database.GetQueueStats()
-			log.Printf("[Worker #%d] Progress: %d items processed (Queue remaining: %d)...", workerID, processedCount, pending+inProg)
-		}
-
-		// Apply pacing delay to keep Emby CPU cool
+		// Apply per-item pacing delay
 		if s.cfg.EmbyPaceDelay > 0 {
 			time.Sleep(s.cfg.EmbyPaceDelay)
+		}
+
+		// When batch limit is reached, pause to let Emby ingest and verify
+		if len(batchTasks) >= batchSize {
+			s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastProcessedItem, batchIdleDelay)
+			batchTasks = nil
+			lastProcessedItem = nil
 		}
 	}
 }
 
-func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) error {
+func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []*models.QueueItem, lastItem *itemSummary, idleDelay time.Duration) {
+	if len(tasks) == 0 {
+		return
+	}
+
+	for _, t := range tasks {
+		_ = s.database.MarkTaskComplete(t.ID)
+	}
+
+	if !s.embyClient.IsConfigured() {
+		return
+	}
+
+	hasTV := false
+	hasMovies := false
+	for _, t := range tasks {
+		if t.ItemType == "series" {
+			hasTV = true
+		} else {
+			hasMovies = true
+		}
+	}
+
+	realtimeTV := s.embyClient.HasRealtimeMonitor("series")
+	realtimeMovies := s.embyClient.HasRealtimeMonitor("movie")
+
+	if realtimeTV || realtimeMovies {
+		// Real-time filesystem monitoring is active:
+		// Pause/go idle for the debounce window so Emby's inotify watcher catches the changes naturally
+		log.Printf("[Worker #%d] Batch of %d items written. Pausing %v for Emby inotify pickup...", workerID, len(tasks), idleDelay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(idleDelay):
+		}
+
+		// Validate sample item in Emby index
+		if lastItem != nil && (lastItem.TMDBID != "" || lastItem.Title != "") {
+			indexed := s.embyClient.VerifyItemIndexed(ctx, lastItem.ItemType, lastItem.TMDBID, lastItem.IMDBID, lastItem.Title, 15*time.Second)
+			if indexed {
+				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastItem.Title)
+			} else {
+				log.Printf("[Worker #%d] Inotify debounce window completed for batch of %d items.", workerID, len(tasks))
+			}
+		}
+	} else {
+		// Real-time filesystem monitoring is DISABLED:
+		// Trigger targeted library refresh via API and wait for scan completion
+		log.Printf("[Worker #%d] Realtime monitoring disabled. Triggering library refresh for batch of %d items...", workerID, len(tasks))
+		if hasTV {
+			_ = s.embyClient.RefreshTVLibrary(ctx)
+		}
+		if hasMovies {
+			_ = s.embyClient.RefreshMoviesLibrary(ctx)
+		}
+		s.embyClient.WaitForScanCompletion(ctx, 30*time.Second)
+		log.Printf("[Worker #%d] Emby scan complete for batch of %d items. Continuing to next batch.", workerID, len(tasks))
+	}
+}
+
+func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (error, *itemSummary) {
+	summary := &itemSummary{
+		ItemType: task.ItemType,
+		ItemID:   task.ItemID,
+	}
+
 	switch task.Action {
 	case "pass1":
 		if task.ItemType == "series" {
@@ -1272,9 +1358,12 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 			if err != nil || st == nil {
 				srs, fErr := s.client.FetchSingleSeries(ctx, task.ItemID)
 				if fErr != nil || srs == nil {
-					return fmt.Errorf("series not found: %w", fErr)
+					return fmt.Errorf("series not found: %w", fErr), nil
 				}
 				_, _, _ = s.processSingleSeriesPass1(ctx, *srs, false)
+				summary.Title = srs.Name
+				summary.TMDBID = srs.TMDBID
+				summary.IMDBID = srs.IMDBID
 			} else {
 				seriesModel := models.Series{
 					ID:     st.SeriesID,
@@ -1284,6 +1373,9 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 					Year:   st.Year,
 				}
 				_, _, _ = s.processSingleSeriesPass1(ctx, seriesModel, false)
+				summary.Title = st.Title
+				summary.TMDBID = st.TMDBID
+				summary.IMDBID = st.IMDBID
 			}
 			// Send targeted Media/Updated notification to Emby
 			if s.embyClient.IsConfigured() {
@@ -1294,18 +1386,18 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 				if folderName != "" {
 					_ = s.embyClient.NotifyMediaUpdated(ctx, "series", folderName)
 				}
-				if !s.embyClient.HasRealtimeMonitor("series") {
-					_ = s.embyClient.RefreshTVLibrary(ctx)
-				}
 			}
 		} else {
 			mst, err := s.database.GetMovieState(task.ItemID)
 			if err != nil || mst == nil {
 				mv, fErr := s.client.FetchSingleMovie(ctx, task.ItemID)
 				if fErr != nil || mv == nil {
-					return fmt.Errorf("movie not found: %w", fErr)
+					return fmt.Errorf("movie not found: %w", fErr), nil
 				}
 				_, _, _ = s.processSingleMovie(ctx, *mv, false)
+				summary.Title = mv.Name
+				summary.TMDBID = mv.TMDBID
+				summary.IMDBID = mv.IMDBID
 				if s.database != nil {
 					mst, _ = s.database.GetMovieState(task.ItemID)
 				}
@@ -1318,6 +1410,9 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 					Year:   mst.Year,
 				}
 				_, _, _ = s.processSingleMovie(ctx, movieModel, false)
+				summary.Title = mst.Title
+				summary.TMDBID = mst.TMDBID
+				summary.IMDBID = mst.IMDBID
 			}
 			// Send targeted Media/Updated notification to Emby
 			if s.embyClient.IsConfigured() {
@@ -1328,37 +1423,35 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 				if folderName != "" {
 					_ = s.embyClient.NotifyMediaUpdated(ctx, "movie", folderName)
 				}
-				if !s.embyClient.HasRealtimeMonitor("movie") {
-					_ = s.embyClient.RefreshMoviesLibrary(ctx)
-				}
 			}
 		}
-		return nil
+		return nil, summary
 
 	case "activate":
 		if task.ItemType == "series" {
 			_, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
 			if err != nil {
-				return err
+				return err, nil
 			}
 			s.TriggerTargetedEmbySeriesRefresh(ctx, task.ItemID)
 		}
-		return nil
+		return nil, summary
 
 	case "update_episodes":
 		if task.ItemType == "series" {
 			_, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
 			if err != nil {
-				return err
+				return err, nil
 			}
 			s.TriggerTargetedEmbySeriesRefresh(ctx, task.ItemID)
 		}
-		return nil
+		return nil, summary
 
 	case "delete":
-		return nil
+		return nil, summary
 	}
-	return nil
+
+	return nil, summary
 }
 
 // reconcilerLoop runs the daily disk reconciler at the configured interval.

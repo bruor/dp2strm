@@ -31,6 +31,8 @@ type Config struct {
 	DispatcharrWorkers    int           `json:"dispatcharr_workers"`
 	EmbyWorkers           int           `json:"emby_workers"`
 	EmbyPaceDelay         time.Duration `json:"emby_pace_delay"`
+	EmbyBatchSize         int           `json:"emby_batch_size"`
+	EmbyBatchIdleDelay    time.Duration `json:"emby_batch_idle_delay"`
 	EmbyURL               string        `json:"emby_url"`
 	EmbyAPIKey            string        `json:"emby_api_key"`
 	EmbyMediaPath         string        `json:"emby_media_path"`

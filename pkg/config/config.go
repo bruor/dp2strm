@@ -38,6 +38,8 @@ func DefaultConfig() *models.Config {
 		DispatcharrWorkers:    1,
 		EmbyWorkers:           1,
 		EmbyPaceDelay:         100 * time.Millisecond,
+		EmbyBatchSize:         25,
+		EmbyBatchIdleDelay:    10 * time.Second,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
 		EmbyMediaPath:         "",
@@ -163,6 +165,16 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("EMBY_PACE_DELAY"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.EmbyPaceDelay = d
+		}
+	}
+	if v := os.Getenv("EMBY_BATCH_SIZE"); v != "" {
+		if bs, err := strconv.Atoi(v); err == nil && bs > 0 {
+			cfg.EmbyBatchSize = bs
+		}
+	}
+	if v := os.Getenv("EMBY_BATCH_IDLE_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.EmbyBatchIdleDelay = d
 		}
 	}
 	if v := os.Getenv("SYNC_INTERVAL"); v != "" {

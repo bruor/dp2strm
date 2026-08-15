@@ -378,3 +378,53 @@ func (c *Client) NotifyMediaUpdated(ctx context.Context, itemType, folderName st
 	defer resp.Body.Close()
 	return nil
 }
+
+// WaitForScanCompletion polls Emby's ScheduledTasks until any active media scan completes or timeout occurs.
+func (c *Client) WaitForScanCompletion(ctx context.Context, timeout time.Duration) bool {
+	if !c.IsConfigured() {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	time.Sleep(500 * time.Millisecond)
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/ScheduledTasks", strings.TrimRight(c.cfg.EmbyURL, "/")), nil)
+		if err != nil {
+			return false
+		}
+		req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+		req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil || resp == nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		var tasks []struct {
+			Key   string `json:"Key"`
+			State string `json:"State"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&tasks)
+		resp.Body.Close()
+
+		scanning := false
+		for _, t := range tasks {
+			if t.Key == "RefreshLibrary" && t.State == "Running" {
+				scanning = true
+				break
+			}
+		}
+		if !scanning {
+			return true
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return false
+}
