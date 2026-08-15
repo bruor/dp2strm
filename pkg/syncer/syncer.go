@@ -1194,11 +1194,12 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 }
 
 type itemSummary struct {
-	ItemType string
-	ItemID   int
-	TMDBID   string
-	IMDBID   string
-	Title    string
+	ItemType    string
+	ItemID      int
+	TMDBID      string
+	IMDBID      string
+	Title       string
+	STRMCreated bool
 }
 
 // embyWorkerLoop processes queue items in adaptive batches with idle debounce and Emby verification.
@@ -1212,13 +1213,10 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 	if batchSize <= 0 {
 		batchSize = 25
 	}
-	batchIdleDelay := s.cfg.EmbyBatchIdleDelay
-	if batchIdleDelay <= 0 {
-		batchIdleDelay = 10 * time.Second
-	}
 
 	var batchTasks []*models.QueueItem
-	var lastProcessedItem *itemSummary
+	var newItemsCreated int
+	var lastCreatedItem *itemSummary
 
 	for {
 		select {
@@ -1250,9 +1248,10 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		if task == nil {
 			// If we have items in the current unverified batch, finish verification now
 			if len(batchTasks) > 0 {
-				s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastProcessedItem, batchIdleDelay)
+				s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastCreatedItem, newItemsCreated)
 				batchTasks = nil
-				lastProcessedItem = nil
+				newItemsCreated = 0
+				lastCreatedItem = nil
 			}
 			time.Sleep(1 * time.Second)
 			continue
@@ -1273,26 +1272,28 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			_ = s.database.MarkTaskFailed(task.ID, pErr.Error())
 		} else {
 			batchTasks = append(batchTasks, task)
-			if summary != nil {
-				lastProcessedItem = summary
+			if summary != nil && summary.STRMCreated {
+				newItemsCreated++
+				lastCreatedItem = summary
 			}
 		}
 
-		// Apply per-item pacing delay
+		// Apply per-item pacing delay if explicitly configured
 		if s.cfg.EmbyPaceDelay > 0 {
 			time.Sleep(s.cfg.EmbyPaceDelay)
 		}
 
-		// When batch limit is reached, pause to let Emby ingest and verify
-		if len(batchTasks) >= batchSize {
-			s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastProcessedItem, batchIdleDelay)
+		// When batch limit of newly created items is reached, pause to let Emby ingest and verify
+		if newItemsCreated >= batchSize {
+			s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastCreatedItem, newItemsCreated)
 			batchTasks = nil
-			lastProcessedItem = nil
+			newItemsCreated = 0
+			lastCreatedItem = nil
 		}
 	}
 }
 
-func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []*models.QueueItem, lastItem *itemSummary, idleDelay time.Duration) {
+func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []*models.QueueItem, lastCreated *itemSummary, newCount int) {
 	if len(tasks) == 0 {
 		return
 	}
@@ -1301,7 +1302,7 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 		_ = s.database.MarkTaskComplete(t.ID)
 	}
 
-	if !s.embyClient.IsConfigured() {
+	if !s.embyClient.IsConfigured() || newCount == 0 {
 		return
 	}
 
@@ -1320,22 +1321,22 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 
 	if realtimeTV || realtimeMovies {
 		// Real-time filesystem monitoring is active:
-		// Stop disk writes and dynamically wait until Emby indexes the batch
-		log.Printf("[Worker #%d] Batch of %d items written to disk. Waiting for Emby index confirmation...", workerID, len(tasks))
+		// Stop disk writes and dynamically wait until Emby indexes the newly created batch
+		log.Printf("[Worker #%d] Batch of %d new item(s) written to disk (%d total tasks). Waiting for Emby index confirmation...", workerID, newCount, len(tasks))
 
 		// Validate sample item in Emby index
-		if lastItem != nil && (lastItem.TMDBID != "" || lastItem.Title != "") {
-			indexed := s.embyClient.VerifyItemIndexed(ctx, lastItem.ItemType, lastItem.TMDBID, lastItem.IMDBID, lastItem.Title, 30*time.Second)
+		if lastCreated != nil && (lastCreated.TMDBID != "" || lastCreated.Title != "") {
+			indexed := s.embyClient.VerifyItemIndexed(ctx, lastCreated.ItemType, lastCreated.TMDBID, lastCreated.IMDBID, lastCreated.Title, 30*time.Second)
 			if indexed {
-				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastItem.Title)
+				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastCreated.Title)
 			} else {
-				log.Printf("[Worker #%d] Debounce window passed for batch of %d items. Continuing to next batch.", workerID, len(tasks))
+				log.Printf("[Worker #%d] Debounce timeout elapsed for batch of %d new item(s). Continuing to next batch.", workerID, newCount)
 			}
 		}
 	} else {
 		// Real-time filesystem monitoring is DISABLED:
 		// Trigger targeted library refresh via API and wait for scan completion
-		log.Printf("[Worker #%d] Realtime monitoring disabled. Triggering library refresh for batch of %d items...", workerID, len(tasks))
+		log.Printf("[Worker #%d] Realtime monitoring disabled. Triggering library refresh for batch of %d new item(s)...", workerID, newCount)
 		if hasTV {
 			_ = s.embyClient.RefreshTVLibrary(ctx)
 		}
@@ -1343,7 +1344,7 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 			_ = s.embyClient.RefreshMoviesLibrary(ctx)
 		}
 		s.embyClient.WaitForScanCompletion(ctx, 30*time.Second)
-		log.Printf("[Worker #%d] Emby scan complete for batch of %d items. Continuing to next batch.", workerID, len(tasks))
+		log.Printf("[Worker #%d] Emby scan complete for batch of %d new item(s). Continuing to next batch.", workerID, newCount)
 	}
 }
 
@@ -1362,10 +1363,11 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 				if fErr != nil || srs == nil {
 					return fmt.Errorf("series not found: %w", fErr), nil
 				}
-				_, _, _ = s.processSingleSeriesPass1(ctx, *srs, false)
+				_, _, strmCreated, _, _, _ := s.processSingleSeriesPass1Profiled(ctx, *srs, false)
 				summary.Title = srs.Name
 				summary.TMDBID = srs.TMDBID
 				summary.IMDBID = srs.IMDBID
+				summary.STRMCreated = strmCreated
 			} else {
 				seriesModel := models.Series{
 					ID:     st.SeriesID,
@@ -1374,13 +1376,14 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 					Name:   st.Title,
 					Year:   st.Year,
 				}
-				_, _, _ = s.processSingleSeriesPass1(ctx, seriesModel, false)
+				_, _, strmCreated, _, _, _ := s.processSingleSeriesPass1Profiled(ctx, seriesModel, false)
 				summary.Title = st.Title
 				summary.TMDBID = st.TMDBID
 				summary.IMDBID = st.IMDBID
+				summary.STRMCreated = strmCreated
 			}
 			// Send targeted Media/Updated notification to Emby
-			if s.embyClient.IsConfigured() {
+			if s.embyClient.IsConfigured() && summary.STRMCreated {
 				folderName := ""
 				if st != nil && st.FolderName != "" {
 					folderName = st.FolderName
@@ -1396,10 +1399,11 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 				if fErr != nil || mv == nil {
 					return fmt.Errorf("movie not found: %w", fErr), nil
 				}
-				_, _, _ = s.processSingleMovie(ctx, *mv, false)
+				_, _, strmCreated, _, _, _ := s.processSingleMovieProfiled(ctx, *mv, false)
 				summary.Title = mv.Name
 				summary.TMDBID = mv.TMDBID
 				summary.IMDBID = mv.IMDBID
+				summary.STRMCreated = strmCreated
 				if s.database != nil {
 					mst, _ = s.database.GetMovieState(task.ItemID)
 				}
@@ -1411,13 +1415,14 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 					Name:   mst.Title,
 					Year:   mst.Year,
 				}
-				_, _, _ = s.processSingleMovie(ctx, movieModel, false)
+				_, _, strmCreated, _, _, _ := s.processSingleMovieProfiled(ctx, movieModel, false)
 				summary.Title = mst.Title
 				summary.TMDBID = mst.TMDBID
 				summary.IMDBID = mst.IMDBID
+				summary.STRMCreated = strmCreated
 			}
 			// Send targeted Media/Updated notification to Emby
-			if s.embyClient.IsConfigured() {
+			if s.embyClient.IsConfigured() && summary.STRMCreated {
 				folderName := ""
 				if mst != nil && mst.FolderName != "" {
 					folderName = mst.FolderName

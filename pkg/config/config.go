@@ -37,7 +37,7 @@ func DefaultConfig() *models.Config {
 		PageWorkers:           1,
 		DispatcharrWorkers:    1,
 		EmbyWorkers:           1,
-		EmbyPaceDelay:         100 * time.Millisecond,
+		EmbyPaceDelay:         0,
 		EmbyBatchSize:         25,
 		EmbyBatchIdleDelay:    10 * time.Second,
 		EmbyURL:               "",
