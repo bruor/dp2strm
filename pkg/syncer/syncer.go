@@ -1130,7 +1130,11 @@ func (s *Syncer) StartWorkers(ctx context.Context) {
 		numWorkers = 1
 	}
 
-	log.Printf("[Syncer] Starting %d Emby processing worker(s) (Pacing Delay: %v)...", numWorkers, s.cfg.EmbyPaceDelay)
+	batchSize := s.cfg.EmbyBatchSize
+	if batchSize <= 0 {
+		batchSize = 25
+	}
+	log.Printf("[Syncer] Starting %d Emby processing worker(s) (Batch Size: %d)...", numWorkers, batchSize)
 	for i := 1; i <= numWorkers; i++ {
 		s.workerWg.Add(1)
 		go s.embyWorkerLoop(workerCtx, i)
@@ -1306,11 +1310,6 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 				newItemsCreated++
 				lastCreatedItem = summary
 			}
-		}
-
-		// Apply per-item pacing delay if explicitly configured
-		if s.cfg.EmbyPaceDelay > 0 {
-			time.Sleep(s.cfg.EmbyPaceDelay)
 		}
 
 		// When batch limit of newly created items is reached, pause to let Emby ingest and verify
