@@ -977,13 +977,17 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 					req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
 					req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
 					if resp, dErr := http.DefaultClient.Do(req); dErr == nil && resp != nil {
-						resp.Body.Close()
+						defer resp.Body.Close()
+						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							log.Printf("[Emby] Successfully sent targeted series rescan for %s", seriesEmbyPath)
+							return
+						}
 					}
 				}
 			}
 		}
 
-		// Trigger library refresh to guarantee Emby indexes all new episodes and scrapes TMDB metadata
+		// Fallback to global refresh ONLY if targeted notification was not sent
 		s.triggerEmbyRefresh(context.Background())
 	}()
 }
