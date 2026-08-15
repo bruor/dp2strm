@@ -925,6 +925,8 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 		log.Printf("[Emby] Failed to create library refresh request: %v", err)
 		return
 	}
+	req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
+	req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -976,6 +978,8 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 			if jsonBody, jErr := json.Marshal(payload); jErr == nil {
 				if req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint+"?"+query.Encode(), bytes.NewReader(jsonBody)); err == nil {
 					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
+					req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
 					if resp, dErr := http.DefaultClient.Do(req); dErr == nil && resp != nil {
 						resp.Body.Close()
 					}
