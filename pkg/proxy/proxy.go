@@ -47,6 +47,8 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 	mux.HandleFunc("/activate", srv.handleActivate)
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/status", srv.handleStatus)
+	mux.HandleFunc("/debug/logs", srv.handleDebugLogs)
+	mux.HandleFunc("/debug/queue", srv.handleDebugQueue)
 
 	// Standard Go Runtime Debugging & Profiling (pprof)
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -115,6 +117,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"emby_configured": s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "",
 	}
 	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleDebugLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	logs := GlobalLogBuffer.GetLogs()
+	for _, l := range logs {
+		_, _ = w.Write([]byte(l))
+	}
+}
+
+func (s *Server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.database == nil {
+		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+	statusFilter := r.URL.Query().Get("status")
+	tasks, err := s.database.GetRecentQueueTasks(100, statusFilter)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(tasks)
 }
 
 // format302Target formats the final 302 target URL, appending ?url= parameter for streamcache if configured.

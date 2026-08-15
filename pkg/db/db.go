@@ -611,3 +611,37 @@ func (d *DB) GetQueueStats() (pending, inProgress, failed int, err error) {
 	}
 	return pending, inProgress, failed, nil
 }
+
+// GetRecentQueueTasks returns the most recent queue tasks (filtered by status if provided).
+func (d *DB) GetRecentQueueTasks(limit int, statusFilter string) ([]models.QueueItem, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var query string
+	var rows *sql.Rows
+	var err error
+	if statusFilter != "" {
+		query = `SELECT id, item_type, item_id, action, priority, status, attempts, last_error, created_at, updated_at FROM sync_queue WHERE status = ? ORDER BY updated_at DESC LIMIT ?`
+		rows, err = d.conn.Query(query, statusFilter, limit)
+	} else {
+		query = `SELECT id, item_type, item_id, action, priority, status, attempts, last_error, created_at, updated_at FROM sync_queue ORDER BY updated_at DESC LIMIT ?`
+		rows, err = d.conn.Query(query, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []models.QueueItem
+	for rows.Next() {
+		var item models.QueueItem
+		var lastErr sql.NullString
+		if err := rows.Scan(&item.ID, &item.ItemType, &item.ItemID, &item.Action, &item.Priority, &item.Status, &item.Attempts, &lastErr, &item.CreatedAt, &item.UpdatedAt); err == nil {
+			if lastErr.Valid {
+				item.LastError = lastErr.String
+			}
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}

@@ -29,6 +29,8 @@ func main() {
 	flag.Parse()
 	_ = serveProxy
 
+	proxy.InitGlobalLogger()
+
 	log.Println("==================================================")
 	log.Println("             dp2strm Daemon (Go Edition)          ")
 	log.Println("==================================================")
