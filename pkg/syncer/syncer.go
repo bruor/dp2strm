@@ -540,7 +540,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	// 2. Write Pass 1 Season 01 S01E01 Activation placeholder
 	season1Dir := filepath.Join(seriesDir, "Season 01")
 
-	// Auto-clean any legacy Pass 1 placeholder files from older builds
+	// TODO: Legacy migration cleanup - auto-cleans any old "... - S01E01 - Play to Activate Series.*" placeholder files from early pre-v1.0 builds. Can be safely removed in a future release.
 	if entries, readErr := os.ReadDir(season1Dir); readErr == nil {
 		for _, entry := range entries {
 			if strings.Contains(entry.Name(), "Play to Activate Series") {
@@ -624,7 +624,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
 	}
 
-	// Delete legacy Pass 1 Activation placeholder files if present in Season 01
+	// TODO: Legacy migration cleanup - auto-cleans any old "... - S01E01 - Play to Activate Series.*" placeholder files from early pre-v1.0 builds. Can be safely removed in a future release.
 	season1Dir := filepath.Join(seriesDir, "Season 01")
 	if entries, readErr := os.ReadDir(season1Dir); readErr == nil {
 		for _, entry := range entries {

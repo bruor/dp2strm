@@ -51,3 +51,5 @@ This document tracks all completed features and remaining roadmap items for `dp2
 
 - [ ] **Retention Grace Period & Cleanup Manager (`RETENTION_GRACE_DAYS`)**:
   - Soft-delete state tracker map in SQLite that buffers deleted streams for 7 days before removing `.strm` files from disk when content disappears from Dispatcharr.
+- [ ] **Future Cleanup / Deprecation**:
+  - Remove temporary pre-v1.0 migration sweeps for legacy `*Play to Activate Series*` filenames in `pkg/syncer/syncer.go`.
