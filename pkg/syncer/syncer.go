@@ -1446,6 +1446,98 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 		}
 		return nil, summary
 
+	case "reconcile_series":
+		st, err := s.database.GetSeriesState(task.ItemID)
+		if err != nil || st == nil {
+			return nil, summary
+		}
+		summary.Title = st.Title
+		summary.TMDBID = st.TMDBID
+		summary.IMDBID = st.IMDBID
+
+		tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
+		currentDir := filepath.Join(tvShowsRoot, st.FolderName)
+
+		// 1. Check if legacy folder exists without ID and rename it
+		if st.Year > 0 {
+			legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(st.Title), st.Year)
+			legacyDir := filepath.Join(tvShowsRoot, legacyFolderName)
+			if legacyDir != currentDir {
+				if _, statErr := os.Stat(legacyDir); statErr == nil {
+					if _, canonicalErr := os.Stat(currentDir); os.IsNotExist(canonicalErr) {
+						if rErr := os.Rename(legacyDir, currentDir); rErr == nil {
+							log.Printf("[Worker] Reconciled legacy TV folder: %q -> %q", legacyFolderName, st.FolderName)
+							summary.STRMCreated = true
+						}
+					}
+				}
+			}
+		}
+
+		// 2. If unactivated, upgrade placeholder to Specials S00E99 standard
+		if !st.IsActivated {
+			specialsDir := filepath.Join(currentDir, "Specials")
+			actStrmFilename := fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title))
+			actStrmPath := filepath.Join(specialsDir, actStrmFilename)
+			actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, st.SeriesID, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+
+			strmUpdated, _ := strm.WriteSTRMFile(actStrmPath, actProxyURL)
+			if strmUpdated {
+				summary.STRMCreated = true
+			}
+			if s.cfg.EnableNFO {
+				actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
+				_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, st.Title)
+			}
+
+			// Clean up legacy Season 01 placeholder
+			season1Dir := filepath.Join(currentDir, "Season 01")
+			if s1Entries, s1Err := os.ReadDir(season1Dir); s1Err == nil && len(s1Entries) > 0 && len(s1Entries) <= 2 {
+				_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(st.Title))))
+				_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(st.Title))))
+				if remaining, _ := os.ReadDir(season1Dir); len(remaining) == 0 {
+					_ = os.Remove(season1Dir)
+				}
+			}
+		}
+
+		if s.embyClient.IsConfigured() && summary.STRMCreated {
+			_ = s.embyClient.NotifyMediaUpdated(ctx, "series", st.FolderName)
+		}
+		return nil, summary
+
+	case "reconcile_movie":
+		mst, err := s.database.GetMovieState(task.ItemID)
+		if err != nil || mst == nil {
+			return nil, summary
+		}
+		summary.Title = mst.Title
+		summary.TMDBID = mst.TMDBID
+		summary.IMDBID = mst.IMDBID
+
+		moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
+		currentDir := filepath.Join(moviesRoot, mst.FolderName)
+
+		if mst.Year > 0 {
+			legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(mst.Title), mst.Year)
+			legacyDir := filepath.Join(moviesRoot, legacyFolderName)
+			if legacyDir != currentDir {
+				if _, statErr := os.Stat(legacyDir); statErr == nil {
+					if _, canonicalErr := os.Stat(currentDir); os.IsNotExist(canonicalErr) {
+						if rErr := os.Rename(legacyDir, currentDir); rErr == nil {
+							log.Printf("[Worker] Reconciled legacy Movie folder: %q -> %q", legacyFolderName, mst.FolderName)
+							summary.STRMCreated = true
+						}
+					}
+				}
+			}
+		}
+
+		if s.embyClient.IsConfigured() && summary.STRMCreated {
+			_ = s.embyClient.NotifyMediaUpdated(ctx, "movie", mst.FolderName)
+		}
+		return nil, summary
+
 	case "activate":
 		if task.ItemType == "series" {
 			_, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
@@ -1496,10 +1588,11 @@ func (s *Syncer) reconcilerLoop(ctx context.Context) {
 	}
 }
 
-// ReconcileDiskState performs deep reconciliation between on-disk files and SQLite state.
+// ReconcileDiskState stages daily reconciliation tasks into the priority queue.
 func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
-	log.Println("[Reconciler] Starting daily disk reconciliation pass...")
+	log.Println("[Reconciler] Starting daily disk reconciliation scan...")
 	start := time.Now()
+	reconcileCount := 0
 
 	// 1. Purge expired soft-deleted items
 	if s.database != nil && s.cfg.RetentionGraceDays > 0 {
@@ -1513,36 +1606,43 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
-	// 2. Scan and migrate TV Shows folders lacking IDs (e.g. "The Hawk (2026)" -> "The Hawk (2026) [tmdbid=254528]")
+	// 2. Scan and enqueue TV Shows needing folder ID upgrade or Specials S00E99 upgrade
 	tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
-	if entries, err := os.ReadDir(tvShowsRoot); err == nil {
+	if entries, err := os.ReadDir(tvShowsRoot); err == nil && s.database != nil {
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
 			name := entry.Name()
-			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") {
-				title, year := sanitizer.ExtractYearAndTitle(name)
-				if s.database != nil {
-					st, _ := s.database.FindSeriesByTitleAndYear(title, year)
-					if st != nil && st.FolderName != "" && st.FolderName != name {
-						oldPath := filepath.Join(tvShowsRoot, name)
-						newPath := filepath.Join(tvShowsRoot, st.FolderName)
-						if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
-							if rErr := os.Rename(oldPath, newPath); rErr == nil {
-								log.Printf("[Reconciler] Upgraded legacy TV show folder without ID: %q -> %q", name, st.FolderName)
-								s.TriggerTargetedEmbySeriesRefresh(ctx, st.SeriesID)
-							}
-						}
-					}
+			title, year := sanitizer.ExtractYearAndTitle(name)
+			st, _ := s.database.FindSeriesByTitleAndYear(title, year)
+			if st == nil {
+				continue
+			}
+
+			needsReconcile := false
+			// Check if folder lacks IDs
+			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") && st.FolderName != name {
+				needsReconcile = true
+			}
+			// Check if unactivated show still has legacy Season 01
+			if !st.IsActivated {
+				season1Dir := filepath.Join(tvShowsRoot, name, "Season 01")
+				if _, s1Err := os.Stat(season1Dir); s1Err == nil {
+					needsReconcile = true
 				}
+			}
+
+			if needsReconcile {
+				_ = s.database.EnqueueTask("series", st.SeriesID, "reconcile_series", models.PriorityReconcile)
+				reconcileCount++
 			}
 		}
 	}
 
-	// 3. Scan and migrate Movies folders lacking IDs
+	// 3. Scan and enqueue Movies needing folder ID upgrade
 	moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
-	if entries, err := os.ReadDir(moviesRoot); err == nil {
+	if entries, err := os.ReadDir(moviesRoot); err == nil && s.database != nil {
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
@@ -1550,60 +1650,15 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 			name := entry.Name()
 			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") {
 				title, year := sanitizer.ExtractYearAndTitle(name)
-				if s.database != nil {
-					mst, _ := s.database.FindMovieByTitleAndYear(title, year)
-					if mst != nil && mst.FolderName != "" && mst.FolderName != name {
-						oldPath := filepath.Join(moviesRoot, name)
-						newPath := filepath.Join(moviesRoot, mst.FolderName)
-						if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
-							if rErr := os.Rename(oldPath, newPath); rErr == nil {
-								log.Printf("[Reconciler] Upgraded legacy Movie folder without ID: %q -> %q", name, mst.FolderName)
-							}
-						}
-					}
+				mst, _ := s.database.FindMovieByTitleAndYear(title, year)
+				if mst != nil && mst.FolderName != "" && mst.FolderName != name {
+					_ = s.database.EnqueueTask("movie", mst.MovieID, "reconcile_movie", models.PriorityReconcile)
+					reconcileCount++
 				}
 			}
 		}
 	}
 
-	// 4. Scan and upgrade unactivated TV Shows placeholders to Specials S00E99 standard
-	if entries, err := os.ReadDir(tvShowsRoot); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			seriesDirPath := filepath.Join(tvShowsRoot, entry.Name())
-			season1Path := filepath.Join(seriesDirPath, "Season 01")
-			if s1Entries, s1Err := os.ReadDir(season1Path); s1Err == nil && len(s1Entries) > 0 && len(s1Entries) <= 2 {
-				for _, f := range s1Entries {
-					if strings.HasSuffix(f.Name(), "S01E01.strm") {
-						title, year := sanitizer.ExtractYearAndTitle(entry.Name())
-						if s.database != nil {
-							st, _ := s.database.FindSeriesByTitleAndYear(title, year)
-							if st != nil && !st.IsActivated {
-								specialsDir := filepath.Join(seriesDirPath, "Specials")
-								actStrmFilename := fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title))
-								actStrmPath := filepath.Join(specialsDir, actStrmFilename)
-								actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, st.SeriesID, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
-								_, _ = strm.WriteSTRMFile(actStrmPath, actProxyURL)
-								if s.cfg.EnableNFO {
-									actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
-									_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, st.Title)
-								}
-								_ = os.Remove(filepath.Join(season1Path, f.Name()))
-								_ = os.Remove(filepath.Join(season1Path, strings.TrimSuffix(f.Name(), ".strm")+".nfo"))
-								if remaining, _ := os.ReadDir(season1Path); len(remaining) == 0 {
-									_ = os.Remove(season1Path)
-								}
-								log.Printf("[Reconciler] Upgraded unactivated show placeholder to Specials standard: %q", entry.Name())
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	log.Printf("[Reconciler] Reconciliation pass complete in %v.", time.Since(start))
+	log.Printf("[Reconciler] Reconciliation scan complete in %v. %d maintenance task(s) enqueued at PriorityReconcile.", time.Since(start), reconcileCount)
 	return nil
 }

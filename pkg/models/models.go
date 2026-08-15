@@ -49,11 +49,12 @@ const (
 	ActivationEpisodeNumber = 99
 )
 
-// Queue priorities
+// Queue priorities (Strict Priority Ordering: VIP > Reconcile > Airing > Batch)
 const (
-	PriorityVIP    = 100 // On-demand user playback / manual activation
-	PriorityAiring = 50  // Airing show episode updates
-	PriorityBatch  = 10  // Batch catalog intake
+	PriorityVIP       = 100 // On-demand user playback / manual activation
+	PriorityReconcile = 50  // Daily reconciliation & legacy folder/placeholder migrations
+	PriorityAiring    = 30  // Airing show episode updates
+	PriorityBatch     = 10  // Batch catalog intake
 )
 
 // QueueItem represents a task in the SQLite persistent sync_queue.
