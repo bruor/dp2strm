@@ -638,7 +638,12 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 
 		// Record real stream 302 target URL in SQLite
-		realTargetURL := fmt.Sprintf("%s/series/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
+		var realTargetURL string
+		if ep.UUID != "" && s.cfg.APIKey != "" {
+			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s?api_key=%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), ep.UUID, s.cfg.APIKey)
+		} else {
+			realTargetURL = fmt.Sprintf("%s/series/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
+		}
 		if s.database != nil {
 			s.database.SaveStreamVariant(&db.StreamVariant{
 				ItemID:             seriesID,
@@ -742,7 +747,6 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 
 // PopulateActivatedMovie resolves backing provider streams for a movie, classifies quality tiers, saves variants to SQLite, writes secondary variant .strm files on disk, and marks movie as activated.
 func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanTitle, movieDir string, year int, tmdbID string) (created, preserved int, baseTargetURL string, err error) {
-	// Auto-resolve canonical movieDir and cleanTitle if not provided
 	if movieDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Movie ") {
 		if s.database != nil {
 			st, _ := s.database.GetMovieState(movieID)
@@ -753,19 +757,23 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 				tmdbID = st.TMDBID
 			}
 		}
-		if movieDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Movie ") {
-			if mv, fetchErr := s.client.FetchSingleMovie(ctx, movieID); fetchErr == nil && mv != nil {
-				cleanTitle = sanitizer.CleanTitle(mv.Name)
-				year = mv.Year
-				tmdbID = mv.TMDBID
-				folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID)
-				movieDir = filepath.Join(s.cfg.OutputDir, "Movies", folderName)
-				if s.database != nil {
-					_ = s.database.UpsertInitialMovieState(movieID, mv.TMDBID, cleanTitle, mv.Year, folderName)
-				}
+	}
+
+	var movieUUID string
+	if mv, fetchErr := s.client.FetchSingleMovie(ctx, movieID); fetchErr == nil && mv != nil {
+		movieUUID = mv.UUID
+		if cleanTitle == "" || strings.HasPrefix(cleanTitle, "Movie ") {
+			cleanTitle = sanitizer.CleanTitle(mv.Name)
+			year = mv.Year
+			tmdbID = mv.TMDBID
+			folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID)
+			movieDir = filepath.Join(s.cfg.OutputDir, "Movies", folderName)
+			if s.database != nil {
+				_ = s.database.UpsertInitialMovieState(movieID, mv.TMDBID, cleanTitle, mv.Year, folderName)
 			}
 		}
 	}
+
 	if movieDir == "" {
 		movieDir = filepath.Join(s.cfg.OutputDir, "Movies", fmt.Sprintf("Movie %d", movieID))
 	}
@@ -789,7 +797,18 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 				varKey = "4k"
 			}
 
-			realTargetURL := fmt.Sprintf("%s/movie/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID, v.Container)
+			targetUUID := v.MovieUUID
+			if targetUUID == "" {
+				targetUUID = movieUUID
+			}
+
+			var realTargetURL string
+			if targetUUID != "" && s.cfg.APIKey != "" {
+				realTargetURL = fmt.Sprintf("%s/proxy/vod/movie/%s?api_key=%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), targetUUID, s.cfg.APIKey)
+			} else {
+				realTargetURL = fmt.Sprintf("%s/movie/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID, v.Container)
+			}
+
 			if varKey == "base" && baseTargetURL == "" {
 				baseTargetURL = realTargetURL
 			}

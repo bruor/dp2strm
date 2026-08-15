@@ -109,9 +109,15 @@ func ClassifyMovieStreams(relations []models.ProviderRelation, cleanTitle string
 			providerName = ts.relation.M3UAccount.Name
 		}
 
+		movieUUID := ""
+		if ts.relation.Movie != nil {
+			movieUUID = ts.relation.Movie.UUID
+		}
+
 		results = append(results, models.StreamVersion{
 			RelationID: ts.relation.ID,
 			StreamID:   ts.relation.StreamID,
+			MovieUUID:  movieUUID,
 			Container:  ext,
 			Quality:    ts.quality,
 			Provider:   providerName,

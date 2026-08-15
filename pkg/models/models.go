@@ -118,6 +118,7 @@ const (
 type StreamVersion struct {
 	RelationID int
 	StreamID   string
+	MovieUUID  string
 	Container  string
 	Quality    QualityTier
 	Provider   string
