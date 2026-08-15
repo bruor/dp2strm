@@ -77,12 +77,23 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 		t.Errorf("Expected movie STRM file to exist at %s", movieSTRM)
 	}
 
+	// With EnableNFO=false: movie.nfo and tvshow.nfo should not exist
+	movieNFO := filepath.Join(movieFolder, "Avatar (2009).nfo")
+	if _, err := os.Stat(movieNFO); !os.IsNotExist(err) {
+		t.Errorf("Expected movie NFO to not exist when EnableNFO=false")
+	}
+
 	// 2. Run Series Sync Pass 1
 	if err := s.SyncSeries(context.Background(), false); err != nil {
 		t.Fatalf("SyncSeries failed: %v", err)
 	}
 
 	seriesFolder := filepath.Join(tempDir, "TV Shows", "Breaking Bad (2008) [tmdbid=1396]")
+	tvshowNFO := filepath.Join(seriesFolder, "tvshow.nfo")
+	if _, err := os.Stat(tvshowNFO); !os.IsNotExist(err) {
+		t.Errorf("Expected tvshow.nfo to not exist when EnableNFO=false")
+	}
+
 	episode1STRM := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.strm")
 	episode1NFO := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.nfo")
 
@@ -105,10 +116,9 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 		t.Errorf("Expected S01E01 STRM file to remain on disk after activation")
 	}
 
-	// S01E01 NFO must now be updated with real title "Pilot"!
-	nfoBytesUpdated, err := os.ReadFile(episode1NFO)
-	if err != nil || !strings.Contains(string(nfoBytesUpdated), "Pilot") {
-		t.Errorf("Expected activated NFO to contain 'Pilot', got: %s", string(nfoBytesUpdated))
+	// With EnableNFO=false: S01E01 NFO must be deleted upon activation!
+	if _, err := os.Stat(episode1NFO); !os.IsNotExist(err) {
+		t.Errorf("Expected S01E01 NFO to be deleted upon activation when EnableNFO=false")
 	}
 
 	// 4. Test Movie Activation with empty directory string (should auto-resolve from SQLite state)
@@ -118,6 +128,23 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 	}
 	if baseTarget == "" {
 		t.Errorf("Expected valid baseTargetURL from movie activation")
+	}
+
+	// 5. Test EnableNFO=true behavior
+	cfg.EnableNFO = true
+	sNFO := NewSyncer(cfg, c, database)
+	if err := sNFO.SyncMovies(context.Background(), false); err != nil {
+		t.Fatalf("SyncMovies with EnableNFO=true failed: %v", err)
+	}
+	if _, err := os.Stat(movieNFO); os.IsNotExist(err) {
+		t.Errorf("Expected movie NFO to exist when EnableNFO=true")
+	}
+
+	if err := sNFO.SyncSeries(context.Background(), false); err != nil {
+		t.Fatalf("SyncSeries with EnableNFO=true failed: %v", err)
+	}
+	if _, err := os.Stat(tvshowNFO); os.IsNotExist(err) {
+		t.Errorf("Expected tvshow.nfo to exist when EnableNFO=true")
 	}
 }
 

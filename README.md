@@ -155,6 +155,7 @@ services:
 | `PAGE_SIZE` | `100` | Number of items fetched per API page request |
 | `PAGE_WORKERS` | `5` | Number of concurrent page fetch workers |
 | `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |
+| `ENABLE_NFO` | `false` | Enable local NFO metadata file generation (`false` = disabled by default, Emby uses TMDB scrapers) |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |

@@ -12,7 +12,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **4-Tier Quality Classification Waterfall**: Category ➜ Title ➜ Probe ➜ Fallback (0 network calls for category-tagged 4K content).
 - [x] **Circuit Breaker & Safe Fallback**: Halts active sync pass on HTTP 429 Too Many Requests rate limits and logs clear warnings without crashing; self-heals on subsequent runs.
 - [x] **Credential-Free STRM File Generator & `mtime` Preservation**: Writes `.strm` files with extensionless URLs and preserves timestamps via `os.Chtimes` to avoid Emby library re-scans.
-- [x] **Metadata NFO XML Generator (`pkg/nfo`)**: Creates `movie.nfo` and `tvshow.nfo` with `mtime` timestamp preservation. Movie NFOs are generated with 100% real metadata from Pass 1.
+- [x] **Configurable Metadata NFO XML Generator (`pkg/nfo`)**: Creates `movie.nfo` and `tvshow.nfo` with `mtime` timestamp preservation when `ENABLE_NFO=true` (disabled by default so Emby scrapes TMDB/TVDB directly). Unactivated `S01E01.nfo` is created in Pass 1, then purged and touched on activation.
 - [x] **Artwork Downloader (`pkg/artwork`)**: Downloads `poster.jpg` and `fanart.jpg` into `.strm` item folders and tracks `?v=<hash>` query parameters to auto-update artwork when changed.
 - [x] **`dp2strm` Playback Handler & Clean Extensionless URL Architecture (`pkg/proxy`)**:
   - Serves sub-50ms HTTP `302 Found` redirects.
@@ -20,8 +20,8 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - Series URLs: `/play/series/{series_id}/{season}/{episode}`
   - Completely obfuscates upstream subscriber credentials (`agy/agypassword`) from disk files and Emby library.
 - [x] **On-Demand TV Series Activation & Clean-Up Lifecycle**:
-  - **Pass 1**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01.strm` & `S01E01.nfo` ("Play to Activate Series").
-  - **Pass 2 (On Play)**: Immediate (<50ms) 302 redirect to stream, while an async worker populates all remaining episode `.strm` files and updates `S01E01.nfo` in-place with real episode title/plot.
+  - **Pass 1**: Generates posters, and `Season 01/Show Name - S01E01.strm` & `S01E01.nfo` ("Play to Activate Series").
+  - **Pass 2 (On Play)**: Immediate (<50ms) 302 redirect to stream, while an async worker populates all remaining episode `.strm` files, purges `S01E01.nfo` (when NFO disabled), and touches `S01E01.strm` to trigger Emby metadata lookup.
 - [x] **On-Demand Movie Quality Activation & Multi-Version Resolution**:
   - **Pass 1**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}`.
   - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite (`stream_variants`), writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.

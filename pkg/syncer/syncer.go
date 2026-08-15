@@ -516,14 +516,20 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	}
 
 	diskStart := time.Now()
-	// 1. Write tvshow.nfo
+	// 1. Write or purge tvshow.nfo based on EnableNFO
 	tvshowNFOPath := filepath.Join(seriesDir, "tvshow.nfo")
-	nfoUpdated, err := nfo.WriteTVShowNFO(tvshowNFOPath, series)
-	if err == nil {
-		if nfoUpdated {
-			created++
-		} else {
-			preserved++
+	if s.cfg.EnableNFO {
+		nfoUpdated, err := nfo.WriteTVShowNFO(tvshowNFOPath, series)
+		if err == nil {
+			if nfoUpdated {
+				created++
+			} else {
+				preserved++
+			}
+		}
+	} else {
+		if _, statErr := os.Stat(tvshowNFOPath); statErr == nil {
+			_ = os.Remove(tvshowNFOPath)
 		}
 	}
 
@@ -537,7 +543,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		}
 	}
 
-	// 2. Write Pass 1 Season 01 S01E01 Activation placeholder
+	// 2. Write Pass 1 Season 01 S01E01 Activation placeholder (always generated in Pass 1 to display activation message)
 	season1Dir := filepath.Join(seriesDir, "Season 01")
 
 	// TODO: Legacy migration cleanup - auto-cleans any old "... - S01E01 - Play to Activate Series.*" placeholder files from early pre-v1.0 builds. Can be safely removed in a future release.
@@ -568,7 +574,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	}
 
 	actPlot := fmt.Sprintf("Play this episode to dynamically populate all seasons and episodes for %s in Emby.", cleanTitle)
-	nfoUpdated, err = nfo.WriteEpisodeNFO(actNFOPath, "Play to Activate Series", 1, 1, actPlot, series.TMDBID)
+	nfoUpdated, err := nfo.WriteEpisodeNFO(actNFOPath, "Play to Activate Series", 1, 1, actPlot, series.TMDBID)
 	if err == nil {
 		if nfoUpdated {
 			created++
@@ -587,7 +593,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	return created, preserved, strmCreated, artDur, diskDur, nil
 }
 
-// PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm and .nfo files on disk.
+// PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm files on disk.
 func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, cleanTitle, seriesDir string) (created, preserved int, err error) {
 	// Auto-resolve canonical seriesDir and cleanTitle if not provided
 	if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
@@ -622,6 +628,14 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			s.tripCircuitBreaker()
 		}
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
+	}
+
+	// If NFO is disabled, clean up tvshow.nfo if present
+	if !s.cfg.EnableNFO {
+		tvshowNFOPath := filepath.Join(seriesDir, "tvshow.nfo")
+		if _, statErr := os.Stat(tvshowNFOPath); statErr == nil {
+			_ = os.Remove(tvshowNFOPath)
+		}
 	}
 
 	// TODO: Legacy migration cleanup - auto-cleans any old "... - S01E01 - Play to Activate Series.*" placeholder files from early pre-v1.0 builds. Can be safely removed in a future release.
@@ -682,23 +696,35 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			preserved++
 		}
 
-		// Write or update Episode NFO with real title & plot
-		epPlot := ep.Description
-		if epPlot == "" {
-			epPlot = fmt.Sprintf("Episode %d of %s Season %d", ep.EpisodeNumber, cleanTitle, ep.SeasonNumber)
-		}
-		epTitle := ep.Name
-		if epTitle == "" {
-			epTitle = fmt.Sprintf("Episode %d", ep.EpisodeNumber)
-		} else {
-			epTitle = sanitizer.CleanEpisodeTitle(ep.Name, cleanTitle, ep.SeasonNumber, ep.EpisodeNumber)
-		}
-		nUpdated, nErr := nfo.WriteEpisodeNFO(nfoPath, epTitle, ep.SeasonNumber, ep.EpisodeNumber, epPlot, ep.TMDBID)
-		if nErr == nil {
-			if nUpdated {
-				created++
+		if s.cfg.EnableNFO {
+			// Write or update Episode NFO with real title & plot when NFOs are enabled
+			epPlot := ep.Description
+			if epPlot == "" {
+				epPlot = fmt.Sprintf("Episode %d of %s Season %d", ep.EpisodeNumber, cleanTitle, ep.SeasonNumber)
+			}
+			epTitle := ep.Name
+			if epTitle == "" {
+				epTitle = fmt.Sprintf("Episode %d", ep.EpisodeNumber)
 			} else {
-				preserved++
+				epTitle = sanitizer.CleanEpisodeTitle(ep.Name, cleanTitle, ep.SeasonNumber, ep.EpisodeNumber)
+			}
+			nUpdated, nErr := nfo.WriteEpisodeNFO(nfoPath, epTitle, ep.SeasonNumber, ep.EpisodeNumber, epPlot, ep.TMDBID)
+			if nErr == nil {
+				if nUpdated {
+					created++
+				} else {
+					preserved++
+				}
+			}
+		} else {
+			// When NFO is disabled, remove any existing episode NFO (like Pass 1 S01E01 activation NFO)
+			if _, statErr := os.Stat(nfoPath); statErr == nil {
+				_ = os.Remove(nfoPath)
+			}
+			// Touch S01E01.strm when removing its NFO so Emby automatically fetches fresh metadata from TMDB
+			if ep.SeasonNumber == 1 && ep.EpisodeNumber == 1 {
+				now := time.Now()
+				_ = os.Chtimes(strmPath, now, now)
 			}
 		}
 	}
@@ -731,14 +757,21 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	}
 
 	diskStart := time.Now()
-	// 1. Generate .nfo metadata file
+	// 1. Generate or purge .nfo metadata file based on EnableNFO
 	nfoPath := filepath.Join(movieDir, fmt.Sprintf("%s.nfo", sanitizer.SanitizeFileName(cleanTitle)))
-	nfoUpdated, err := nfo.WriteMovieNFO(nfoPath, movie)
-	if err == nil {
-		if nfoUpdated {
-			created++
-		} else {
-			preserved++
+	if s.cfg.EnableNFO {
+		nfoUpdated, err := nfo.WriteMovieNFO(nfoPath, movie)
+		if err == nil {
+			if nfoUpdated {
+				created++
+			} else {
+				preserved++
+			}
+		}
+	} else {
+		// Clean up NFO if present when disabled
+		if _, statErr := os.Stat(nfoPath); statErr == nil {
+			_ = os.Remove(nfoPath)
 		}
 	}
 

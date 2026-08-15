@@ -34,6 +34,7 @@ services:
       - PAGE_SIZE=100 # Number of items fetched per API page request (Default: 100)
       - PAGE_WORKERS=5 # Number of concurrent page fetch workers (Default: 5)
       - MAX_PROBE_CONCURRENCY=5 # Number of parallel worker goroutines for movie sync (5 = Low CPU)
+      - ENABLE_NFO=false # Disabled by default. Unactivated S01E01 NFO is still created, then purged & touched on activation
 
       # --- Streamcache Integration Options (Optional) ---
       - STREAMCACHE_URL= # e.g. http://streamcache:8080

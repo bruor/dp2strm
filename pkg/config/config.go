@@ -36,6 +36,7 @@ func DefaultConfig() *models.Config {
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
 		Ordering:              "-created_at",
+		EnableNFO:             false,
 	}
 }
 
@@ -131,6 +132,11 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("CIRCUIT_BREAKER_ENABLED"); v != "" {
 		cfg.CircuitBreakerEnabled = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("ENABLE_NFO"); v != "" {
+		cfg.EnableNFO = (v == "true" || v == "1")
+	} else if v := os.Getenv("GENERATE_NFO"); v != "" {
+		cfg.EnableNFO = (v == "true" || v == "1")
 	}
 
 	// Clean output directory path
