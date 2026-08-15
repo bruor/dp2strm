@@ -539,6 +539,16 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 
 	// 2. Write Pass 1 Season 01 S01E01 Activation placeholder
 	season1Dir := filepath.Join(seriesDir, "Season 01")
+
+	// Auto-clean any legacy Pass 1 placeholder files from older builds
+	if entries, readErr := os.ReadDir(season1Dir); readErr == nil {
+		for _, entry := range entries {
+			if strings.Contains(entry.Name(), "Play to Activate Series") {
+				_ = os.Remove(filepath.Join(season1Dir, entry.Name()))
+			}
+		}
+	}
+
 	actStrmFilename := fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))
 	actStrmPath := filepath.Join(season1Dir, actStrmFilename)
 
