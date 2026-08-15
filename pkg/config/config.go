@@ -47,6 +47,7 @@ func DefaultConfig() *models.Config {
 		EmbyMoviesLibrary:     "",
 		Ordering:              "-created_at",
 		EnableNFO:             false,
+		EnableActivationBumper: true,
 	}
 }
 
@@ -198,6 +199,9 @@ func LoadConfig() *models.Config {
 		cfg.EnableNFO = (v == "true" || v == "1")
 	} else if v := os.Getenv("GENERATE_NFO"); v != "" {
 		cfg.EnableNFO = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("ENABLE_ACTIVATION_BUMPER"); v != "" {
+		cfg.EnableActivationBumper = (v == "true" || v == "1")
 	}
 
 	// Clean output directory path

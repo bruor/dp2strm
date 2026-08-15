@@ -94,15 +94,10 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 		t.Errorf("Expected tvshow.nfo to not exist when EnableNFO=false")
 	}
 
-	episode1STRM := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.strm")
-	episode1NFO := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.nfo")
+	activationSTRM := filepath.Join(seriesFolder, "Specials", "Breaking Bad (2008) - S00E99 - Activate Series.strm")
 
-	if _, err := os.Stat(episode1STRM); os.IsNotExist(err) {
-		t.Errorf("Expected S01E01 STRM file to exist at %s", episode1STRM)
-	}
-	nfoBytes, err := os.ReadFile(episode1NFO)
-	if err != nil || !strings.Contains(string(nfoBytes), "Play to Activate Series") {
-		t.Errorf("Expected Pass 1 NFO to contain 'Play to Activate Series', got: %s", string(nfoBytes))
+	if _, err := os.Stat(activationSTRM); os.IsNotExist(err) {
+		t.Errorf("Expected Specials S00E99 STRM file to exist at %s", activationSTRM)
 	}
 
 	// 3. Test Series Activation with empty directory string (should auto-resolve from SQLite state)
@@ -111,14 +106,15 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 		t.Fatalf("PopulateActivatedSeries failed: %v", err)
 	}
 
-	// S01E01 STRM must still exist (not deleted or renamed!)
+	episode1STRM := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.strm")
+	// S01E01 STRM must exist after activation
 	if _, err := os.Stat(episode1STRM); os.IsNotExist(err) {
-		t.Errorf("Expected S01E01 STRM file to remain on disk after activation")
+		t.Errorf("Expected real S01E01 STRM file to exist on disk after activation")
 	}
 
-	// With EnableNFO=false: S01E01 NFO must be deleted upon activation!
-	if _, err := os.Stat(episode1NFO); !os.IsNotExist(err) {
-		t.Errorf("Expected S01E01 NFO to be deleted upon activation when EnableNFO=false")
+	// Specials activation placeholder must be deleted upon activation!
+	if _, err := os.Stat(activationSTRM); !os.IsNotExist(err) {
+		t.Errorf("Expected Specials S00E99 activation placeholder to be deleted upon activation")
 	}
 
 	// 4. Test Movie Activation with empty directory string (should auto-resolve from SQLite state)

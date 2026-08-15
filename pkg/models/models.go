@@ -40,7 +40,14 @@ type Config struct {
 	EmbyMoviesLibrary     string        `json:"emby_movies_library"`
 	Ordering              string        `json:"ordering"`
 	EnableNFO             bool          `json:"enable_nfo"`
+	EnableActivationBumper bool         `json:"enable_activation_bumper"`
 }
+
+// Special activation placeholder identifiers (Season 00 Special)
+const (
+	ActivationSeasonNumber  = 0
+	ActivationEpisodeNumber = 99
+)
 
 // Queue priorities
 const (

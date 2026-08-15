@@ -111,6 +111,17 @@ func WriteEpisodeNFO(filePath string, title string, season, ep int, plot string,
 	return writeNFOData(filePath, nfoData)
 }
 
+// WriteActivationEpisodeNFO generates an explicit activation special episode NFO.
+func WriteActivationEpisodeNFO(filePath, cleanTitle string) (bool, error) {
+	nfoData := EpisodeNFO{
+		Title:   "⚡ Play to Activate Series",
+		Season:  models.ActivationSeasonNumber,
+		Episode: models.ActivationEpisodeNumber,
+		Plot:    fmt.Sprintf("Play this activation item to populate all available seasons and episodes for '%s' into your library.", cleanTitle),
+	}
+	return writeNFOData(filePath, nfoData)
+}
+
 func writeNFOData(filePath string, nfoStruct interface{}) (bool, error) {
 	output, err := xml.MarshalIndent(nfoStruct, "", "  ")
 	if err != nil {

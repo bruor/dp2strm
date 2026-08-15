@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"dp2strm/pkg/assets"
 	"dp2strm/pkg/db"
 	"dp2strm/pkg/models"
 )
@@ -273,6 +275,49 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		if v != "" {
 			variantKey = v
 		}
+	}
+
+	// 0. Handle Special Activation Bumper (S00E99 / Season 00 Special)
+	if s.cfg.EnableActivationBumper && ((seasonNum == models.ActivationSeasonNumber && epNum == models.ActivationEpisodeNumber) || (seasonNum == 0 && epNum == 99)) {
+		rangeHeader := r.Header.Get("Range")
+		// Fast single-shot probe handling for ffprobe / HEAD
+		isSmallProbe := (r.Method == http.MethodHead) || (rangeHeader != "" && strings.HasPrefix(rangeHeader, "bytes=0-") && !strings.Contains(rangeHeader, "bytes=0-80"))
+		if isSmallProbe {
+			w.Header().Set("Content-Type", "video/mp4")
+			http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
+			return
+		}
+
+		// Check if already activated in DB
+		isActivated := false
+		if s.database != nil {
+			if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.IsActivated {
+				isActivated = true
+			}
+		}
+
+		// Trigger background activation immediately
+		if !isActivated && s.onActivation != nil {
+			if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
+				go func(sid int) {
+					defer s.activeSeries.Delete(sid)
+					s.onActivation(sid)
+				}(seriesID)
+			}
+		}
+
+		log.Printf("[Proxy] Series %d: Streaming 5s Activation Bumper to client...", seriesID)
+		w.Header().Set("Content-Type", "video/mp4")
+		http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
+
+		// AFTER PLAYBACK FINISHES: Wait 1s grace period for player pipeline to close, then ensure activation completion
+		go func(sid int) {
+			time.Sleep(1 * time.Second)
+			if s.onActivation != nil {
+				s.onActivation(sid)
+			}
+		}(seriesID)
+		return
 	}
 
 	// 1. Query SQLite database for 302 target URL
