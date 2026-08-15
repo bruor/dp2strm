@@ -1268,8 +1268,9 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		// If Emby is actively running a media library scan, pause worker to let Emby finish cleanly
 		if s.embyClient.IsConfigured() && s.embyClient.IsLibraryScanRunning(ctx) {
 			log.Printf("[Worker #%d] Emby is currently performing a media library scan. Pausing worker until scan finishes...", workerID)
-			s.embyClient.WaitForScanCompletion(ctx, 10*time.Minute)
-			log.Printf("[Worker #%d] Emby media library scan completed. Resuming worker.", workerID)
+			if s.embyClient.WaitForScanCompletion(ctx, 24*time.Hour) {
+				log.Printf("[Worker #%d] Emby media library scan completed. Resuming worker.", workerID)
+			}
 		}
 
 		task, err := s.database.PopNextTask(preferredType)
@@ -1345,8 +1346,9 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 
 	// 3. Wait until Emby finishes scanning and returns to 100% Idle
 	log.Printf("[Worker #%d] Waiting for Emby to complete scan and reach Idle before next batch...", workerID)
-	s.embyClient.WaitForScanCompletion(ctx, 30*time.Minute)
-	log.Printf("[Worker #%d] Emby is Idle. Ready for next batch.", workerID)
+	if s.embyClient.WaitForScanCompletion(ctx, 24*time.Hour) {
+		log.Printf("[Worker #%d] Emby is Idle. Ready for next batch.", workerID)
+	}
 }
 
 func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (error, *itemSummary) {

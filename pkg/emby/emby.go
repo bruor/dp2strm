@@ -340,7 +340,7 @@ func (c *Client) VerifyItemIndexed(ctx context.Context, itemType, tmdbID, imdbID
 				return true // Confirmed on Emby! Movie is indexed!
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 	}
 	return false
 }
