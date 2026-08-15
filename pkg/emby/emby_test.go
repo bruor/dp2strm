@@ -63,6 +63,13 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 					"Items": []map[string]any{},
 				})
 			}
+		case "/Shows/49/Episodes":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"Items": []map[string]any{
+					{"IndexNumber": 99, "ParentIndexNumber": 0},
+				},
+			})
 		case "/Items/49/Refresh", "/Items/3/Refresh", "/Items/4/Refresh":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusNoContent)

@@ -1350,19 +1350,23 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	realtimeMovies := s.embyClient.HasRealtimeMonitor("movie")
 
 	if realtimeTV || realtimeMovies {
-		idleDelay := s.cfg.EmbyBatchIdleDelay
-		if idleDelay <= 0 {
-			idleDelay = 10 * time.Second
+		// Real-time filesystem monitoring is active:
+		// Halt disk writes and dynamically poll Emby for index confirmation of the sample item
+		log.Printf("[Worker #%d] Batch of %d new item(s) written to disk (%d total tasks). Polling Emby for index confirmation...", 
+			workerID, newCount, len(tasks))
+
+		if lastCreated != nil && (lastCreated.TMDBID != "" || lastCreated.Title != "") {
+			indexed := s.embyClient.VerifyItemIndexed(ctx, lastCreated.ItemType, lastCreated.TMDBID, lastCreated.IMDBID, lastCreated.Title, 45*time.Second)
+			if indexed {
+				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastCreated.Title)
+			} else {
+				log.Printf("[Worker #%d] Index poll window elapsed for %d new item(s). Continuing to next batch.", workerID, newCount)
+			}
 		}
-		log.Printf("[Worker #%d] Batch of %d new item(s) written to disk (%d total tasks). Pausing %v to let Emby ingest batch cleanly...", 
-			workerID, newCount, len(tasks), idleDelay)
 
-		// 1. Enforce batch idle quiet period to give Emby file watcher quiet debounce window
-		time.Sleep(idleDelay)
-
-		// 2. If Emby triggered a library scan, wait until the scan reaches 100% / Idle
+		// If Emby is actively running a media library scan, pause worker until scan finishes completely
 		if s.embyClient.IsLibraryScanRunning(ctx) {
-			log.Printf("[Worker #%d] Emby media library scan is running. Pausing worker until scan completes...", workerID)
+			log.Printf("[Worker #%d] Emby media library scan is running. Pausing worker until scan finishes...", workerID)
 			s.embyClient.WaitForScanCompletion(ctx, 15*time.Minute)
 			log.Printf("[Worker #%d] Emby media library scan finished. Resuming worker.", workerID)
 		}

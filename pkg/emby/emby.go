@@ -298,8 +298,11 @@ func (c *Client) HasRealtimeMonitor(itemType string) bool {
 	return c.moviesRealtimeMonitor
 }
 
-// VerifyItemIndexed polls Emby up to maxWait for an item to appear in Emby's index.
+// VerifyItemIndexed polls Emby dynamically up to maxWait for an item (or newly written special/episode) to appear in Emby's index.
 func (c *Client) VerifyItemIndexed(ctx context.Context, itemType, tmdbID, imdbID, title string, maxWait time.Duration) bool {
+	if !c.IsConfigured() {
+		return true
+	}
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
 		select {
@@ -308,16 +311,34 @@ func (c *Client) VerifyItemIndexed(ctx context.Context, itemType, tmdbID, imdbID
 		default:
 		}
 
-		var itemID string
-		var err error
 		if itemType == "series" {
-			itemID, err = c.FindSeriesItemID(ctx, tmdbID, imdbID, title)
+			seriesID, err := c.FindSeriesItemID(ctx, tmdbID, imdbID, title)
+			if err == nil && seriesID != "" {
+				// Query Emby to confirm if Season 0 (Specials) or any episode has been indexed under this series
+				epURL := fmt.Sprintf("%s/Shows/%s/Episodes?Season=0", strings.TrimRight(c.cfg.EmbyURL, "/"), seriesID)
+				req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, epURL, nil)
+				if reqErr == nil {
+					req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+					req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+					if resp, rErr := c.httpClient.Do(req); rErr == nil {
+						var epRes struct {
+							Items []struct {
+								IndexNumber int `json:"IndexNumber"`
+							} `json:"Items"`
+						}
+						_ = json.NewDecoder(resp.Body).Decode(&epRes)
+						resp.Body.Close()
+						if len(epRes.Items) > 0 {
+							return true // Confirmed on Emby! Special episode is indexed!
+						}
+					}
+				}
+			}
 		} else {
-			itemID, err = c.FindMovieItemID(ctx, tmdbID, imdbID, title)
-		}
-
-		if err == nil && itemID != "" {
-			return true
+			movieID, err := c.FindMovieItemID(ctx, tmdbID, imdbID, title)
+			if err == nil && movieID != "" {
+				return true // Confirmed on Emby! Movie is indexed!
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -373,20 +394,22 @@ func (c *Client) NotifyMediaUpdated(ctx context.Context, itemType, folderName st
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("media updated notification failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("media updated notification returned status %d", resp.StatusCode)
+	}
 	return nil
 }
 
-// WaitForScanCompletion polls Emby's ScheduledTasks until any active media scan completes or timeout occurs.
-func (c *Client) WaitForScanCompletion(ctx context.Context, timeout time.Duration) bool {
+// WaitForScanCompletion polls Emby scheduled tasks until the media library scan reaches Idle.
+func (c *Client) WaitForScanCompletion(ctx context.Context, maxWait time.Duration) bool {
 	if !c.IsConfigured() {
 		return true
 	}
-	deadline := time.Now().Add(timeout)
-	time.Sleep(500 * time.Millisecond)
-
+	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -408,8 +431,9 @@ func (c *Client) WaitForScanCompletion(ctx context.Context, timeout time.Duratio
 		}
 
 		var tasks []struct {
-			Key   string `json:"Key"`
-			State string `json:"State"`
+			Key                       string  `json:"Key"`
+			State                     string  `json:"State"`
+			CurrentProgressPercentage float64 `json:"CurrentProgressPercentage"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&tasks)
 		resp.Body.Close()
@@ -418,6 +442,7 @@ func (c *Client) WaitForScanCompletion(ctx context.Context, timeout time.Duratio
 		for _, t := range tasks {
 			if t.Key == "RefreshLibrary" && t.State == "Running" {
 				scanning = true
+				log.Printf("[Emby] Active media library scan progress: %.1f%%", t.CurrentProgressPercentage)
 				break
 			}
 		}
