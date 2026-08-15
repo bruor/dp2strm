@@ -533,7 +533,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		if st != nil && st.IsActivated {
 			c, p, err := s.PopulateActivatedSeries(ctx, series.ID, cleanTitle, seriesDir)
 			diskDur = time.Since(diskStart)
-			return c, p, false, 0, diskDur, err
+			return c, p, c > 0, 0, diskDur, err
 		}
 	}
 
@@ -726,7 +726,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		if st != nil && st.IsActivated {
 			c, p, _, err := s.PopulateActivatedMovie(ctx, movie.ID, cleanTitle, movieDir, movie.Year, movie.TMDBID)
 			diskDur = time.Since(diskStart)
-			return created + c, preserved + p, strmCreated, 0, diskDur, err
+			return created + c, preserved + p, strmCreated || (c > 0), 0, diskDur, err
 		}
 	}
 	diskDur = time.Since(diskStart)
