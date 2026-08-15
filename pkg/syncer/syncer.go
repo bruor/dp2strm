@@ -1566,6 +1566,44 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
+	// 4. Scan and upgrade unactivated TV Shows placeholders to Specials S00E99 standard
+	if entries, err := os.ReadDir(tvShowsRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			seriesDirPath := filepath.Join(tvShowsRoot, entry.Name())
+			season1Path := filepath.Join(seriesDirPath, "Season 01")
+			if s1Entries, s1Err := os.ReadDir(season1Path); s1Err == nil && len(s1Entries) > 0 && len(s1Entries) <= 2 {
+				for _, f := range s1Entries {
+					if strings.HasSuffix(f.Name(), "S01E01.strm") {
+						title, year := sanitizer.ExtractYearAndTitle(entry.Name())
+						if s.database != nil {
+							st, _ := s.database.FindSeriesByTitleAndYear(title, year)
+							if st != nil && !st.IsActivated {
+								specialsDir := filepath.Join(seriesDirPath, "Specials")
+								actStrmFilename := fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title))
+								actStrmPath := filepath.Join(specialsDir, actStrmFilename)
+								actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, st.SeriesID, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+								_, _ = strm.WriteSTRMFile(actStrmPath, actProxyURL)
+								if s.cfg.EnableNFO {
+									actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
+									_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, st.Title)
+								}
+								_ = os.Remove(filepath.Join(season1Path, f.Name()))
+								_ = os.Remove(filepath.Join(season1Path, strings.TrimSuffix(f.Name(), ".strm")+".nfo"))
+								if remaining, _ := os.ReadDir(season1Path); len(remaining) == 0 {
+									_ = os.Remove(season1Path)
+								}
+								log.Printf("[Reconciler] Upgraded unactivated show placeholder to Specials standard: %q", entry.Name())
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	log.Printf("[Reconciler] Reconciliation pass complete in %v.", time.Since(start))
 	return nil
 }
