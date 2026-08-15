@@ -789,7 +789,7 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 				varKey = "4k"
 			}
 
-			realTargetURL := fmt.Sprintf("%s/movie/%s/%s/%s.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, v.StreamID, v.Container)
+			realTargetURL := fmt.Sprintf("%s/movie/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID, v.Container)
 			if varKey == "base" && baseTargetURL == "" {
 				baseTargetURL = realTargetURL
 			}

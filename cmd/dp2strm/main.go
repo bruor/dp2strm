@@ -56,6 +56,21 @@ func main() {
 	log.Printf("[DB] SQLite database online at: %s", dbPath)
 
 	restClient := client.NewClient(cfg.DispatcharrURL, cfg.APIKey, cfg.Ordering)
+
+	// Auto-discover XC streaming credentials from API key if unset or using defaults
+	if (cfg.XCUser == "" || cfg.XCUser == "username" || cfg.XCPassword == "" || cfg.XCPassword == "password") && cfg.APIKey != "" {
+		pCtx, pCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		discUser, discPass, err := restClient.FetchMyProfile(pCtx)
+		pCancel()
+		if err == nil && discUser != "" && discPass != "" {
+			cfg.XCUser = discUser
+			cfg.XCPassword = discPass
+			log.Printf("[Config] Auto-discovered XC streaming credentials for user %q from Dispatcharr API.", cfg.XCUser)
+		} else if err != nil {
+			log.Printf("[Config] Warning: Could not auto-discover XC credentials: %v", err)
+		}
+	}
+
 	syncEngine := syncer.NewSyncer(cfg, restClient, database)
 
 	// Async Series Activation Callback Worker (auto-resolves canonical title & folder)

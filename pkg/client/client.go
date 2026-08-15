@@ -285,3 +285,25 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 
 	return nil, fmt.Errorf("failed to parse series episodes response for series ID %d", seriesID)
 }
+
+// FetchMyProfile retrieves the authenticated user's profile and XC streaming credentials from GET /api/accounts/users/me/
+func (c *Client) FetchMyProfile(ctx context.Context) (username, xcPassword string, err error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, "/api/accounts/users/me/", nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		Username         string `json:"username"`
+		CustomProperties struct {
+			XCPassword string `json:"xc_password"`
+		} `json:"custom_properties"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", "", fmt.Errorf("failed to decode user profile: %w", err)
+	}
+
+	return data.Username, data.CustomProperties.XCPassword, nil
+}
