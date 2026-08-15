@@ -285,6 +285,33 @@ func (d *DB) FindSeriesByTitleAndYear(title string, year int) (*SeriesState, err
 	return &s, nil
 }
 
+// GetUnactivatedSeries returns all unactivated series records from SQLite.
+func (d *DB) GetUnactivatedSeries() ([]*SeriesState, error) {
+	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE is_activated = 0`
+	rows, err := d.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*SeriesState
+	for rows.Next() {
+		var s SeriesState
+		var actAt, chkAt sql.NullTime
+		if err := rows.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt); err != nil {
+			continue
+		}
+		if actAt.Valid {
+			s.ActivatedAt = &actAt.Time
+		}
+		if chkAt.Valid {
+			s.LastCheckedAt = &chkAt.Time
+		}
+		results = append(results, &s)
+	}
+	return results, nil
+}
+
 // UpdateSeriesMetadata updates status, episode count, next air date, and last_modified timestamp for a series.
 func (d *DB) UpdateSeriesMetadata(seriesID int, status string, epCount int, nextAirDate string, lastModified int64) error {
 	now := time.Now()

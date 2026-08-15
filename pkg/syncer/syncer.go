@@ -1631,36 +1631,35 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
-	// 2. Scan and enqueue TV Shows needing folder ID upgrade or Specials S00E99 upgrade
+	// 2. Scan and enqueue unactivated TV Shows needing Specials S00E99 upgrade
 	tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
-	if entries, err := os.ReadDir(tvShowsRoot); err == nil && s.database != nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			title, year := sanitizer.ExtractYearAndTitle(name)
-			st, _ := s.database.FindSeriesByTitleAndYear(title, year)
-			if st == nil {
-				continue
-			}
+	if s.database != nil {
+		unactivated, err := s.database.GetUnactivatedSeries()
+		if err == nil {
+			for _, st := range unactivated {
+				folderName := st.FolderName
+				if folderName == "" {
+					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(st.Title), st.Year, st.TMDBID, st.IMDBID)
+				}
+				seriesDirPath := filepath.Join(tvShowsRoot, folderName)
+				season1Dir := filepath.Join(seriesDirPath, "Season 01")
+				specialsDir := filepath.Join(seriesDirPath, "Specials")
+				actStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title)))
 
-			needsReconcile := false
-			// Check if folder lacks IDs
-			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") && st.FolderName != name {
-				needsReconcile = true
-			}
-			// Check if unactivated show still has legacy Season 01
-			if !st.IsActivated {
-				season1Dir := filepath.Join(tvShowsRoot, name, "Season 01")
+				needsReconcile := false
+				// Check if on-disk legacy Season 01 exists
 				if _, s1Err := os.Stat(season1Dir); s1Err == nil {
 					needsReconcile = true
 				}
-			}
+				// Check if Specials activation placeholder is missing on disk
+				if _, actErr := os.Stat(actStrm); os.IsNotExist(actErr) {
+					needsReconcile = true
+				}
 
-			if needsReconcile {
-				_ = s.database.EnqueueTask("series", st.SeriesID, "reconcile_series", models.PriorityReconcile)
-				reconcileCount++
+				if needsReconcile {
+					_ = s.database.EnqueueTask("series", st.SeriesID, "reconcile_series", models.PriorityReconcile)
+					reconcileCount++
+				}
 			}
 		}
 	}
