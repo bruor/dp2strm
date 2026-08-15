@@ -940,14 +940,12 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
-// TriggerTargetedEmbySeriesRefresh sends a targeted path notification to Emby (/Library/Media/Updated) after a 15-second grace window, or falls back to global refresh.
+// TriggerTargetedEmbySeriesRefresh sends an immediate targeted path notification to Emby (/Library/Media/Updated), or falls back to global refresh.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
 	go func() {
-		time.Sleep(15 * time.Second)
-
 		// Look up series folder from database
 		var folderName string
 		if s.database != nil {
