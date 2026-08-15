@@ -132,14 +132,14 @@ func TestClientOrdering(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL, "test-key", "-updated_at,-id")
+	c := NewClient(ts.URL, "test-key", "-created_at")
 	_, _ = c.FetchMoviePage(context.Background(), 1, 10)
 	_, _ = c.FetchSeriesPage(context.Background(), 1, 10)
 
-	if movieOrdering != "-updated_at,-id" {
-		t.Errorf("Expected movie ordering '-updated_at,-id', got: '%s'", movieOrdering)
+	if movieOrdering != "-created_at" {
+		t.Errorf("Expected movie ordering '-created_at', got: '%s'", movieOrdering)
 	}
-	if seriesOrdering != "-updated_at,-id" {
-		t.Errorf("Expected series ordering '-updated_at,-id', got: '%s'", seriesOrdering)
+	if seriesOrdering != "-created_at" {
+		t.Errorf("Expected series ordering '-created_at', got: '%s'", seriesOrdering)
 	}
 }

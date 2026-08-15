@@ -31,7 +31,7 @@
   - **Dynamic Rollover**: If one media type has fewer new items available, its unused quota automatically rolls over to the other type.
   - Keeps Emby's periodic import window predictable (e.g. `BATCH_SIZE=100` targets ~20 minutes of Emby indexing per hour).
 - **Server-Side Prioritized Ordering (`DISPATCHARR_ORDERING`)**:
-  - Automatically sorts API queries with `?ordering=-updated_at,-id` by default.
+  - Automatically sorts API queries with `?ordering=-created_at` by default.
   - Ensures brand-new movie additions and TV series with fresh episode drops are placed at the front of the sync queue in every pass.
 - **Duplicate Year & Noise Sanitization**:
   - Automatically collapses duplicate consecutive year tags (e.g., `Yahoo+ (2022) (2022)` ➔ `Yahoo+ (2022)`) across all folders, `.strm`, and `.nfo` files.
@@ -73,7 +73,7 @@ services:
       - TZ=America/Toronto
       - SYNC_INTERVAL=1h
       - BATCH_SIZE=100 # Shared budget per run (50% movies / 50% series with rollover)
-      - DISPATCHARR_ORDERING=-updated_at,-id # Server-side sorting prioritizing recent updates & additions
+      - DISPATCHARR_ORDERING=-created_at # Server-side sorting prioritizing recent updates & additions
       - PAGE_SIZE=100 # Number of items fetched per API page request (Dispatcharr max: 100)
       - PAGE_WORKERS=5 # Number of concurrent page fetch workers
       - MAX_PROBE_CONCURRENCY=5 # Max concurrent movie processing workers
@@ -159,7 +159,7 @@ services:
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |
 | `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial sync pass on container startup |
 | `BATCH_SIZE` | `0` | Shared batch creation limit per run (`0` = Unlimited, `100` = 50 movies + 50 series with rollover) |
-| `DISPATCHARR_ORDERING` | `-updated_at,-id` | Server-side ordering parameter for Dispatcharr VOD endpoints |
+| `DISPATCHARR_ORDERING` | `-created_at` | Server-side ordering parameter for Dispatcharr VOD endpoints |
 | `EMBY_URL` | `""` | Optional Emby/Jellyfin server URL for library refresh hooks |
 | `EMBY_API_KEY` | `""` | Optional Emby/Jellyfin API key |
 

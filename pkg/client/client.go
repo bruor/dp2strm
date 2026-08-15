@@ -27,7 +27,7 @@ type Client struct {
 // NewClient initializes a new Dispatcharr REST API Client with optional ordering.
 func NewClient(baseURL, apiKey string, ordering ...string) *Client {
 	normalized := strings.TrimRight(baseURL, "/")
-	ord := "-updated_at,-id"
+	ord := "-created_at"
 	if len(ordering) > 0 && ordering[0] != "" {
 		ord = ordering[0]
 	}

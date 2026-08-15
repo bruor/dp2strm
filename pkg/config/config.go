@@ -35,7 +35,7 @@ func DefaultConfig() *models.Config {
 		PageWorkers:           5,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
-		Ordering:              "-updated_at,-id",
+		Ordering:              "-created_at",
 	}
 }
 
