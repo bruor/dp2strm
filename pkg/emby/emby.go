@@ -410,6 +410,7 @@ func (c *Client) WaitForScanCompletion(ctx context.Context, maxWait time.Duratio
 		return true
 	}
 	deadline := time.Now().Add(maxWait)
+	lastLoggedPct := -1
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -442,7 +443,11 @@ func (c *Client) WaitForScanCompletion(ctx context.Context, maxWait time.Duratio
 		for _, t := range tasks {
 			if t.Key == "RefreshLibrary" && t.State == "Running" {
 				scanning = true
-				log.Printf("[Emby] Active media library scan progress: %.1f%%", t.CurrentProgressPercentage)
+				pct := int(t.CurrentProgressPercentage)
+				if pct != lastLoggedPct {
+					log.Printf("[Emby] Active media library scan progress: %.1f%%", t.CurrentProgressPercentage)
+					lastLoggedPct = pct
+				}
 				break
 			}
 		}
