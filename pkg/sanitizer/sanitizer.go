@@ -68,9 +68,9 @@ func StripYearFromTitle(title string, year int) string {
 	return cleaned
 }
 
-// BuildMovieFolderName constructs the strict Emby directory name with TMDB ID:
-// e.g. "The Thing (1982) [tmdbid=1091]"
-func BuildMovieFolderName(cleanTitle string, year int, tmdbID string) string {
+// BuildMovieFolderName constructs the strict Emby directory name with TMDB ID or IMDb ID:
+// e.g. "The Thing (1982) [tmdbid=1091]" or "The Hunting Wives (2025) [imdbid=tt31038430]"
+func BuildMovieFolderName(cleanTitle string, year int, tmdbID string, imdbIDs ...string) string {
 	safeTitle := SanitizeFileName(cleanTitle)
 
 	var yearStr string
@@ -81,12 +81,18 @@ func BuildMovieFolderName(cleanTitle string, year int, tmdbID string) string {
 		}
 	}
 
-	var tmdbStr string
+	var idStr string
 	if tmdbID != "" {
-		tmdbStr = fmt.Sprintf(" [tmdbid=%s]", tmdbID)
+		idStr = fmt.Sprintf(" [tmdbid=%s]", tmdbID)
+	} else if len(imdbIDs) > 0 && imdbIDs[0] != "" {
+		imdb := imdbIDs[0]
+		if !strings.HasPrefix(strings.ToLower(imdb), "tt") && !strings.Contains(imdb, "=") {
+			imdb = "tt" + imdb
+		}
+		idStr = fmt.Sprintf(" [imdbid=%s]", imdb)
 	}
 
-	return fmt.Sprintf("%s%s%s", safeTitle, yearStr, tmdbStr)
+	return fmt.Sprintf("%s%s%s", safeTitle, yearStr, idStr)
 }
 
 // CleanEpisodeTitle strips duplicate series title and season/episode tags from episode names.

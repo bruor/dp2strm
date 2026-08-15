@@ -504,11 +504,11 @@ func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Ser
 
 func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, strmCreated bool, artDur, diskDur time.Duration, err error) {
 	cleanTitle := sanitizer.CleanTitle(series.Name)
-	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID)
+	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID, series.IMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
 
 	if s.database != nil {
-		_ = s.database.UpsertInitialSeriesState(series.ID, series.TMDBID, cleanTitle, series.Year, folderName)
+		_ = s.database.UpsertInitialSeriesState(series.ID, series.TMDBID, series.IMDBID, cleanTitle, series.Year, folderName)
 	}
 
 	if dryRun {
@@ -608,10 +608,10 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
 			if srs, fetchErr := s.client.FetchSingleSeries(ctx, seriesID); fetchErr == nil && srs != nil {
 				cleanTitle = sanitizer.CleanTitle(srs.Name)
-				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID)
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
 				seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
 				if s.database != nil {
-					_ = s.database.UpsertInitialSeriesState(seriesID, srs.TMDBID, cleanTitle, srs.Year, folderName)
+					_ = s.database.UpsertInitialSeriesState(seriesID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
 				}
 			}
 		}
@@ -762,11 +762,11 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 
 func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, strmCreated bool, artDur, diskDur time.Duration, err error) {
 	cleanTitle := sanitizer.CleanTitle(movie.Name)
-	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID)
+	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID, movie.IMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
 
 	if s.database != nil {
-		_ = s.database.UpsertInitialMovieState(movie.ID, movie.TMDBID, cleanTitle, movie.Year, folderName)
+		_ = s.database.UpsertInitialMovieState(movie.ID, movie.TMDBID, movie.IMDBID, cleanTitle, movie.Year, folderName)
 	}
 
 	if dryRun {
@@ -849,10 +849,10 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 			cleanTitle = sanitizer.CleanTitle(mv.Name)
 			year = mv.Year
 			tmdbID = mv.TMDBID
-			folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID)
+			folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
 			movieDir = filepath.Join(s.cfg.OutputDir, "Movies", folderName)
 			if s.database != nil {
-				_ = s.database.UpsertInitialMovieState(movieID, mv.TMDBID, cleanTitle, mv.Year, folderName)
+				_ = s.database.UpsertInitialMovieState(movieID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName)
 			}
 		}
 	}
@@ -963,10 +963,11 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		return
 	}
 	go func() {
-		var tmdbID, title string
+		var tmdbID, imdbID, title string
 		if s.database != nil {
 			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
 				tmdbID = st.TMDBID
+				imdbID = st.IMDBID
 				title = st.Title
 			}
 		}
@@ -1001,6 +1002,13 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		var embyItemID string
 		if tmdbID != "" {
 			embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=tmdb.%s", tmdbID))
+		}
+		if embyItemID == "" && imdbID != "" {
+			cleanIMDB := imdbID
+			if !strings.HasPrefix(strings.ToLower(cleanIMDB), "tt") {
+				cleanIMDB = "tt" + cleanIMDB
+			}
+			embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=imdb.%s", cleanIMDB))
 		}
 		if embyItemID == "" && title != "" {
 			escapedTitle := url.QueryEscape(title)

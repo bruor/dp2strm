@@ -20,6 +20,7 @@ type DB struct {
 type SeriesState struct {
 	SeriesID           int
 	TMDBID             string
+	IMDBID             string
 	Title              string
 	Year               int
 	FolderName         string
@@ -36,6 +37,7 @@ type SeriesState struct {
 type MovieState struct {
 	MovieID       int
 	TMDBID        string
+	IMDBID        string
 	Title         string
 	Year          int
 	FolderName    string
@@ -101,6 +103,7 @@ func (d *DB) initSchema() error {
 	CREATE TABLE IF NOT EXISTS series_state (
 		series_id INTEGER PRIMARY KEY,
 		tmdb_id TEXT NOT NULL DEFAULT '',
+		imdb_id TEXT NOT NULL DEFAULT '',
 		title TEXT NOT NULL DEFAULT '',
 		year INTEGER DEFAULT 0,
 		folder_name TEXT NOT NULL DEFAULT '',
@@ -116,6 +119,7 @@ func (d *DB) initSchema() error {
 	CREATE TABLE IF NOT EXISTS movie_state (
 		movie_id INTEGER PRIMARY KEY,
 		tmdb_id TEXT NOT NULL DEFAULT '',
+		imdb_id TEXT NOT NULL DEFAULT '',
 		title TEXT NOT NULL DEFAULT '',
 		year INTEGER DEFAULT 0,
 		folder_name TEXT NOT NULL DEFAULT '',
@@ -159,8 +163,10 @@ func (d *DB) initSchema() error {
 	migrations := []string{
 		"ALTER TABLE series_state ADD COLUMN year INTEGER DEFAULT 0;",
 		"ALTER TABLE series_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE series_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE movie_state ADD COLUMN year INTEGER DEFAULT 0;",
 		"ALTER TABLE movie_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE movie_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
 	}
 	for _, m := range migrations {
 		_, _ = d.conn.Exec(m) // Ignore error if column already exists
@@ -173,12 +179,12 @@ func (d *DB) initSchema() error {
 
 // GetSeriesState retrieves the series state by series ID.
 func (d *DB) GetSeriesState(seriesID int) (*SeriesState, error) {
-	query := `SELECT series_id, tmdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE series_id = ?`
+	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE series_id = ?`
 	row := d.conn.QueryRow(query, seriesID)
 
 	var s SeriesState
 	var actAt, chkAt sql.NullTime
-	err := row.Scan(&s.SeriesID, &s.TMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt)
+	err := row.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -194,20 +200,21 @@ func (d *DB) GetSeriesState(seriesID int) (*SeriesState, error) {
 	return &s, nil
 }
 
-// UpsertInitialSeriesState records title, tmdbID, year, folderName during Pass 1 without altering activation state.
-func (d *DB) UpsertInitialSeriesState(seriesID int, tmdbID, title string, year int, folderName string) error {
+// UpsertInitialSeriesState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
+func (d *DB) UpsertInitialSeriesState(seriesID int, tmdbID, imdbID, title string, year int, folderName string) error {
 	now := time.Now()
 	query := `
-	INSERT INTO series_state (series_id, tmdb_id, title, year, folder_name, is_activated, last_checked_at)
-	VALUES (?, ?, ?, ?, ?, 0, ?)
+	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
+	VALUES (?, ?, ?, ?, ?, ?, 0, ?)
 	ON CONFLICT(series_id) DO UPDATE SET
 		tmdb_id = CASE WHEN EXCLUDED.tmdb_id != '' THEN EXCLUDED.tmdb_id ELSE series_state.tmdb_id END,
+		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
 		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE series_state.folder_name END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`
-	_, err := d.conn.Exec(query, seriesID, tmdbID, title, year, folderName, now)
+	_, err := d.conn.Exec(query, seriesID, tmdbID, imdbID, title, year, folderName, now)
 	return err
 }
 
@@ -272,12 +279,12 @@ func (d *DB) GetActiveSeriesToSync(currentDate string) ([]int, error) {
 
 // GetMovieState retrieves the movie state by movie ID.
 func (d *DB) GetMovieState(movieID int) (*MovieState, error) {
-	query := `SELECT movie_id, tmdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at FROM movie_state WHERE movie_id = ?`
+	query := `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at FROM movie_state WHERE movie_id = ?`
 	row := d.conn.QueryRow(query, movieID)
 
 	var m MovieState
 	var actAt, chkAt sql.NullTime
-	err := row.Scan(&m.MovieID, &m.TMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt)
+	err := row.Scan(&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -293,20 +300,21 @@ func (d *DB) GetMovieState(movieID int) (*MovieState, error) {
 	return &m, nil
 }
 
-// UpsertInitialMovieState records title, tmdbID, year, folderName during Pass 1 without altering activation state.
-func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, title string, year int, folderName string) error {
+// UpsertInitialMovieState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
+func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, imdbID, title string, year int, folderName string) error {
 	now := time.Now()
 	query := `
-	INSERT INTO movie_state (movie_id, tmdb_id, title, year, folder_name, is_activated, last_checked_at)
-	VALUES (?, ?, ?, ?, ?, 0, ?)
+	INSERT INTO movie_state (movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
+	VALUES (?, ?, ?, ?, ?, ?, 0, ?)
 	ON CONFLICT(movie_id) DO UPDATE SET
 		tmdb_id = CASE WHEN EXCLUDED.tmdb_id != '' THEN EXCLUDED.tmdb_id ELSE movie_state.tmdb_id END,
+		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
 		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE movie_state.folder_name END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`
-	_, err := d.conn.Exec(query, movieID, tmdbID, title, year, folderName, now)
+	_, err := d.conn.Exec(query, movieID, tmdbID, imdbID, title, year, folderName, now)
 	return err
 }
 

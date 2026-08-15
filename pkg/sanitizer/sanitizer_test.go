@@ -42,12 +42,18 @@ func TestBuildMovieFolderName(t *testing.T) {
 		{"The Thing (1982)", 1982, "1091", "The Thing (1982) [tmdbid=1091]"}, // Prevents year duplication!
 		{"Becoming", 2020, "699280", "Becoming (2020) [tmdbid=699280]"},
 		{"Becoming", 2020, "526052", "Becoming (2020) [tmdbid=526052]"},
+		{"The Hunting Wives", 2025, "", "The Hunting Wives (2025) [imdbid=tt31038430]"},
 		{CleanTitle("Yahoo+ (2022) (2022)"), 2022, "1002442", "Yahoo+ (2022) [tmdbid=1002442]"},
 		{CleanTitle("102 Dalmatians (2000) (2000)"), 2000, "10481", "102 Dalmatians (2000) [tmdbid=10481]"},
 	}
 
 	for _, tt := range tests {
-		got := BuildMovieFolderName(tt.title, tt.year, tt.tmdbID)
+		var got string
+		if tt.title == "The Hunting Wives" {
+			got = BuildMovieFolderName(tt.title, tt.year, "", "tt31038430")
+		} else {
+			got = BuildMovieFolderName(tt.title, tt.year, tt.tmdbID)
+		}
 		if got != tt.expected {
 			t.Errorf("BuildMovieFolderName(%q, %d, %q) = %q; want %q", tt.title, tt.year, tt.tmdbID, got, tt.expected)
 		}

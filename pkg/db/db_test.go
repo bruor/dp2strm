@@ -31,7 +31,7 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 
 	// Test UpsertInitialSeriesState
-	if err := d.UpsertInitialSeriesState(seriesID, "61381", "black-ish", 2014, "black-ish (2014) [tmdbid=61381]"); err != nil {
+	if err := d.UpsertInitialSeriesState(seriesID, "61381", "tt3487356", "black-ish", 2014, "black-ish (2014) [tmdbid=61381]"); err != nil {
 		t.Fatalf("Failed to upsert initial series state: %v", err)
 	}
 	st, err = d.GetSeriesState(seriesID)
@@ -40,6 +40,9 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 	if st.IsActivated {
 		t.Errorf("Expected IsActivated=false before activation")
+	}
+	if st.IMDBID != "tt3487356" {
+		t.Errorf("Expected IMDBID %q, got %q", "tt3487356", st.IMDBID)
 	}
 	if st.FolderName != "black-ish (2014) [tmdbid=61381]" {
 		t.Errorf("Expected FolderName %q, got %q", "black-ish (2014) [tmdbid=61381]", st.FolderName)
@@ -70,7 +73,7 @@ func TestSQLiteStateEngine(t *testing.T) {
 		t.Fatalf("Expected nil state for unactivated movie, got: %+v", mst)
 	}
 
-	if err := d.UpsertInitialMovieState(movieID, "19995", "Avatar", 2009, "Avatar (2009) [tmdbid=19995]"); err != nil {
+	if err := d.UpsertInitialMovieState(movieID, "19995", "tt0499549", "Avatar", 2009, "Avatar (2009) [tmdbid=19995]"); err != nil {
 		t.Fatalf("Failed to upsert initial movie state: %v", err)
 	}
 	mst, err = d.GetMovieState(movieID)
@@ -79,6 +82,9 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 	if mst.IsActivated {
 		t.Errorf("Expected movie IsActivated=false before activation")
+	}
+	if mst.IMDBID != "tt0499549" {
+		t.Errorf("Expected movie IMDBID %q, got %q", "tt0499549", mst.IMDBID)
 	}
 	if mst.FolderName != "Avatar (2009) [tmdbid=19995]" {
 		t.Errorf("Expected movie FolderName %q, got %q", "Avatar (2009) [tmdbid=19995]", mst.FolderName)
