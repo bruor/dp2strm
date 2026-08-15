@@ -20,15 +20,21 @@ var ErrRateLimited = fmt.Errorf("HTTP 429 Too Many Requests (Rate Limited)")
 type Client struct {
 	baseURL    string
 	apiKey     string
+	ordering   string
 	httpClient *http.Client
 }
 
-// NewClient initializes a new Dispatcharr REST API Client.
-func NewClient(baseURL, apiKey string) *Client {
+// NewClient initializes a new Dispatcharr REST API Client with optional ordering.
+func NewClient(baseURL, apiKey string, ordering ...string) *Client {
 	normalized := strings.TrimRight(baseURL, "/")
+	ord := "-updated_at,-id"
+	if len(ordering) > 0 && ordering[0] != "" {
+		ord = ordering[0]
+	}
 	return &Client{
-		baseURL: normalized,
-		apiKey:  apiKey,
+		baseURL:  normalized,
+		apiKey:   apiKey,
+		ordering: ord,
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
@@ -38,6 +44,11 @@ func NewClient(baseURL, apiKey string) *Client {
 			},
 		},
 	}
+}
+
+// SetOrdering sets the server-side ordering query parameter (e.g. "-updated_at,-id").
+func (c *Client) SetOrdering(ordering string) {
+	c.ordering = ordering
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values) (*http.Response, error) {
@@ -78,6 +89,9 @@ func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*model
 	query := url.Values{}
 	query.Set("page", fmt.Sprintf("%d", page))
 	query.Set("page_size", fmt.Sprintf("%d", pageSize))
+	if c.ordering != "" {
+		query.Set("ordering", c.ordering)
+	}
 
 	resp, err := c.doRequest(ctx, http.MethodGet, "/api/vod/movies/", query)
 	if err != nil {
@@ -187,6 +201,9 @@ func (c *Client) FetchSeriesPage(ctx context.Context, page, pageSize int) (*mode
 	query := url.Values{}
 	query.Set("page", fmt.Sprintf("%d", page))
 	query.Set("page_size", fmt.Sprintf("%d", pageSize))
+	if c.ordering != "" {
+		query.Set("ordering", c.ordering)
+	}
 
 	resp, err := c.doRequest(ctx, http.MethodGet, "/api/vod/series/", query)
 	if err != nil {

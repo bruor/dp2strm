@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -143,5 +144,68 @@ func TestSyncerCircuitBreaker(t *testing.T) {
 	_ = s.SyncMovies(context.Background(), false)
 	if !s.isCircuitTripped() {
 		t.Errorf("Expected circuit breaker to be tripped on 429 rate limit")
+	}
+}
+
+func TestSyncSharedPassRollover(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Mock Server with 1 Movie and 5 Series
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if strings.HasPrefix(r.URL.Path, "/api/vod/movies/") {
+			_, _ = w.Write([]byte(`{"count": 1, "results": [
+				{"id": 1, "name": "Movie 1", "year": 2024, "tmdb_id": "1001"}
+			]}`))
+		} else if strings.HasPrefix(r.URL.Path, "/api/vod/series/") {
+			_, _ = w.Write([]byte(`{"count": 5, "results": [
+				{"id": 1, "name": "Series 1", "year": 2024, "tmdb_id": "2001"},
+				{"id": 2, "name": "Series 2", "year": 2024, "tmdb_id": "2002"},
+				{"id": 3, "name": "Series 3", "year": 2024, "tmdb_id": "2003"},
+				{"id": 4, "name": "Series 4", "year": 2024, "tmdb_id": "2004"},
+				{"id": 5, "name": "Series 5", "year": 2024, "tmdb_id": "2005"}
+			]}`))
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL: ts.URL,
+		APIKey:         "test-api-key",
+		OutputDir:      tempDir,
+		URL:            "http://localhost:8080",
+		PageSize:       10,
+		PageWorkers:    2,
+		BatchSize:      4, // Total shared budget = 4 (Initial: 2 Movies, 2 Series)
+	}
+
+	c := client.NewClient(ts.URL, "test-api-key")
+	s := NewSyncer(cfg, c, database)
+
+	// Execute Shared Sync Pass:
+	// Movie only has 1 available (quota is 2), so 1 unused budget rolls over to Series (Series budget = 2 + 1 = 3).
+	// Total created should be 1 movie + 3 series = 4.
+	if err := s.SyncSharedPass(context.Background(), false); err != nil {
+		t.Fatalf("SyncSharedPass failed: %v", err)
+	}
+
+	// Verify Movie 1 was created
+	movie1STRM := filepath.Join(tempDir, "Movies", "Movie 1 (2024) [tmdbid=1001]", "Movie 1.strm")
+	if _, err := os.Stat(movie1STRM); os.IsNotExist(err) {
+		t.Errorf("Expected Movie 1 to exist at %s", movie1STRM)
+	}
+
+	// Verify Series 1, 2, 3 were created (3 series total created due to rollover)
+	for i := 1; i <= 3; i++ {
+		sDir := filepath.Join(tempDir, "TV Shows", fmt.Sprintf("Series %d (2024) [tmdbid=200%d]", i, i))
+		if _, err := os.Stat(sDir); os.IsNotExist(err) {
+			t.Errorf("Expected Series %d to exist at %s", i, sDir)
+		}
 	}
 }

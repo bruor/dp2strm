@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,31 @@ func TestClientFetchSingleEntities(t *testing.T) {
 	}
 	if srs.Name != "Breaking Bad" || srs.TMDBID != "1396" {
 		t.Errorf("Unexpected series data: %+v", srs)
+	}
+}
+
+func TestClientOrdering(t *testing.T) {
+	var movieOrdering, seriesOrdering string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if strings.HasPrefix(r.URL.Path, "/api/vod/movies/") {
+			movieOrdering = r.URL.Query().Get("ordering")
+			_, _ = w.Write([]byte(`{"count": 0, "results": []}`))
+		} else if strings.HasPrefix(r.URL.Path, "/api/vod/series/") {
+			seriesOrdering = r.URL.Query().Get("ordering")
+			_, _ = w.Write([]byte(`{"count": 0, "results": []}`))
+		}
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "test-key", "-updated_at,-id")
+	_, _ = c.FetchMoviePage(context.Background(), 1, 10)
+	_, _ = c.FetchSeriesPage(context.Background(), 1, 10)
+
+	if movieOrdering != "-updated_at,-id" {
+		t.Errorf("Expected movie ordering '-updated_at,-id', got: '%s'", movieOrdering)
+	}
+	if seriesOrdering != "-updated_at,-id" {
+		t.Errorf("Expected series ordering '-updated_at,-id', got: '%s'", seriesOrdering)
 	}
 }

@@ -35,6 +35,7 @@ func DefaultConfig() *models.Config {
 		PageWorkers:           5,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
+		Ordering:              "-updated_at,-id",
 	}
 }
 
@@ -82,6 +83,9 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("TZ"); v != "" {
 		cfg.TZ = v
+	}
+	if v := os.Getenv("DISPATCHARR_ORDERING"); v != "" {
+		cfg.Ordering = v
 	}
 	if v := os.Getenv("SKIP_STARTUP_SYNC"); v != "" {
 		cfg.SkipStartupSync = (v == "true" || v == "1")

@@ -60,9 +60,18 @@ func (s *Syncer) resetCircuitBreaker() {
 	s.circuitTripped = false
 }
 
-// SyncMovies executes a full movie sync pass from Dispatcharr REST API to disk with parallel page fetching.
+// SyncMovies executes a full movie sync pass from Dispatcharr REST API to disk.
 func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
-	log.Println("[Syncer] Starting Parallel Movie Sync Pass...")
+	created, err := s.SyncMoviesWithLimit(ctx, s.cfg.BatchSize, dryRun)
+	if err == nil && created > 0 && s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "" && !dryRun {
+		s.triggerEmbyRefresh(ctx)
+	}
+	return err
+}
+
+// SyncMoviesWithLimit executes a movie sync pass, creating up to maxNewItems new .strm files on disk.
+func (s *Syncer) SyncMoviesWithLimit(ctx context.Context, maxNewItems int, dryRun bool) (int, error) {
+	log.Printf("[Syncer] Starting Parallel Movie Sync Pass (Max New Items: %d)...", maxNewItems)
 	start := time.Now()
 	s.resetCircuitBreaker()
 
@@ -84,13 +93,13 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
 			s.tripCircuitBreaker()
 		}
-		return fmt.Errorf("failed to fetch movie page 1: %w", err)
+		return 0, fmt.Errorf("failed to fetch movie page 1: %w", err)
 	}
 	log.Printf("[Syncer] Movie Page 1 API Fetch took %v", apiDuration)
 
 	if len(firstResp.Results) == 0 {
 		log.Println("[Syncer] Movie Sync Complete: 0 movies found.")
-		return nil
+		return 0, nil
 	}
 
 	totalCount := firstResp.Count
@@ -108,9 +117,13 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	var totalProcessed int64
 	var totalCreated int64
 	var totalPreserved int64
+	var newStrmCreated int64
 
 	processPage := func(pageNum int, movies []models.Movie) {
 		if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+			return
+		}
+		if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
 			return
 		}
 		atomic.AddInt64(&totalProcessed, int64(len(movies)))
@@ -126,6 +139,9 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 			if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
 				break
 			}
+			if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
+				break
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(movie models.Movie) {
@@ -136,13 +152,19 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 				if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
 					return
 				}
-				c, p, aDur, dDur, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
+				if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
+					return
+				}
+				c, p, isNewStrm, aDur, dDur, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
 				if err != nil {
 					if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
 						s.tripCircuitBreaker()
 					}
 					log.Printf("[Syncer] Warning: Error processing movie '%s' (ID %d): %v", movie.Name, movie.ID, err)
 					return
+				}
+				if isNewStrm {
+					atomic.AddInt64(&newStrmCreated, 1)
 				}
 				mu.Lock()
 				pCreated += int64(c)
@@ -167,63 +189,70 @@ func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 
 	// Fetch & process remaining pages using parallel page workers
 	if totalPages > 1 && (!s.cfg.CircuitBreakerEnabled || !s.isCircuitTripped()) {
-		pageWorkers := s.cfg.PageWorkers
-		if pageWorkers <= 0 {
-			pageWorkers = 5
-		}
-		pageChan := make(chan int, totalPages)
-		for p := 2; p <= totalPages; p++ {
-			if s.cfg.BatchSize > 0 && (p-1)*pageSize >= s.cfg.BatchSize {
-				break
+		if maxNewItems <= 0 || atomic.LoadInt64(&newStrmCreated) < int64(maxNewItems) {
+			pageWorkers := s.cfg.PageWorkers
+			if pageWorkers <= 0 {
+				pageWorkers = 5
 			}
-			pageChan <- p
-		}
-		close(pageChan)
+			pageChan := make(chan int, totalPages)
+			for p := 2; p <= totalPages; p++ {
+				pageChan <- p
+			}
+			close(pageChan)
 
-		var pageWg sync.WaitGroup
-		for w := 0; w < pageWorkers; w++ {
-			pageWg.Add(1)
-			go func() {
-				defer pageWg.Done()
-				for pageNum := range pageChan {
-					if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
-						return
-					}
-					fStart := time.Now()
-					resp, err := s.client.FetchMoviePage(ctx, pageNum, pageSize)
-					fDuration := time.Since(fStart)
-					if err != nil {
-						if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
-							s.tripCircuitBreaker()
+			var pageWg sync.WaitGroup
+			for w := 0; w < pageWorkers; w++ {
+				pageWg.Add(1)
+				go func() {
+					defer pageWg.Done()
+					for pageNum := range pageChan {
+						if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+							return
 						}
-						log.Printf("[Syncer] Warning: Error fetching movie page %d: %v", pageNum, err)
-						continue
+						if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
+							return
+						}
+						fStart := time.Now()
+						resp, err := s.client.FetchMoviePage(ctx, pageNum, pageSize)
+						fDuration := time.Since(fStart)
+						if err != nil {
+							if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+								s.tripCircuitBreaker()
+							}
+							log.Printf("[Syncer] Warning: Error fetching movie page %d: %v", pageNum, err)
+							continue
+						}
+						if len(resp.Results) > 0 {
+							processPage(pageNum, resp.Results)
+							log.Printf("[Syncer] Movie Page %d API Fetch took %v", pageNum, fDuration)
+						}
 					}
-					if len(resp.Results) > 0 {
-						processPage(pageNum, resp.Results)
-						log.Printf("[Syncer] Movie Page %d API Fetch took %v", pageNum, fDuration)
-					}
-				}
-			}()
+				}()
+			}
+			pageWg.Wait()
 		}
-		pageWg.Wait()
 	}
 
 	duration := time.Since(start)
-	log.Printf("[Syncer] Movie Sync Complete in %v: %d movies processed, %d files created/updated, %d preserved.",
-		duration, totalProcessed, totalCreated, totalPreserved)
+	createdCount := int(atomic.LoadInt64(&newStrmCreated))
+	log.Printf("[Syncer] Movie Sync Complete in %v: %d movies processed, %d new movies created (%d total files created/updated, %d preserved).",
+		duration, totalProcessed, createdCount, totalCreated, totalPreserved)
 
-	// Trigger Emby Refresh ONLY if files were created or deleted
-	if totalCreated > 0 && s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "" && !dryRun {
-		s.triggerEmbyRefresh(ctx)
-	}
-
-	return nil
+	return createdCount, nil
 }
 
 // SyncSeries Pass 1: Generates initial lightweight TV series tree with S01E01 Activation placeholder.
 func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
-	log.Println("[Syncer] Starting Pass 1 Parallel TV Series Sync Pass...")
+	created, err := s.SyncSeriesWithLimit(ctx, s.cfg.BatchSize, dryRun)
+	if err == nil && created > 0 && s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "" && !dryRun {
+		s.triggerEmbyRefresh(ctx)
+	}
+	return err
+}
+
+// SyncSeriesWithLimit executes Pass 1 series sync, creating up to maxNewItems new .strm files on disk.
+func (s *Syncer) SyncSeriesWithLimit(ctx context.Context, maxNewItems int, dryRun bool) (int, error) {
+	log.Printf("[Syncer] Starting Pass 1 Parallel TV Series Sync Pass (Max New Items: %d)...", maxNewItems)
 	start := time.Now()
 	s.resetCircuitBreaker()
 
@@ -245,13 +274,13 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
 			s.tripCircuitBreaker()
 		}
-		return fmt.Errorf("failed to fetch series page 1: %w", err)
+		return 0, fmt.Errorf("failed to fetch series page 1: %w", err)
 	}
 	log.Printf("[Syncer] Series Page 1 API Fetch took %v", apiDuration)
 
 	if len(firstResp.Results) == 0 {
 		log.Println("[Syncer] Pass 1 Series Sync Complete: 0 series found.")
-		return nil
+		return 0, nil
 	}
 
 	totalCount := firstResp.Count
@@ -269,9 +298,13 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 	var totalProcessed int64
 	var totalCreated int64
 	var totalPreserved int64
+	var newStrmCreated int64
 
 	processPage := func(pageNum int, seriesList []models.Series) {
 		if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+			return
+		}
+		if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
 			return
 		}
 		atomic.AddInt64(&totalProcessed, int64(len(seriesList)))
@@ -287,6 +320,9 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 			if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
 				break
 			}
+			if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
+				break
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(series models.Series) {
@@ -297,13 +333,19 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 				if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
 					return
 				}
-				c, p, aDur, dDur, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
+				if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
+					return
+				}
+				c, p, isNewStrm, aDur, dDur, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
 				if err != nil {
 					if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
 						s.tripCircuitBreaker()
 					}
 					log.Printf("[Syncer] Warning: Error processing series '%s' (ID %d): %v", series.Name, series.ID, err)
 					return
+				}
+				if isNewStrm {
+					atomic.AddInt64(&newStrmCreated, 1)
 				}
 				mu.Lock()
 				pCreated += int64(c)
@@ -328,52 +370,125 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 
 	// Fetch & process remaining pages using parallel page workers
 	if totalPages > 1 && (!s.cfg.CircuitBreakerEnabled || !s.isCircuitTripped()) {
-		pageWorkers := s.cfg.PageWorkers
-		if pageWorkers <= 0 {
-			pageWorkers = 5
-		}
-		pageChan := make(chan int, totalPages)
-		for p := 2; p <= totalPages; p++ {
-			if s.cfg.BatchSize > 0 && (p-1)*pageSize >= s.cfg.BatchSize {
-				break
+		if maxNewItems <= 0 || atomic.LoadInt64(&newStrmCreated) < int64(maxNewItems) {
+			pageWorkers := s.cfg.PageWorkers
+			if pageWorkers <= 0 {
+				pageWorkers = 5
 			}
-			pageChan <- p
-		}
-		close(pageChan)
+			pageChan := make(chan int, totalPages)
+			for p := 2; p <= totalPages; p++ {
+				pageChan <- p
+			}
+			close(pageChan)
 
-		var pageWg sync.WaitGroup
-		for w := 0; w < pageWorkers; w++ {
-			pageWg.Add(1)
-			go func() {
-				defer pageWg.Done()
-				for pageNum := range pageChan {
-					if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
-						return
-					}
-					fStart := time.Now()
-					resp, err := s.client.FetchSeriesPage(ctx, pageNum, pageSize)
-					fDuration := time.Since(fStart)
-					if err != nil {
-						if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
-							s.tripCircuitBreaker()
+			var pageWg sync.WaitGroup
+			for w := 0; w < pageWorkers; w++ {
+				pageWg.Add(1)
+				go func() {
+					defer pageWg.Done()
+					for pageNum := range pageChan {
+						if s.cfg.CircuitBreakerEnabled && s.isCircuitTripped() {
+							return
 						}
-						log.Printf("[Syncer] Warning: Error fetching series page %d: %v", pageNum, err)
-						continue
+						if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
+							return
+						}
+						fStart := time.Now()
+						resp, err := s.client.FetchSeriesPage(ctx, pageNum, pageSize)
+						fDuration := time.Since(fStart)
+						if err != nil {
+							if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+								s.tripCircuitBreaker()
+							}
+							log.Printf("[Syncer] Warning: Error fetching series page %d: %v", pageNum, err)
+							continue
+						}
+						if len(resp.Results) > 0 {
+							processPage(pageNum, resp.Results)
+							log.Printf("[Syncer] Series Page %d API Fetch took %v", pageNum, fDuration)
+						}
 					}
-					if len(resp.Results) > 0 {
-						processPage(pageNum, resp.Results)
-						log.Printf("[Syncer] Series Page %d API Fetch took %v", pageNum, fDuration)
-					}
-				}
-			}()
+				}()
+			}
+			pageWg.Wait()
 		}
-		pageWg.Wait()
 	}
 
 	duration := time.Since(start)
-	log.Printf("[Syncer] Pass 1 Series Sync Complete in %v: %d series processed, %d files created/updated, %d preserved.",
-		duration, totalProcessed, totalCreated, totalPreserved)
+	createdCount := int(atomic.LoadInt64(&newStrmCreated))
+	log.Printf("[Syncer] Pass 1 Series Sync Complete in %v: %d series processed, %d new series created (%d total files created/updated, %d preserved).",
+		duration, totalProcessed, createdCount, totalCreated, totalPreserved)
 
+	return createdCount, nil
+}
+
+// SyncSharedPass coordinates a combined Movies and TV Series sync with shared BATCH_SIZE allocation,
+// dynamic quota rollover, and a single unified Emby library refresh.
+func (s *Syncer) SyncSharedPass(ctx context.Context, dryRun bool) error {
+	totalBudget := s.cfg.BatchSize
+	log.Printf("[Syncer] === Starting Shared Sync Pass (Shared Budget: %d) ===", totalBudget)
+
+	if totalBudget <= 0 {
+		// Unlimited mode: sync all movies and all series
+		var totalNew int
+		mCreated, err := s.SyncMoviesWithLimit(ctx, 0, dryRun)
+		if err != nil {
+			log.Printf("[Syncer] Error during movie sync: %v", err)
+		}
+		totalNew += mCreated
+
+		sCreated, err := s.SyncSeriesWithLimit(ctx, 0, dryRun)
+		if err != nil {
+			log.Printf("[Syncer] Error during series sync: %v", err)
+		}
+		totalNew += sCreated
+
+		if totalNew > 0 && s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "" && !dryRun {
+			s.triggerEmbyRefresh(ctx)
+		}
+		return nil
+	}
+
+	// 1. Initial Quota Split (50% Movies, 50% Series)
+	movieQuota := totalBudget / 2
+	if movieQuota <= 0 {
+		movieQuota = 1
+	}
+	seriesQuota := totalBudget - movieQuota
+
+	// 2. Phase 1: Sync Movies with initial quota
+	log.Printf("[Syncer] Phase 1: Syncing Movies (Target Quota: %d)...", movieQuota)
+	moviesCreated, err := s.SyncMoviesWithLimit(ctx, movieQuota, dryRun)
+	if err != nil {
+		log.Printf("[Syncer] Warning: Movie sync encountered error: %v", err)
+	}
+
+	// 3. Phase 2: Sync Series with SeriesQuota + unused Movie budget
+	unusedMovieBudget := movieQuota - moviesCreated
+	if unusedMovieBudget < 0 {
+		unusedMovieBudget = 0
+	}
+	seriesBudget := seriesQuota + unusedMovieBudget
+	log.Printf("[Syncer] Phase 2: Syncing Series (Target Quota: %d, includes %d rollover)...", seriesBudget, unusedMovieBudget)
+	seriesCreated, sErr := s.SyncSeriesWithLimit(ctx, seriesBudget, dryRun)
+	if sErr != nil {
+		log.Printf("[Syncer] Warning: Series sync encountered error: %v", sErr)
+	}
+
+	// 4. Phase 3: Movie Top-Off (if Series had leftover budget)
+	totalCreated := moviesCreated + seriesCreated
+	if totalCreated < totalBudget && moviesCreated >= movieQuota {
+		remainingBudget := totalBudget - totalCreated
+		log.Printf("[Syncer] Phase 3: Top-Off Movies with remaining budget (%d)...", remainingBudget)
+		topOffCreated, _ := s.SyncMoviesWithLimit(ctx, remainingBudget, dryRun)
+		moviesCreated += topOffCreated
+		totalCreated = moviesCreated + seriesCreated
+	}
+
+	log.Printf("[Syncer] === Shared Sync Pass Complete: %d new movies, %d new series (%d / %d total budget used) ===",
+		moviesCreated, seriesCreated, totalCreated, totalBudget)
+
+	// 5. Unified Emby Library Refresh
 	if totalCreated > 0 && s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "" && !dryRun {
 		s.triggerEmbyRefresh(ctx)
 	}
@@ -382,11 +497,11 @@ func (s *Syncer) SyncSeries(ctx context.Context, dryRun bool) error {
 }
 
 func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, err error) {
-	c, p, _, _, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
+	c, p, _, _, _, err := s.processSingleSeriesPass1Profiled(ctx, series, dryRun)
 	return c, p, err
 }
 
-func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, artDur, diskDur time.Duration, err error) {
+func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, strmCreated bool, artDur, diskDur time.Duration, err error) {
 	cleanTitle := sanitizer.CleanTitle(series.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
@@ -397,7 +512,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 
 	if dryRun {
 		log.Printf("[DRY-RUN] Pass 1 Series '%s' (TMDB %s) -> Folder: %s", cleanTitle, series.TMDBID, folderName)
-		return 1, 0, 0, 0, nil
+		return 1, 0, true, 0, 0, nil
 	}
 
 	diskStart := time.Now()
@@ -418,7 +533,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		if st != nil && st.IsActivated {
 			c, p, err := s.PopulateActivatedSeries(ctx, series.ID, cleanTitle, seriesDir)
 			diskDur = time.Since(diskStart)
-			return c, p, 0, diskDur, err
+			return c, p, false, 0, diskDur, err
 		}
 	}
 
@@ -436,6 +551,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	if err == nil {
 		if strmUpdated {
 			created++
+			strmCreated = true
 		} else {
 			preserved++
 		}
@@ -458,7 +574,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	artDur = time.Since(artStart)
 	created += artCreated
 
-	return created, preserved, artDur, diskDur, nil
+	return created, preserved, strmCreated, artDur, diskDur, nil
 }
 
 // PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm files on disk.
@@ -559,11 +675,11 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 }
 
 func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, err error) {
-	c, p, _, _, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
+	c, p, _, _, _, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
 	return c, p, err
 }
 
-func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, artDur, diskDur time.Duration, err error) {
+func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, strmCreated bool, artDur, diskDur time.Duration, err error) {
 	cleanTitle := sanitizer.CleanTitle(movie.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
@@ -574,7 +690,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 
 	if dryRun {
 		log.Printf("[DRY-RUN] Movie '%s' (TMDB %s) -> Folder: %s", cleanTitle, movie.TMDBID, folderName)
-		return 1, 0, 0, 0, nil
+		return 1, 0, true, 0, 0, nil
 	}
 
 	diskStart := time.Now()
@@ -599,6 +715,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		log.Printf("[Syncer] Error writing movie STRM %s: %v", strmPath, err)
 	} else if updated {
 		created++
+		strmCreated = true
 	} else {
 		preserved++
 	}
@@ -609,7 +726,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		if st != nil && st.IsActivated {
 			c, p, _, err := s.PopulateActivatedMovie(ctx, movie.ID, cleanTitle, movieDir, movie.Year, movie.TMDBID)
 			diskDur = time.Since(diskStart)
-			return created + c, preserved + p, 0, diskDur, err
+			return created + c, preserved + p, strmCreated, 0, diskDur, err
 		}
 	}
 	diskDur = time.Since(diskStart)
@@ -620,7 +737,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	artDur = time.Since(artStart)
 	created += artCreated
 
-	return created, preserved, artDur, diskDur, nil
+	return created, preserved, strmCreated, artDur, diskDur, nil
 }
 
 // PopulateActivatedMovie resolves backing provider streams for a movie, classifies quality tiers, saves variants to SQLite, writes secondary variant .strm files on disk, and marks movie as activated.

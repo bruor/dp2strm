@@ -55,7 +55,7 @@ func main() {
 	defer database.Close()
 	log.Printf("[DB] SQLite database online at: %s", dbPath)
 
-	restClient := client.NewClient(cfg.DispatcharrURL, cfg.APIKey)
+	restClient := client.NewClient(cfg.DispatcharrURL, cfg.APIKey, cfg.Ordering)
 	syncEngine := syncer.NewSyncer(cfg, restClient, database)
 
 	// Async Series Activation Callback Worker (auto-resolves canonical title & folder)
@@ -100,11 +100,8 @@ func main() {
 
 	if *syncOnce {
 		log.Println("[Main] Executing single sync pass...")
-		if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
-			log.Printf("[Main] Error during movie sync: %v", err)
-		}
-		if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
-			log.Printf("[Main] Error during series sync: %v", err)
+		if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
+			log.Printf("[Main] Error during sync pass: %v", err)
 		}
 		_ = proxyServer.Stop(ctx)
 		log.Println("[Main] Single sync pass completed. Exiting.")
@@ -130,11 +127,8 @@ func main() {
 	// Execute Initial Startup Sync Pass (unless SKIP_STARTUP_SYNC=true)
 	if !cfg.SkipStartupSync {
 		log.Println("[Main] Executing initial startup sync pass...")
-		if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
-			log.Printf("[Main] Error during initial movie sync: %v", err)
-		}
-		if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
-			log.Printf("[Main] Error during initial series sync: %v", err)
+		if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
+			log.Printf("[Main] Error during initial sync pass: %v", err)
 		}
 	} else {
 		log.Println("[Main] SKIP_STARTUP_SYNC enabled. Skipping initial startup sync pass.")
@@ -145,11 +139,8 @@ func main() {
 		cronRunner := cron.New(cron.WithLocation(loc))
 		_, err := cronRunner.AddFunc(cfg.SyncCron, func() {
 			log.Printf("[Main] Cron schedule '%s' triggered (Time: %s). Executing sync pass...", cfg.SyncCron, time.Now().In(loc).Format(time.RFC3339))
-			if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
-				log.Printf("[Main] Error during scheduled movie sync: %v", err)
-			}
-			if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
-				log.Printf("[Main] Error during scheduled series sync: %v", err)
+			if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
+				log.Printf("[Main] Error during scheduled sync pass: %v", err)
 			}
 		})
 		if err == nil {
@@ -181,11 +172,8 @@ func main() {
 			return
 		case <-ticker.C:
 			log.Println("[Main] Ticker fired. Executing scheduled sync pass...")
-			if err := syncEngine.SyncMovies(ctx, *dryRun); err != nil {
-				log.Printf("[Main] Error during scheduled movie sync: %v", err)
-			}
-			if err := syncEngine.SyncSeries(ctx, *dryRun); err != nil {
-				log.Printf("[Main] Error during scheduled series sync: %v", err)
+			if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
+				log.Printf("[Main] Error during scheduled sync pass: %v", err)
 			}
 		}
 	}
