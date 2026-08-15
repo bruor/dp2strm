@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"dp2strm/pkg/models"
 	"dp2strm/pkg/sanitizer"
@@ -126,7 +127,7 @@ func writeNFOData(filePath string, nfoStruct interface{}) (bool, error) {
 	// Check existing file for mtime preservation
 	if existingInfo, err := os.Stat(filePath); err == nil {
 		if existingBytes, readErr := os.ReadFile(filePath); readErr == nil {
-			if string(existingBytes) == string(xmlHeader) {
+			if strings.TrimSpace(string(existingBytes)) == strings.TrimSpace(string(xmlHeader)) {
 				mtime := existingInfo.ModTime()
 				_ = os.Chtimes(filePath, mtime, mtime)
 				return false, nil // Preserved

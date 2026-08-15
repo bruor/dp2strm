@@ -65,7 +65,7 @@ func WriteSTRMFile(filePath string, content string) (bool, error) {
 	existingInfo, err := os.Stat(filePath)
 	if err == nil {
 		existingBytes, readErr := os.ReadFile(filePath)
-		if readErr == nil && string(existingBytes) == content {
+		if readErr == nil && strings.TrimSpace(string(existingBytes)) == strings.TrimSpace(content) {
 			mtime := existingInfo.ModTime()
 			atime := mtime
 			_ = os.Chtimes(filePath, atime, mtime)
