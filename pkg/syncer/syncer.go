@@ -1575,6 +1575,10 @@ func (s *Syncer) reconcilerLoop(ctx context.Context) {
 	}
 
 	log.Printf("[Reconciler] Daily disk reconciler active every: %v", interval)
+
+	// Run initial reconciliation audit immediately on startup ASAP!
+	_ = s.ReconcileDiskState(ctx)
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
