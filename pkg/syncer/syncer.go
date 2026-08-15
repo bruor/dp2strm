@@ -1350,18 +1350,21 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	realtimeMovies := s.embyClient.HasRealtimeMonitor("movie")
 
 	if realtimeTV || realtimeMovies {
-		// Real-time filesystem monitoring is active:
-		// Stop disk writes and dynamically wait until Emby indexes the newly created batch
-		log.Printf("[Worker #%d] Batch of %d new item(s) written to disk (%d total tasks). Waiting for Emby index confirmation...", workerID, newCount, len(tasks))
+		idleDelay := s.cfg.EmbyBatchIdleDelay
+		if idleDelay <= 0 {
+			idleDelay = 10 * time.Second
+		}
+		log.Printf("[Worker #%d] Batch of %d new item(s) written to disk (%d total tasks). Pausing %v to let Emby ingest batch cleanly...", 
+			workerID, newCount, len(tasks), idleDelay)
 
-		// Validate sample item in Emby index
-		if lastCreated != nil && (lastCreated.TMDBID != "" || lastCreated.Title != "") {
-			indexed := s.embyClient.VerifyItemIndexed(ctx, lastCreated.ItemType, lastCreated.TMDBID, lastCreated.IMDBID, lastCreated.Title, 30*time.Second)
-			if indexed {
-				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastCreated.Title)
-			} else {
-				log.Printf("[Worker #%d] Debounce timeout elapsed for batch of %d new item(s). Continuing to next batch.", workerID, newCount)
-			}
+		// 1. Enforce batch idle quiet period to give Emby file watcher quiet debounce window
+		time.Sleep(idleDelay)
+
+		// 2. If Emby triggered a library scan, wait until the scan reaches 100% / Idle
+		if s.embyClient.IsLibraryScanRunning(ctx) {
+			log.Printf("[Worker #%d] Emby media library scan is running. Pausing worker until scan completes...", workerID)
+			s.embyClient.WaitForScanCompletion(ctx, 15*time.Minute)
+			log.Printf("[Worker #%d] Emby media library scan finished. Resuming worker.", workerID)
 		}
 	} else {
 		// Real-time filesystem monitoring is DISABLED:
