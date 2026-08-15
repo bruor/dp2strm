@@ -1,12 +1,14 @@
 package emby
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -320,4 +322,59 @@ func (c *Client) VerifyItemIndexed(ctx context.Context, itemType, tmdbID, imdbID
 		time.Sleep(500 * time.Millisecond)
 	}
 	return false
+}
+
+// NotifyMediaUpdated sends a POST /Library/Media/Updated notification to Emby for a specific item folder path.
+func (c *Client) NotifyMediaUpdated(ctx context.Context, itemType, folderName string) error {
+	if !c.IsConfigured() || folderName == "" {
+		return nil
+	}
+
+	c.mu.RLock()
+	basePath := c.moviesLibraryPath
+	if itemType == "series" {
+		basePath = c.tvLibraryPath
+	}
+	if c.cfg.EmbyMediaPath != "" {
+		if itemType == "series" {
+			basePath = filepath.Join(c.cfg.EmbyMediaPath, "TV Shows")
+		} else {
+			basePath = filepath.Join(c.cfg.EmbyMediaPath, "Movies")
+		}
+	}
+	c.mu.RUnlock()
+
+	if basePath == "" {
+		return nil
+	}
+
+	embyItemPath := filepath.Join(basePath, folderName)
+	updateURL := fmt.Sprintf("%s/Library/Media/Updated", strings.TrimRight(c.cfg.EmbyURL, "/"))
+	body := map[string]any{
+		"Updates": []map[string]string{
+			{
+				"Path":       embyItemPath,
+				"UpdateType": "Created",
+			},
+		},
+	}
+	jsonBytes, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, updateURL, bytes.NewReader(jsonBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+	req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }

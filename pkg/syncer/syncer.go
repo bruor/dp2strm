@@ -1199,6 +1199,7 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 	log.Printf("[Worker #%d] Emby worker online.", workerID)
 
 	preferredType := "series" // Start alternating with series
+	processedCount := 0
 
 	for {
 		select {
@@ -1221,7 +1222,14 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		}
 
 		if task == nil {
-			// Queue is empty, idle wait
+			if processedCount > 0 {
+				log.Printf("[Worker #%d] Queue finished (%d total items processed). Flushed library updates to Emby.", workerID, processedCount)
+				if s.embyClient.IsConfigured() {
+					_ = s.embyClient.RefreshTVLibrary(ctx)
+					_ = s.embyClient.RefreshMoviesLibrary(ctx)
+				}
+				processedCount = 0
+			}
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -1233,6 +1241,7 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			preferredType = "series"
 		}
 
+		processedCount++
 		// Process task
 		pErr := s.processQueueTask(ctx, task)
 		if pErr != nil {
@@ -1240,6 +1249,12 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			_ = s.database.MarkTaskFailed(task.ID, pErr.Error())
 		} else {
 			_ = s.database.MarkTaskComplete(task.ID)
+		}
+
+		// Log progress every 50 items
+		if processedCount%50 == 0 {
+			pending, inProg, _, _ := s.database.GetQueueStats()
+			log.Printf("[Worker #%d] Progress: %d items processed (Queue remaining: %d)...", workerID, processedCount, pending+inProg)
 		}
 
 		// Apply pacing delay to keep Emby CPU cool
@@ -1270,8 +1285,15 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 				}
 				_, _, _ = s.processSingleSeriesPass1(ctx, seriesModel, false)
 			}
-			// Adaptive Emby sync
+			// Send targeted Media/Updated notification to Emby
 			if s.embyClient.IsConfigured() {
+				folderName := ""
+				if st != nil && st.FolderName != "" {
+					folderName = st.FolderName
+				}
+				if folderName != "" {
+					_ = s.embyClient.NotifyMediaUpdated(ctx, "series", folderName)
+				}
 				if !s.embyClient.HasRealtimeMonitor("series") {
 					_ = s.embyClient.RefreshTVLibrary(ctx)
 				}
@@ -1284,6 +1306,9 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 					return fmt.Errorf("movie not found: %w", fErr)
 				}
 				_, _, _ = s.processSingleMovie(ctx, *mv, false)
+				if s.database != nil {
+					mst, _ = s.database.GetMovieState(task.ItemID)
+				}
 			} else {
 				movieModel := models.Movie{
 					ID:     mst.MovieID,
@@ -1294,8 +1319,15 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) e
 				}
 				_, _, _ = s.processSingleMovie(ctx, movieModel, false)
 			}
-			// Adaptive Emby sync
+			// Send targeted Media/Updated notification to Emby
 			if s.embyClient.IsConfigured() {
+				folderName := ""
+				if mst != nil && mst.FolderName != "" {
+					folderName = mst.FolderName
+				}
+				if folderName != "" {
+					_ = s.embyClient.NotifyMediaUpdated(ctx, "movie", folderName)
+				}
 				if !s.embyClient.HasRealtimeMonitor("movie") {
 					_ = s.embyClient.RefreshMoviesLibrary(ctx)
 				}
