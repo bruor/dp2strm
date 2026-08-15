@@ -1313,21 +1313,16 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 
 	if realtimeTV || realtimeMovies {
 		// Real-time filesystem monitoring is active:
-		// Pause/go idle for the debounce window so Emby's inotify watcher catches the changes naturally
-		log.Printf("[Worker #%d] Batch of %d items written. Pausing %v for Emby inotify pickup...", workerID, len(tasks), idleDelay)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(idleDelay):
-		}
+		// Stop disk writes and dynamically wait until Emby indexes the batch
+		log.Printf("[Worker #%d] Batch of %d items written to disk. Waiting for Emby index confirmation...", workerID, len(tasks))
 
 		// Validate sample item in Emby index
 		if lastItem != nil && (lastItem.TMDBID != "" || lastItem.Title != "") {
-			indexed := s.embyClient.VerifyItemIndexed(ctx, lastItem.ItemType, lastItem.TMDBID, lastItem.IMDBID, lastItem.Title, 15*time.Second)
+			indexed := s.embyClient.VerifyItemIndexed(ctx, lastItem.ItemType, lastItem.TMDBID, lastItem.IMDBID, lastItem.Title, 30*time.Second)
 			if indexed {
 				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastItem.Title)
 			} else {
-				log.Printf("[Worker #%d] Inotify debounce window completed for batch of %d items.", workerID, len(tasks))
+				log.Printf("[Worker #%d] Debounce window passed for batch of %d items. Continuing to next batch.", workerID, len(tasks))
 			}
 		}
 	} else {
