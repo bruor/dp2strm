@@ -940,13 +940,13 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
-// TriggerTargetedEmbySeriesRefresh sends an immediate targeted path notification to Emby (/Library/Media/Updated), or falls back to global refresh.
+// TriggerTargetedEmbySeriesRefresh triggers an Emby library refresh to discover all newly populated episodes.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
 	go func() {
-		// Look up series folder from database
+		// Send targeted path notification if folder found
 		var folderName string
 		if s.database != nil {
 			if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.FolderName != "" {
@@ -955,14 +955,12 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		}
 
 		if folderName != "" {
-			// Calculate Emby container path using EmbyMediaPath if provided, else OutputDir
 			baseDir := s.cfg.OutputDir
 			if s.cfg.EmbyMediaPath != "" {
 				baseDir = s.cfg.EmbyMediaPath
 			}
 			seriesEmbyPath := filepath.Join(baseDir, "TV Shows", folderName)
 
-			// Send targeted POST /Library/Media/Updated
 			embyEndpoint := fmt.Sprintf("%s/Library/Media/Updated", strings.TrimRight(s.cfg.EmbyURL, "/"))
 			query := url.Values{}
 			query.Set("api_key", s.cfg.EmbyAPIKey)
@@ -975,24 +973,17 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 					},
 				},
 			}
-			jsonBody, jErr := json.Marshal(payload)
-			if jErr == nil {
-				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint+"?"+query.Encode(), bytes.NewReader(jsonBody))
-				if err == nil {
+			if jsonBody, jErr := json.Marshal(payload); jErr == nil {
+				if req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint+"?"+query.Encode(), bytes.NewReader(jsonBody)); err == nil {
 					req.Header.Set("Content-Type", "application/json")
-					resp, dErr := http.DefaultClient.Do(req)
-					if dErr == nil && resp != nil {
-						defer resp.Body.Close()
-						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-							log.Printf("[Emby] Successfully triggered targeted series rescan for %s", seriesEmbyPath)
-							return
-						}
+					if resp, dErr := http.DefaultClient.Do(req); dErr == nil && resp != nil {
+						resp.Body.Close()
 					}
 				}
 			}
 		}
 
-		// Fallback to global refresh if targeted path scan failed or folder not found
+		// Trigger library refresh to guarantee Emby indexes all new episodes and scrapes TMDB metadata
 		s.triggerEmbyRefresh(context.Background())
 	}()
 }
