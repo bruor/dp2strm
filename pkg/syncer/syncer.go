@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -917,16 +916,15 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 
 func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	embyEndpoint := fmt.Sprintf("%s/Library/Refresh", strings.TrimRight(s.cfg.EmbyURL, "/"))
-	query := url.Values{}
-	query.Set("api_key", s.cfg.EmbyAPIKey)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, embyEndpoint+"?"+query.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, embyEndpoint, nil)
 	if err != nil {
 		log.Printf("[Emby] Failed to create library refresh request: %v", err)
 		return
 	}
 	req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
 	req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -964,8 +962,6 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 			seriesEmbyPath := filepath.Join(baseDir, "TV Shows", folderName)
 
 			embyEndpoint := fmt.Sprintf("%s/Library/Media/Updated", strings.TrimRight(s.cfg.EmbyURL, "/"))
-			query := url.Values{}
-			query.Set("api_key", s.cfg.EmbyAPIKey)
 
 			payload := map[string]any{
 				"Updates": []map[string]string{
@@ -976,7 +972,7 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 				},
 			}
 			if jsonBody, jErr := json.Marshal(payload); jErr == nil {
-				if req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint+"?"+query.Encode(), bytes.NewReader(jsonBody)); err == nil {
+				if req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint, bytes.NewReader(jsonBody)); err == nil {
 					req.Header.Set("Content-Type", "application/json")
 					req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
 					req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
