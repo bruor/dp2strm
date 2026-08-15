@@ -45,11 +45,30 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - Automatically collapses duplicate consecutive year tags (e.g. `(2022) (2022)` ➔ `(2022)`) across all folders and filenames.
 - [x] **Category / Group / Adult Filtering Managed in Dispatcharr**: Filtering managed directly upstream in Dispatcharr.
 
+- [x] **Staged-Queue & Worker Pipeline Architecture**:
+  - **Catalog Stager (`DISPATCHARR_WORKERS`)**: Fast, lightweight catalog staging on a timer (default: `4h`), populating the SQLite `sync_queue` without blocking on disk I/O or Emby scans.
+  - **Paced Emby Processing Workers (`EMBY_WORKERS`)**: Workers process queue items one-by-one with **Round-Robin balancing (1 Movie ⇄ 1 TV Show)** and configurable pacing delay (`EMBY_PACE_DELAY=100ms`) to protect Emby from CPU overload.
+  - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show, it jumps directly to the front of the queue; the currently running item wraps up cleanly, and the requested show is activated immediately with `<50ms` instant 302 playback redirection.
+- [x] **Zero-Config Emby Library Auto-Discovery (`pkg/emby`)**:
+  - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status.
+  - Supports multi-library environments with optional name targeting (`EMBY_TV_LIBRARY`, `EMBY_MOVIES_LIBRARY`).
+- [x] **Targeted Online Provider ID Refresh (`POST /Items/{Id}/Refresh`)**:
+  - Refreshes series and movies directly via TMDB/IMDb IDs (`AnyProviderIdEquals=tmdb.XXXXX`), rescanning only that specific show's folder in `<1s` without running global library scans.
+- [x] **Multi-Provider ID Support (TMDB & IMDb)**:
+  - Folder naming and SQLite state engine track both TMDB and IMDb IDs (`[tmdbid=XXXXX]` or `[imdbid=ttXXXXX]`).
+- [x] **Activation Loop Deduplication & Single-Flight Locking**:
+  - Concurrency `sync.Map` prevents rapid back-to-back Emby probe bursts from launching duplicate activation workers.
+- [x] **Season 2+ Series Handling**:
+  - Gracefully detects series starting on Season 2+, purges temporary Season 01 placeholders on activation, and redirects playback to the earliest available episode.
+- [x] **Daily Deep Disk Reconciler (`RECONCILE_INTERVAL`)**:
+  - Configurable daily janitor (default: `24h` / `0 3 * * *`) that reconciles the on-disk `.strm` tree against SQLite state, safely pruning dead files, empty directories, and expired soft-deleted items.
+- [x] **Retention Grace Period & Cleanup Manager (`RETENTION_GRACE_DAYS`)**:
+  - Soft-delete state tracker table in SQLite (`soft_deleted_items`) that buffers deleted streams for 7 days before removing `.strm` files from disk when content disappears from Dispatcharr.
+
 ---
 
-## 🨨 Queued / Roadmap Features
+## 🨨 Queued / Future Optimization Items
 
-- [ ] **Retention Grace Period & Cleanup Manager (`RETENTION_GRACE_DAYS`)**:
-  - Soft-delete state tracker map in SQLite that buffers deleted streams for 7 days before removing `.strm` files from disk when content disappears from Dispatcharr.
 - [ ] **Future Cleanup / Deprecation**:
   - Remove temporary pre-v1.0 migration sweeps for legacy `*Play to Activate Series*` filenames in `pkg/syncer/syncer.go`.
+
