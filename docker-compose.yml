@@ -16,8 +16,8 @@ services:
       # --- Required Connection Parameters ---
       - DISPATCHARR_URL=https://your-dispatcharr-server.com
       - DISPATCHARR_API_KEY=YOUR_DISPATCHARR_API_KEY
-      - DISPATCHARR_XC_USER=your_xc_username
-      - DISPATCHARR_XC_PASSWORD=your_xc_password
+      # - DISPATCHARR_XC_USER= # Optional: only needed if using legacy XC fallback
+      # - DISPATCHARR_XC_PASSWORD= # Optional: only needed if using legacy XC fallback
 
       # --- Path & Network Handler Options ---
       - OUTPUT_DIR=/data/strm
