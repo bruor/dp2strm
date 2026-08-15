@@ -23,12 +23,16 @@ type ActivationCallback func(seriesID int)
 // MovieActivationCallback is a function signature for background movie activation and provider resolution.
 type MovieActivationCallback func(movieID int) (baseTargetURL string, err error)
 
+// SyncCallback is a function signature for triggering an on-demand catalog staging pass.
+type SyncCallback func() error
+
 // Server is the HTTP client playback handler (issues HTTP 302 redirects to Dispatcharr / streamcache).
 type Server struct {
 	cfg               *models.Config
 	database          *db.DB
 	onActivation      ActivationCallback
 	onMovieActivation MovieActivationCallback
+	onSync            SyncCallback
 	activeSeries      sync.Map
 	httpServer        *http.Server
 }
@@ -45,6 +49,8 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 	mux.HandleFunc("/play/movie/", srv.handleMoviePlay)
 	mux.HandleFunc("/play/series/", srv.handleSeriesPlay)
 	mux.HandleFunc("/activate", srv.handleActivate)
+	mux.HandleFunc("/sync", srv.handleSync)
+	mux.HandleFunc("/stage", srv.handleSync)
 	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/status", srv.handleStatus)
 	mux.HandleFunc("/debug/logs", srv.handleDebugLogs)
@@ -71,6 +77,23 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 // SetMovieActivationCallback sets the callback function for movie provider resolution and activation.
 func (s *Server) SetMovieActivationCallback(cb MovieActivationCallback) {
 	s.onMovieActivation = cb
+}
+
+// SetSyncCallback sets the callback function for triggering manual staging runs.
+func (s *Server) SetSyncCallback(cb SyncCallback) {
+	s.onSync = cb
+}
+
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.onSync == nil {
+		http.Error(w, `{"error":"sync callback not registered"}`, http.StatusInternalServerError)
+		return
+	}
+	go func() {
+		_ = s.onSync()
+	}()
+	_, _ = w.Write([]byte(`{"status":"staging_pass_triggered"}`))
 }
 
 // Start launches the HTTP server asynchronously.

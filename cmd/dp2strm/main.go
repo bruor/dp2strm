@@ -106,6 +106,9 @@ func main() {
 	// 2. Start HTTP Playback Handler Server
 	proxyServer := proxy.NewServer(cfg, database, onActivation)
 	proxyServer.SetMovieActivationCallback(onMovieActivation)
+	proxyServer.SetSyncCallback(func() error {
+		return syncEngine.StageCatalogDelta(context.Background())
+	})
 	proxyServer.Start()
 
 	ctx, cancel := context.WithCancel(context.Background())
