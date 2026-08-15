@@ -1150,13 +1150,9 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 	moviesCount := 0
 	page1Movies, err := s.client.FetchMoviePage(ctx, 1, pageSize)
 	if err == nil && page1Movies != nil {
-		for _, mv := range page1Movies.Results {
-			cleanTitle := sanitizer.CleanTitle(mv.Name)
-			folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
-			_ = s.database.UpsertInitialMovieState(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName)
-			_ = s.database.EnqueueTask("movie", mv.ID, "pass1", models.PriorityBatch)
-			moviesCount++
-		}
+		_ = s.database.BatchStageMovies(page1Movies.Results)
+		moviesCount += len(page1Movies.Results)
+
 		totalMoviePages := (page1Movies.Count + pageSize - 1) / pageSize
 		for p := 2; p <= totalMoviePages; p++ {
 			if s.isCircuitTripped() {
@@ -1166,13 +1162,8 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 			if pErr != nil || mvs == nil {
 				continue
 			}
-			for _, mv := range mvs.Results {
-				cleanTitle := sanitizer.CleanTitle(mv.Name)
-				folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
-				_ = s.database.UpsertInitialMovieState(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName)
-				_ = s.database.EnqueueTask("movie", mv.ID, "pass1", models.PriorityBatch)
-				moviesCount++
-			}
+			_ = s.database.BatchStageMovies(mvs.Results)
+			moviesCount += len(mvs.Results)
 		}
 	}
 
@@ -1180,21 +1171,9 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 	seriesCount := 0
 	page1Series, sErr := s.client.FetchSeriesPage(ctx, 1, pageSize)
 	if sErr == nil && page1Series != nil {
-		for _, srs := range page1Series.Results {
-			cleanTitle := sanitizer.CleanTitle(srs.Name)
-			folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
-			_ = s.database.UpsertInitialSeriesState(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
+		_ = s.database.BatchStageSeries(page1Series.Results)
+		seriesCount += len(page1Series.Results)
 
-			st, _ := s.database.GetSeriesState(srs.ID)
-			if st != nil && st.IsActivated {
-				if st.Status != "Ended" {
-					_ = s.database.EnqueueTask("series", srs.ID, "update_episodes", models.PriorityAiring)
-				}
-			} else {
-				_ = s.database.EnqueueTask("series", srs.ID, "pass1", models.PriorityBatch)
-			}
-			seriesCount++
-		}
 		totalSeriesPages := (page1Series.Count + pageSize - 1) / pageSize
 		for p := 2; p <= totalSeriesPages; p++ {
 			if s.isCircuitTripped() {
@@ -1204,21 +1183,8 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 			if pErr != nil || seriesList == nil {
 				continue
 			}
-			for _, srs := range seriesList.Results {
-				cleanTitle := sanitizer.CleanTitle(srs.Name)
-				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
-				_ = s.database.UpsertInitialSeriesState(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
-
-				st, _ := s.database.GetSeriesState(srs.ID)
-				if st != nil && st.IsActivated {
-					if st.Status != "Ended" {
-						_ = s.database.EnqueueTask("series", srs.ID, "update_episodes", models.PriorityAiring)
-					}
-				} else {
-					_ = s.database.EnqueueTask("series", srs.ID, "pass1", models.PriorityBatch)
-				}
-				seriesCount++
-			}
+			_ = s.database.BatchStageSeries(seriesList.Results)
+			seriesCount += len(seriesList.Results)
 		}
 	}
 

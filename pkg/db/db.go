@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"dp2strm/pkg/models"
+	"dp2strm/pkg/sanitizer"
 	_ "modernc.org/sqlite"
 )
 
@@ -25,7 +26,7 @@ type SeriesState struct {
 	Title              string
 	Year               int
 	FolderName         string
-	Status             string // "Continuing" or "Ended"
+	Status             string // "Continuing", "Ended", etc.
 	IsActivated        bool
 	ActivatedAt        *time.Time
 	LastEpisodeCount   int
@@ -34,7 +35,7 @@ type SeriesState struct {
 	LastCheckedAt      *time.Time
 }
 
-// MovieState represents the database record for a movie activation state.
+// MovieState represents the database record for a Movie activation and variant state.
 type MovieState struct {
 	MovieID       int
 	TMDBID        string
@@ -44,6 +45,7 @@ type MovieState struct {
 	FolderName    string
 	IsActivated   bool
 	ActivatedAt   *time.Time
+	LastModified  int64
 	LastCheckedAt *time.Time
 }
 
@@ -73,10 +75,13 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database at %s: %w", dbPath, err)
 	}
 
+	// Limit SQLite connection pool to 1 to guarantee serialized thread safety and eliminate lock contention
+	conn.SetMaxOpenConns(1)
+
 	// Enable WAL mode & busy timeout for high-speed concurrent read/write safety
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL;",
-		"PRAGMA busy_timeout=5000;",
+		"PRAGMA busy_timeout=10000;",
 		"PRAGMA synchronous=NORMAL;",
 	}
 	for _, p := range pragmas {
@@ -702,4 +707,110 @@ func (d *DB) GetRecentQueueTasks(limit int, statusFilter string) ([]models.Queue
 		}
 	}
 	return items, nil
+}
+
+// BatchStageMovies stages an entire page of movies in a single atomic SQLite transaction.
+func (d *DB) BatchStageMovies(items []models.Movie) error {
+	if len(items) == 0 {
+		return nil
+	}
+	now := time.Now()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stateStmt, err := tx.Prepare(`
+	INSERT INTO movie_state (movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
+	VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+	ON CONFLICT(movie_id) DO UPDATE SET
+		tmdb_id = CASE WHEN EXCLUDED.tmdb_id != '' THEN EXCLUDED.tmdb_id ELSE movie_state.tmdb_id END,
+		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
+		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
+		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
+		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE movie_state.folder_name END,
+		last_checked_at = EXCLUDED.last_checked_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer stateStmt.Close()
+
+	queueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	VALUES ('movie', ?, 'pass1', 10, 'pending', 0, ?, ?)
+	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
+		updated_at = EXCLUDED.updated_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer queueStmt.Close()
+
+	for _, mv := range items {
+		cleanTitle := sanitizer.CleanTitle(mv.Name)
+		folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
+		if _, err := stateStmt.Exec(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName, now); err != nil {
+			return err
+		}
+		if _, err := queueStmt.Exec(mv.ID, now, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// BatchStageSeries stages an entire page of TV series in a single atomic SQLite transaction.
+func (d *DB) BatchStageSeries(items []models.Series) error {
+	if len(items) == 0 {
+		return nil
+	}
+	now := time.Now()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stateStmt, err := tx.Prepare(`
+	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
+	VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+	ON CONFLICT(series_id) DO UPDATE SET
+		tmdb_id = CASE WHEN EXCLUDED.tmdb_id != '' THEN EXCLUDED.tmdb_id ELSE series_state.tmdb_id END,
+		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
+		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
+		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
+		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE series_state.folder_name END,
+		last_checked_at = EXCLUDED.last_checked_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer stateStmt.Close()
+
+	queueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	VALUES ('series', ?, 'pass1', 10, 'pending', 0, ?, ?)
+	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
+		updated_at = EXCLUDED.updated_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer queueStmt.Close()
+
+	for _, srs := range items {
+		cleanTitle := sanitizer.CleanTitle(srs.Name)
+		folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
+		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, now); err != nil {
+			return err
+		}
+		if _, err := queueStmt.Exec(srs.ID, now, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
