@@ -373,6 +373,20 @@ func (d *DB) GetSeriesTargetURL(seriesID, seasonNum, episodeNum int, variantKey 
 	return targetURL, err
 }
 
+// GetFirstAvailableSeriesTargetURL retrieves the earliest available episode stream URL for a series (e.g. if show only has Season 2+).
+func (d *DB) GetFirstAvailableSeriesTargetURL(seriesID int, variantKey string) (string, error) {
+	if variantKey == "" {
+		variantKey = "base"
+	}
+	query := `SELECT target_url FROM stream_variants WHERE item_id = ? AND item_type = 'series' AND variant_key = ? ORDER BY season_num ASC, episode_num ASC LIMIT 1`
+	var targetURL string
+	err := d.conn.QueryRow(query, seriesID, variantKey).Scan(&targetURL)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return targetURL, err
+}
+
 // --- Soft Delete Tracking Queries ---
 
 // SoftDeleteItem records an item path as soft deleted with the current timestamp.

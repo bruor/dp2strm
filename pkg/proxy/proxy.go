@@ -223,7 +223,13 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Fallback to direct Dispatcharr URL if still not found
+	// 2. If targetURL is still empty for the requested season/episode (e.g. show only has Season 2+),
+	// query the earliest available episode target URL for this series
+	if targetURL == "" && s.database != nil {
+		targetURL, _ = s.database.GetFirstAvailableSeriesTargetURL(seriesID, variantKey)
+	}
+
+	// 3. Fallback to direct Dispatcharr XC stream URL if still not found
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
 	}

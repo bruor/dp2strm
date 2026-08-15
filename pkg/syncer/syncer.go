@@ -649,6 +649,23 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
+	hasS01E01 := false
+	for _, ep := range episodes {
+		if ep.SeasonNumber == 1 && ep.EpisodeNumber == 1 {
+			hasS01E01 = true
+			break
+		}
+	}
+
+	// If show does not actually have Season 1 Episode 1 upstream (e.g. only Season 2+), clean up Pass 1 placeholder
+	if !hasS01E01 {
+		placeholderStrm := filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle)))
+		placeholderNFO := filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle)))
+		_ = os.Remove(placeholderStrm)
+		_ = os.Remove(placeholderNFO)
+		_ = os.Remove(season1Dir)
+	}
+
 	for _, ep := range episodes {
 		seasonDir := filepath.Join(seriesDir, fmt.Sprintf("Season %02d", ep.SeasonNumber))
 		filename := fmt.Sprintf("%s - S%02dE%02d.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
