@@ -3,6 +3,7 @@ package nfo
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,5 +69,47 @@ func TestWriteMovieNFOUpdateAndMtimePreservation(t *testing.T) {
 	}
 	if !updatedNewData {
 		t.Errorf("expected updated = true when new metadata is discovered")
+	}
+}
+
+func TestCleanTitleInNFO(t *testing.T) {
+	tempDir := t.TempDir()
+	movieNFOPath := filepath.Join(tempDir, "movie.nfo")
+	tvshowNFOPath := filepath.Join(tempDir, "tvshow.nfo")
+
+	// Movie with year in raw provider name
+	movie := models.Movie{
+		Name:   "Avatar (2009)",
+		Year:   2009,
+		TMDBID: "19995",
+	}
+	if _, err := WriteMovieNFO(movieNFOPath, movie); err != nil {
+		t.Fatalf("WriteMovieNFO failed: %v", err)
+	}
+
+	movieContent, err := os.ReadFile(movieNFOPath)
+	if err != nil {
+		t.Fatalf("ReadFile movie.nfo failed: %v", err)
+	}
+	if !strings.Contains(string(movieContent), "<title>Avatar</title>") {
+		t.Errorf("Expected <title>Avatar</title> in movie.nfo, got:\n%s", string(movieContent))
+	}
+
+	// TV Show with year in raw provider name
+	series := models.Series{
+		Name:   "Breaking Bad (2008)",
+		Year:   2008,
+		TMDBID: "1396",
+	}
+	if _, err := WriteTVShowNFO(tvshowNFOPath, series); err != nil {
+		t.Fatalf("WriteTVShowNFO failed: %v", err)
+	}
+
+	seriesContent, err := os.ReadFile(tvshowNFOPath)
+	if err != nil {
+		t.Fatalf("ReadFile tvshow.nfo failed: %v", err)
+	}
+	if !strings.Contains(string(seriesContent), "<title>Breaking Bad</title>") {
+		t.Errorf("Expected <title>Breaking Bad</title> in tvshow.nfo, got:\n%s", string(seriesContent))
 	}
 }

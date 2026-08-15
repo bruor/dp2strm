@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"dp2strm/pkg/models"
+	"dp2strm/pkg/sanitizer"
 )
 
 type MovieNFO struct {
@@ -56,7 +57,7 @@ func WriteMovieNFO(filePath string, movie models.Movie) (bool, error) {
 	}
 
 	nfoData := MovieNFO{
-		Title:    movie.Name,
+		Title:    sanitizer.StripYearFromTitle(movie.Name, movie.Year),
 		Year:     movie.Year,
 		Plot:     movie.Description,
 		Genre:    movie.Genre,
@@ -77,9 +78,10 @@ func WriteTVShowNFO(filePath string, series models.Series) (bool, error) {
 		uniqueIDs = append(uniqueIDs, UniqueID{Type: "imdb", Value: series.IMDBID})
 	}
 
+	cleanTitle := sanitizer.StripYearFromTitle(series.Name, series.Year)
 	nfoData := TVShowNFO{
-		Title:         series.Name,
-		OriginalTitle: series.Name,
+		Title:         cleanTitle,
+		OriginalTitle: cleanTitle,
 		Year:          series.Year,
 		Plot:          series.Description,
 		Genre:         series.Genre,

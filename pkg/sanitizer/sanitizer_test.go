@@ -74,3 +74,32 @@ func TestCleanEpisodeTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestStripYearFromTitle(t *testing.T) {
+	tests := []struct {
+		title    string
+		year     int
+		expected string
+	}{
+		{"Avatar (2009)", 2009, "Avatar"},
+		{"Avatar 4K (2009)", 2009, "Avatar"},
+		{"Yahoo+ (2022) (2022)", 2022, "Yahoo+"},
+		{"Breaking Bad (2008)", 2008, "Breaking Bad"},
+		{"Fantasia 2000 (2000)", 2000, "Fantasia 2000"},
+		{"Fantasia 2000", 2000, "Fantasia 2000"},
+		{"Fear Street 1978 (2021)", 2021, "Fear Street 1978"},
+		{"102 Dalmatians (2000) (2000)", 2000, "102 Dalmatians"},
+		{"+1 (2013)", 2013, "+1"},
+		{"(2012)", 2012, "(2012)"},
+		{"Inside: USA (2025)", 2025, "Inside: USA"},
+		{"#1 Happy Family USA (2025)", 2025, "#1 Happy Family USA"},
+		{"Plain Title", 2020, "Plain Title"},
+	}
+
+	for _, tt := range tests {
+		got := StripYearFromTitle(tt.title, tt.year)
+		if got != tt.expected {
+			t.Errorf("StripYearFromTitle(%q, %d) = %q; want %q", tt.title, tt.year, got, tt.expected)
+		}
+	}
+}

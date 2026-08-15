@@ -11,6 +11,7 @@ var (
 	qualityTagRegex           = regexp.MustCompile(`(?i)\b(4K|UHD|2160p|1080p|720p|480p|HDR|HDR10|DV|Dolby Vision|HEVC|H265|x265|REMUX|WEB-DL|BluRay|HDTV)\b`)
 	consecutiveYearGroupRegex = regexp.MustCompile(`(?:\s*[\(\[]\s*(?:19\d{2}|20\d{2})\s*[\)\]]){2,}`)
 	parenthesizedYearRegex    = regexp.MustCompile(`[\(\[]\s*(19\d{2}|20\d{2})\s*[\)\]]`)
+	trailingYearRegex         = regexp.MustCompile(`\s*[\(\[]\s*(?:19\d{2}|20\d{2})\s*[\)\]]\s*$`)
 	multipleSpaceRegex        = regexp.MustCompile(`\s+`)
 )
 
@@ -43,6 +44,26 @@ func CleanTitle(title string) string {
 	cleaned = multipleSpaceRegex.ReplaceAllString(cleaned, " ")
 	if cleaned == "" {
 		return title // Fallback if entire title was quality tags
+	}
+	return cleaned
+}
+
+// StripYearFromTitle removes trailing parenthesized or bracketed release year from the title for clean NFO <title> tags.
+func StripYearFromTitle(title string, year int) string {
+	cleaned := CleanTitle(title)
+	for {
+		loc := trailingYearRegex.FindStringIndex(cleaned)
+		if loc == nil {
+			break
+		}
+		candidate := strings.TrimSpace(cleaned[:loc[0]])
+		if candidate == "" {
+			break // Do not strip if the entire title is the year (e.g. "(2012)")
+		}
+		cleaned = candidate
+	}
+	if cleaned == "" {
+		return CleanTitle(title)
 	}
 	return cleaned
 }
