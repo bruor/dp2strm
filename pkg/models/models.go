@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Config represents the application configuration.
 type Config struct {
@@ -87,6 +90,41 @@ type Episode struct {
 	IMDBID             string `json:"imdb_id"`
 	SeriesID           int    `json:"series_id"`
 	ContainerExtension string `json:"container_extension"`
+}
+
+// UnmarshalJSON handles both standard Django REST and XC API schema variations for episode objects.
+func (e *Episode) UnmarshalJSON(data []byte) error {
+	type Alias Episode
+	aux := struct {
+		*Alias
+		AltSeason     int    `json:"season"`
+		AltEpisodeNum int    `json:"episode_num"`
+		AltTitle      string `json:"title"`
+		AltOverview   string `json:"overview"`
+		AltPlot       string `json:"plot"`
+	}{
+		Alias: (*Alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if e.SeasonNumber == 0 && aux.AltSeason != 0 {
+		e.SeasonNumber = aux.AltSeason
+	}
+	if e.EpisodeNumber == 0 && aux.AltEpisodeNum != 0 {
+		e.EpisodeNumber = aux.AltEpisodeNum
+	}
+	if e.Name == "" && aux.AltTitle != "" {
+		e.Name = aux.AltTitle
+	}
+	if e.Description == "" {
+		if aux.AltOverview != "" {
+			e.Description = aux.AltOverview
+		} else if aux.AltPlot != "" {
+			e.Description = aux.AltPlot
+		}
+	}
+	return nil
 }
 
 // ProviderRelation represents an M3UMovieRelation or M3UEpisodeRelation.

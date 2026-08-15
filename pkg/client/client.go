@@ -271,7 +271,7 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 
 	// 1. Try decoding as direct JSON array [...]
 	var episodes []models.Episode
-	if err := json.Unmarshal(bodyBytes, &episodes); err == nil {
+	if err := json.Unmarshal(bodyBytes, &episodes); err == nil && len(episodes) > 0 {
 		return episodes, nil
 	}
 
@@ -279,11 +279,41 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 	var paginated struct {
 		Results []models.Episode `json:"results"`
 	}
-	if err := json.Unmarshal(bodyBytes, &paginated); err == nil {
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && len(paginated.Results) > 0 {
 		return paginated.Results, nil
 	}
 
-	return nil, fmt.Errorf("failed to parse series episodes response for series ID %d", seriesID)
+	// 3. Try decoding as XC nested map {"episodes": {"1": [...], "2": [...]}}
+	var xcObj struct {
+		Episodes map[string][]models.Episode `json:"episodes"`
+	}
+	if err := json.Unmarshal(bodyBytes, &xcObj); err == nil && len(xcObj.Episodes) > 0 {
+		var allEps []models.Episode
+		for _, seasonEps := range xcObj.Episodes {
+			allEps = append(allEps, seasonEps...)
+		}
+		return allEps, nil
+	}
+
+	// 4. Try decoding as {"episodes": [...]}
+	var xcArray struct {
+		Episodes []models.Episode `json:"episodes"`
+	}
+	if err := json.Unmarshal(bodyBytes, &xcArray); err == nil && len(xcArray.Episodes) > 0 {
+		return xcArray.Episodes, nil
+	}
+
+	// 5. Try decoding as direct map[string][]models.Episode
+	var seasonsMap map[string][]models.Episode
+	if err := json.Unmarshal(bodyBytes, &seasonsMap); err == nil && len(seasonsMap) > 0 {
+		var allEps []models.Episode
+		for _, seasonEps := range seasonsMap {
+			allEps = append(allEps, seasonEps...)
+		}
+		return allEps, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse series episodes response for series ID %d: %s", seriesID, string(bodyBytes))
 }
 
 // FetchMyProfile retrieves the authenticated user's profile and XC streaming credentials from GET /api/accounts/users/me/

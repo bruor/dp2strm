@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dp2strm/pkg/db"
@@ -26,6 +27,7 @@ type Server struct {
 	database          *db.DB
 	onActivation      ActivationCallback
 	onMovieActivation MovieActivationCallback
+	activeSeries      sync.Map
 	httpServer        *http.Server
 }
 
@@ -203,17 +205,21 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If unactivated or target URL not found in cache, run activation
-	if (!isActivated || targetURL == "") && s.onActivation != nil {
-		if targetURL == "" {
-			// Synchronously populate to ensure we redirect to the real Episode ID rather than 404
-			s.onActivation(seriesID)
-			if s.database != nil {
-				targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+	// If unactivated, run activation (with deduplication to prevent looping on multiple Emby probes)
+	if !isActivated && s.onActivation != nil {
+		if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
+			if targetURL == "" {
+				s.onActivation(seriesID)
+				s.activeSeries.Delete(seriesID)
+				if s.database != nil {
+					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+				}
+			} else {
+				go func(sid int) {
+					defer s.activeSeries.Delete(sid)
+					s.onActivation(sid)
+				}(seriesID)
 			}
-		} else {
-			// Already have S01E01 cached, run remaining episode population in background
-			go s.onActivation(seriesID)
 		}
 	}
 
@@ -263,15 +269,21 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 		targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
 	}
 
-	// Trigger activation to populate real episode target streams
+	// Trigger activation to populate real episode target streams (with deduplication)
 	if s.onActivation != nil {
-		if targetURL == "" {
-			s.onActivation(seriesID)
-			if s.database != nil {
-				targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+		if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
+			if targetURL == "" {
+				s.onActivation(seriesID)
+				s.activeSeries.Delete(seriesID)
+				if s.database != nil {
+					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+				}
+			} else {
+				go func(sid int) {
+					defer s.activeSeries.Delete(sid)
+					s.onActivation(sid)
+				}(seriesID)
 			}
-		} else {
-			go s.onActivation(seriesID)
 		}
 	}
 
