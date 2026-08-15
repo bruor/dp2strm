@@ -25,8 +25,20 @@
   - Unactivated & `Ended` series skip fetching episode lists on scheduled sync runs (0 API calls!).
   - `Continuing` series skip checks until `current_date >= next_episode_air_date`.
   - Millisecond `last_modified` checks prevent unnecessary disk writes (`os.Chtimes` preservation).
+- **Dynamic Shared-Pool Batching with Budget Rollover (`BATCH_SIZE`)**:
+  - `BATCH_SIZE` limits the total number of **newly created media files** per sync run.
+  - Automatically splits the budget 50/50 between Movies and Series.
+  - **Dynamic Rollover**: If one media type has fewer new items available, its unused quota automatically rolls over to the other type.
+  - Keeps Emby's periodic import window predictable (e.g. `BATCH_SIZE=100` targets ~20 minutes of Emby indexing per hour).
+- **Server-Side Prioritized Ordering (`DISPATCHARR_ORDERING`)**:
+  - Automatically sorts API queries with `?ordering=-updated_at,-id` by default.
+  - Ensures brand-new movie additions and TV series with fresh episode drops are placed at the front of the sync queue in every pass.
+- **Duplicate Year & Noise Sanitization**:
+  - Automatically collapses duplicate consecutive year tags (e.g., `Yahoo+ (2022) (2022)` ➔ `Yahoo+ (2022)`) across all folders, `.strm`, and `.nfo` files.
+  - Strips quality, codec, and release tags from titles while preserving legitimate release years.
 - **Emby Multi-Version Hierarchy Support**: Automatically classifies 1080p base default versions (`Movie.strm`) vs 4K secondary versions (`Movie - 4K.strm`) for Emby's version dropdown menu.
 - **Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preventing port 80 connection errors in FFmpeg/Emby.
+- **Single Unified Emby Refresh Trigger**: Emby receives a single refresh webhook at the end of each shared sync pass only when new `.strm` media files are created on disk.
 - **`streamcache` Base64 URL Rewriter**: Optional integration with `streamcache` transparent proxy using URL-safe Base64 encoded query paths (`<STREAMCACHE_URL>?url=<escaped_target>`).
 - **Timezone-Aware Cron Scheduler**: Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).
 
@@ -60,7 +72,8 @@ services:
       # Timezone & Scheduling
       - TZ=America/Toronto
       - SYNC_INTERVAL=1h
-      - BATCH_SIZE=0 # 0 = Unlimited full library sync
+      - BATCH_SIZE=100 # Shared budget per run (50% movies / 50% series with rollover)
+      - DISPATCHARR_ORDERING=-updated_at,-id # Server-side sorting prioritizing recent updates & additions
       - PAGE_SIZE=100 # Number of items fetched per API page request (Dispatcharr max: 100)
       - PAGE_WORKERS=5 # Number of concurrent page fetch workers
       - MAX_PROBE_CONCURRENCY=5 # Max concurrent movie processing workers
@@ -145,7 +158,8 @@ services:
 | `SYNC_CRON` | `""` | Optional 5-field cron schedule expression (e.g., `0 3 * * *`) |
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |
 | `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial sync pass on container startup |
-| `BATCH_SIZE` | `0` | Batch processing limit per sync pass (`0` = Unlimited) |
+| `BATCH_SIZE` | `0` | Shared batch creation limit per run (`0` = Unlimited, `100` = 50 movies + 50 series with rollover) |
+| `DISPATCHARR_ORDERING` | `-updated_at,-id` | Server-side ordering parameter for Dispatcharr VOD endpoints |
 | `EMBY_URL` | `""` | Optional Emby/Jellyfin server URL for library refresh hooks |
 | `EMBY_API_KEY` | `""` | Optional Emby/Jellyfin API key |
 

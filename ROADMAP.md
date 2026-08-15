@@ -35,7 +35,11 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **`streamcache` Base64 URL Path Rewriter**: Optional integration with `streamcache` transparent proxy using URL-safe Base64 encoded query paths (`<STREAMCACHE_URL>?url=<escaped_target>`).
 - [x] **Conditional Emby Refresh Trigger Rules**: Triggers Emby library refresh (`POST {emby_url}/Library/Refresh`) ONLY if files were created or deleted (`createdCount > 0`).
 - [x] **Cron Expression & Timezone-Aware Scheduler**: Supports 5-field cron syntax (`SYNC_CRON`) and IANA timezones (`TZ`).
-- [x] **Config Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`).
+- [x] **Dynamic Shared-Pool Batching & Budget Rollover (`BATCH_SIZE`)**: Shared pool between Movies and Series with 50/50 initial split and dynamic rollover for unused allocations. Counts strictly newly created `.strm` media files.
+- [x] **Server-Side Prioritized Ordering (`DISPATCHARR_ORDERING`)**: Queries `/api/vod/movies/` and `/api/vod/series/` with `?ordering=-updated_at,-id` to sync recent additions and fresh episode drops first.
+- [x] **Duplicate Consecutive Year Sanitizer**: Strips repeated parenthesized/bracketed year strings like `(2022) (2022)` into `(2022)` without touching valid title years like *Fantasia 2000*.
+- [x] **Unified Single Emby Webhook**: Sends a single refresh notification to Emby at the completion of each shared pass when new media files are written.
+- [x] **Config Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preserving ports across base and variant URLs.
 - [x] **Cloud-Native Environment Variable Mode**: 100% configurable via Docker env vars.
 - [x] **Category / Group / Adult Filtering Managed in Dispatcharr**: Filtering managed directly upstream in Dispatcharr.
 

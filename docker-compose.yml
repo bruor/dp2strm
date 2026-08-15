@@ -29,7 +29,8 @@ services:
       - SYNC_INTERVAL=1h
       - SYNC_CRON= # Optional: e.g. "0 3 * * *" for 3:00 AM daily
       - SKIP_STARTUP_SYNC=false # Set to true to skip initial sync pass on boot
-      - BATCH_SIZE=0 # 0 = Unlimited full library sync
+      - BATCH_SIZE=0 # 0 = Unlimited full library sync, >0 = shared budget with dynamic rollover
+      - DISPATCHARR_ORDERING=-updated_at,-id # Server-side sorting prioritizing recent updates & additions
       - PAGE_SIZE=100 # Number of items fetched per API page request (Default: 100)
       - PAGE_WORKERS=5 # Number of concurrent page fetch workers (Default: 5)
       - MAX_PROBE_CONCURRENCY=5 # Number of parallel worker goroutines for movie sync (5 = Low CPU)
