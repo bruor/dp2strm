@@ -16,24 +16,24 @@
   - Automatically redirects playback directly to Dispatcharr's Native VOD Streaming Proxy (`/proxy/vod/movie/{uuid}` and `/proxy/vod/episode/{uuid}`).
   - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
 - **Clean Extensionless Obfuscated URLs**: `.strm` files output clean extensionless URLs (`http://dp2strm:8080/play/movie/1058902`, `http://dp2strm:8080/play/series/30998/1/1`). Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
-- **On-Demand TV Series Activation Lifecycle**:
-  - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01.strm` along with an instructional `S01E01.nfo` ("Play to Activate Series"). Keeps initial library indexing blazing fast across thousands of series.
-  - **Pass 2 (On Play)**: Playing Episode 1 **immediately (<50ms)** 302 redirects to stream, while an async worker populates all real episode `.strm` files and updates `S01E01.nfo` with real episode title/plot in-place without deleting or renaming files on disk.
+- **Specials-Based TV Series Activation Lifecycle (`Specials/S00E99`)**:
+  - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and a special placeholder `Specials/Show Name - S00E99 - Activate Series.strm`. Keeps initial library indexing blazing fast across thousands of series without cluttering Season 1.
+  - **Pass 2 (On Play)**: Clicking Play on the Special immediately streams an embedded **5-second FastStart video bumper (`activated.mp4`)**, while an async background worker writes Season 1 `.strm` files and triggers a targeted Emby series refresh. **`S01E01` remains 100% unwatched** in the user's history!
 - **On-Demand Movie Quality Activation**:
   - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with 100% real NFO metadata and artwork.
   - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
   - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
 - **Dedicated Staged-Queue & Worker Pipeline**:
   - **Catalog Stager (`DISPATCHARR_WORKERS`)**: Fast, lightweight catalog staging runs on a timer (default: `4h`), populating the SQLite `sync_queue` without blocking on disk I/O or Emby scans.
-  - **Paced Emby Processing Workers (`EMBY_WORKERS`)**: Workers process queue items one-by-one with **Round-Robin balancing (1 Movie ⇄ 1 TV Show)** and configurable pacing delay (`EMBY_PACE_DELAY=100ms`) to protect Emby from CPU overload.
-  - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show, it jumps directly to the front of the queue; the currently running item wraps up cleanly, and the requested show is activated immediately with `<50ms` instant 302 playback redirection.
+  - **Universal TaskManager Batch Synchronization**: Micro-batches (e.g. 25–30 items) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and halt until Emby returns to **100% Idle** before releasing the next batch. Completely eliminates file collisions and race conditions.
+  - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show or movie, it jumps directly to the front of the queue (`PriorityVIP`); the requested show is activated immediately with instant `<50ms` streaming.
 - **Zero-Config Emby Library Auto-Discovery**:
   - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status.
   - Supports multi-library environments with optional name targeting (`EMBY_TV_LIBRARY`, `EMBY_MOVIES_LIBRARY`).
 - **Targeted Online Provider ID Refresh (`POST /Items/{Id}/Refresh`)**:
   - Refreshes series and movies directly via TMDB/IMDb IDs (`AnyProviderIdEquals=tmdb.XXXXX`), rescanning only that specific show's folder in `<1s` without running global library scans.
 - **Daily Deep Disk Reconciler (`RECONCILE_INTERVAL`)**:
-  - Configurable daily janitor (default: `24h` / `0 3 * * *`) that reconciles the on-disk `.strm` tree against SQLite state, safely pruning dead files and orphaned directories.
+  - Configurable daily janitor (default: `24h` / `0 3 * * *`) that scans SQLite state (`WHERE is_activated = 0`), automatically converts legacy folder structures to the new `Specials/S00E99` architecture at `PriorityReconcile (50)`, and prunes orphaned files.
 - **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` using WAL mode (`series_state`, `movie_state`, `sync_queue`, `stream_variants`).
 - **Smart Series Update Scheduling Engine**:
   - Unactivated & `Ended` series skip fetching episode lists on scheduled sync runs (0 API calls!).
