@@ -698,6 +698,12 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
+	maxBatch := s.cfg.EmbyBatchSize
+	if maxBatch <= 0 {
+		maxBatch = 25
+	}
+	remainingUnwritten := 0
+
 	for _, ep := range episodes {
 		seasonDir := filepath.Join(seriesDir, fmt.Sprintf("Season %02d", ep.SeasonNumber))
 		filename := fmt.Sprintf("%s - S%02dE%02d.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
@@ -734,6 +740,18 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			})
 		}
 
+		// Check if file already exists
+		if _, statErr := os.Stat(strmPath); statErr == nil {
+			preserved++
+			continue
+		}
+
+		// If we reached the batch quota for this pass, track remainder and defer to next batch
+		if created >= maxBatch {
+			remainingUnwritten++
+			continue
+		}
+
 		updated, err := strm.WriteSTRMFile(strmPath, proxyURL)
 		if err != nil {
 			log.Printf("[Syncer] Error writing episode STRM %s: %v", strmPath, err)
@@ -747,7 +765,6 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 
 		if s.cfg.EnableNFO {
-			// Write or update Episode NFO with real title & plot when NFOs are enabled
 			epPlot := ep.Description
 			if epPlot == "" {
 				epPlot = fmt.Sprintf("Episode %d of %s Season %d", ep.EpisodeNumber, cleanTitle, ep.SeasonNumber)
@@ -759,24 +776,25 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 				epTitle = sanitizer.CleanEpisodeTitle(ep.Name, cleanTitle, ep.SeasonNumber, ep.EpisodeNumber)
 			}
 			nUpdated, nErr := nfo.WriteEpisodeNFO(nfoPath, epTitle, ep.SeasonNumber, ep.EpisodeNumber, epPlot, ep.TMDBID)
-			if nErr == nil {
-				if nUpdated {
-					created++
-				} else {
-					preserved++
-				}
+			if nErr == nil && nUpdated {
+				created++
 			}
 		} else {
-			// When NFO is disabled, remove any existing episode NFO (like Pass 1 S01E01 activation NFO)
 			if _, statErr := os.Stat(nfoPath); statErr == nil {
 				_ = os.Remove(nfoPath)
 			}
-			// Touch S01E01.strm when removing its NFO so Emby automatically fetches fresh metadata from TMDB
 			if ep.SeasonNumber == 1 && ep.EpisodeNumber == 1 {
 				now := time.Now()
 				_ = os.Chtimes(strmPath, now, now)
 			}
 		}
+	}
+
+	// If more episodes remain to be written on disk, queue background batch task
+	if remainingUnwritten > 0 && s.database != nil {
+		log.Printf("[Syncer] Series %d (%s): Wrote batch of %d episodes (%d remaining). Enqueueing background batch...",
+			seriesID, cleanTitle, created, remainingUnwritten)
+		_ = s.database.EnqueueTask("series", seriesID, "update_episodes", models.PriorityAiring)
 	}
 
 	// Record series as activated in SQLite
@@ -1550,9 +1568,12 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 
 	case "update_episodes":
 		if task.ItemType == "series" {
-			_, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
+			created, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
 			if err != nil {
 				return err, nil
+			}
+			if created > 0 {
+				summary.STRMCreated = true
 			}
 			s.TriggerTargetedEmbySeriesRefresh(ctx, task.ItemID)
 		}
