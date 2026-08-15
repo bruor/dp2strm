@@ -512,6 +512,21 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID, series.IMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
 
+	// Automatically migrate legacy folder without ID if it exists on disk (e.g. "TV Shows/Title (Year)")
+	if series.Year > 0 {
+		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(cleanTitle), series.Year)
+		legacyDir := filepath.Join(s.cfg.OutputDir, "TV Shows", legacyFolderName)
+		if legacyDir != seriesDir {
+			if _, statErr := os.Stat(legacyDir); statErr == nil {
+				if _, canonicalErr := os.Stat(seriesDir); os.IsNotExist(canonicalErr) {
+					if rErr := os.Rename(legacyDir, seriesDir); rErr == nil {
+						log.Printf("[Syncer] Migrated legacy TV show directory without ID: %q -> %q", legacyFolderName, folderName)
+					}
+				}
+			}
+		}
+	}
+
 	if s.database != nil {
 		_ = s.database.UpsertInitialSeriesState(series.ID, series.TMDBID, series.IMDBID, cleanTitle, series.Year, folderName)
 	}
@@ -769,6 +784,21 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	cleanTitle := sanitizer.CleanTitle(movie.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID, movie.IMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
+
+	// Automatically migrate legacy folder without ID if it exists on disk (e.g. "Movies/Title (Year)")
+	if movie.Year > 0 {
+		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(cleanTitle), movie.Year)
+		legacyDir := filepath.Join(s.cfg.OutputDir, "Movies", legacyFolderName)
+		if legacyDir != movieDir {
+			if _, statErr := os.Stat(legacyDir); statErr == nil {
+				if _, canonicalErr := os.Stat(movieDir); os.IsNotExist(canonicalErr) {
+					if rErr := os.Rename(legacyDir, movieDir); rErr == nil {
+						log.Printf("[Syncer] Migrated legacy Movie directory without ID: %q -> %q", legacyFolderName, folderName)
+					}
+				}
+			}
+		}
+	}
 
 	if s.database != nil {
 		_ = s.database.UpsertInitialMovieState(movie.ID, movie.TMDBID, movie.IMDBID, cleanTitle, movie.Year, folderName)
@@ -1369,6 +1399,59 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 			for _, p := range expiredPaths {
 				_ = os.RemoveAll(p)
 				_ = s.database.RemoveSoftDeletedItem(p)
+			}
+		}
+	}
+
+	// 2. Scan and migrate TV Shows folders lacking IDs (e.g. "The Hawk (2026)" -> "The Hawk (2026) [tmdbid=254528]")
+	tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
+	if entries, err := os.ReadDir(tvShowsRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") {
+				title, year := sanitizer.ExtractYearAndTitle(name)
+				if s.database != nil {
+					st, _ := s.database.FindSeriesByTitleAndYear(title, year)
+					if st != nil && st.FolderName != "" && st.FolderName != name {
+						oldPath := filepath.Join(tvShowsRoot, name)
+						newPath := filepath.Join(tvShowsRoot, st.FolderName)
+						if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
+							if rErr := os.Rename(oldPath, newPath); rErr == nil {
+								log.Printf("[Reconciler] Upgraded legacy TV show folder without ID: %q -> %q", name, st.FolderName)
+								s.TriggerTargetedEmbySeriesRefresh(ctx, st.SeriesID)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Scan and migrate Movies folders lacking IDs
+	moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
+	if entries, err := os.ReadDir(moviesRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") {
+				title, year := sanitizer.ExtractYearAndTitle(name)
+				if s.database != nil {
+					mst, _ := s.database.FindMovieByTitleAndYear(title, year)
+					if mst != nil && mst.FolderName != "" && mst.FolderName != name {
+						oldPath := filepath.Join(moviesRoot, name)
+						newPath := filepath.Join(moviesRoot, mst.FolderName)
+						if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
+							if rErr := os.Rename(oldPath, newPath); rErr == nil {
+								log.Printf("[Reconciler] Upgraded legacy Movie folder without ID: %q -> %q", name, mst.FolderName)
+							}
+						}
+					}
+				}
 			}
 		}
 	}

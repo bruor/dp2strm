@@ -3,6 +3,7 @@ package sanitizer
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -124,4 +125,26 @@ func CleanEpisodeTitle(epName, seriesName string, season, episode int) string {
 		return fmt.Sprintf("Episode %d", episode)
 	}
 	return cleaned
+}
+
+// ExtractYearAndTitle extracts the clean title and year from a folder name like "The Hawk (2026)".
+func ExtractYearAndTitle(folderName string) (title string, year int) {
+	name := folderName
+	if idx := strings.Index(name, "["); idx > 0 {
+		name = strings.TrimSpace(name[:idx])
+	}
+	submatches := parenthesizedYearRegex.FindAllStringSubmatch(name, -1)
+	if len(submatches) > 0 {
+		lastSub := submatches[len(submatches)-1]
+		if len(lastSub) > 1 {
+			if y, err := strconv.Atoi(lastSub[1]); err == nil {
+				year = y
+			}
+		}
+	}
+	title = StripYearFromTitle(name, year)
+	if title == "" {
+		title = name
+	}
+	return title, year
 }

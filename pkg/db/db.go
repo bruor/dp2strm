@@ -251,6 +251,35 @@ func (d *DB) SetSeriesActivated(seriesID int, tmdbID, title string) error {
 	return err
 }
 
+// FindSeriesByTitleAndYear finds a series record by matching title and optionally year.
+func (d *DB) FindSeriesByTitleAndYear(title string, year int) (*SeriesState, error) {
+	var query string
+	var row *sql.Row
+	if year > 0 {
+		query = `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE title = ? AND year = ? LIMIT 1`
+		row = d.conn.QueryRow(query, title, year)
+	} else {
+		query = `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE title = ? LIMIT 1`
+		row = d.conn.QueryRow(query, title)
+	}
+	var s SeriesState
+	var actAt, chkAt sql.NullTime
+	err := row.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if actAt.Valid {
+		s.ActivatedAt = &actAt.Time
+	}
+	if chkAt.Valid {
+		s.LastCheckedAt = &chkAt.Time
+	}
+	return &s, nil
+}
+
 // UpdateSeriesMetadata updates status, episode count, next air date, and last_modified timestamp for a series.
 func (d *DB) UpdateSeriesMetadata(seriesID int, status string, epCount int, nextAirDate string, lastModified int64) error {
 	now := time.Now()
@@ -298,6 +327,35 @@ func (d *DB) GetMovieState(movieID int) (*MovieState, error) {
 	query := `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at FROM movie_state WHERE movie_id = ?`
 	row := d.conn.QueryRow(query, movieID)
 
+	var m MovieState
+	var actAt, chkAt sql.NullTime
+	err := row.Scan(&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if actAt.Valid {
+		m.ActivatedAt = &actAt.Time
+	}
+	if chkAt.Valid {
+		m.LastCheckedAt = &chkAt.Time
+	}
+	return &m, nil
+}
+
+// FindMovieByTitleAndYear finds a movie record by matching title and optionally year.
+func (d *DB) FindMovieByTitleAndYear(title string, year int) (*MovieState, error) {
+	var query string
+	var row *sql.Row
+	if year > 0 {
+		query = `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at FROM movie_state WHERE title = ? AND year = ? LIMIT 1`
+		row = d.conn.QueryRow(query, title, year)
+	} else {
+		query = `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at FROM movie_state WHERE title = ? LIMIT 1`
+		row = d.conn.QueryRow(query, title)
+	}
 	var m MovieState
 	var actAt, chkAt sql.NullTime
 	err := row.Scan(&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt)
