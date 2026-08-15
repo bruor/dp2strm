@@ -12,7 +12,10 @@
 
 ## ✨ Key Features
 
-- **Clean Extensionless Obfuscated URLs**: `.strm` files output clean extensionless URLs (`http://dp2strm:8080/play/movie/1058902`, `http://dp2strm:8080/play/series/30998/1/1`). Upstream subscriber credentials (`agy/agypassword`) are **never written to disk or exposed to Emby**.
+- **Native Dispatcharr VOD Proxy Streaming**:
+  - Automatically redirects playback directly to Dispatcharr's Native VOD Streaming Proxy (`/proxy/vod/movie/{uuid}` and `/proxy/vod/episode/{uuid}`).
+  - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
+- **Clean Extensionless Obfuscated URLs**: `.strm` files output clean extensionless URLs (`http://dp2strm:8080/play/movie/1058902`, `http://dp2strm:8080/play/series/30998/1/1`). Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
 - **On-Demand TV Series Activation Lifecycle**:
   - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01 - Play to Activate Series.strm` & `.nfo`. Keeps initial library indexing fast across thousands of series.
   - **Pass 2 (On Play)**: Playing Episode 1 **immediately (<50ms)** 302 redirects to playable video while asynchronously populating all real episode `.strm` files, purging placeholders, and updating Emby in the background.
@@ -33,8 +36,9 @@
 - **Server-Side Prioritized Ordering (`DISPATCHARR_ORDERING`)**:
   - Automatically sorts API queries with `?ordering=-created_at` by default.
   - Ensures brand-new movie additions and TV series with fresh episode drops are placed at the front of the sync queue in every pass.
-- **Duplicate Year & Noise Sanitization**:
-  - Automatically collapses duplicate consecutive year tags (e.g., `Yahoo+ (2022) (2022)` ➔ `Yahoo+ (2022)`) across all folders, `.strm`, and `.nfo` files.
+- **Duplicate Year & Clean NFO Title Sanitization**:
+  - Strips trailing release year from NFO `<title>` and `<originaltitle>` XML tags, preventing Emby from duplicating the release year in its UI.
+  - Automatically collapses duplicate consecutive year tags (e.g., `Yahoo+ (2022) (2022)` ➔ `Yahoo+ (2022)`) across all folders and filenames.
   - Strips quality, codec, and release tags from titles while preserving legitimate release years.
 - **Emby Multi-Version Hierarchy Support**: Automatically classifies 1080p base default versions (`Movie.strm`) vs 4K secondary versions (`Movie - 4K.strm`) for Emby's version dropdown menu.
 - **Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preventing port 80 connection errors in FFmpeg/Emby.
@@ -143,8 +147,8 @@ services:
 | :--- | :--- | :--- |
 | `DISPATCHARR_URL` | `http://localhost:8000` | Base URL of your Dispatcharr server (**Required**) |
 | `DISPATCHARR_API_KEY` | `""` | Dispatcharr API Key (**Required**) |
-| `DISPATCHARR_XC_USER` | `""` | Dispatcharr XC user account username |
-| `DISPATCHARR_XC_PASSWORD` | `""` | Dispatcharr XC user account password |
+| `DISPATCHARR_XC_USER` | `""` | Optional: legacy XC username (not required when using API Key) |
+| `DISPATCHARR_XC_PASSWORD` | `""` | Optional: legacy XC password (not required when using API Key) |
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
 | `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
 | `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |

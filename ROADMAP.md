@@ -37,10 +37,12 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **Cron Expression & Timezone-Aware Scheduler**: Supports 5-field cron syntax (`SYNC_CRON`) and IANA timezones (`TZ`).
 - [x] **Dynamic Shared-Pool Batching & Budget Rollover (`BATCH_SIZE`)**: Shared pool between Movies and Series with 50/50 initial split and dynamic rollover for unused allocations. Counts strictly newly created `.strm` media files.
 - [x] **Server-Side Prioritized Ordering (`DISPATCHARR_ORDERING`)**: Queries `/api/vod/movies/` and `/api/vod/series/` with `?ordering=-created_at` to sync recent additions and fresh episode drops first.
-- [x] **Duplicate Consecutive Year Sanitizer**: Strips repeated parenthesized/bracketed year strings like `(2022) (2022)` into `(2022)` without touching valid title years like *Fantasia 2000*.
-- [x] **Unified Single Emby Webhook**: Sends a single refresh notification to Emby at the completion of each shared pass when new media files are written.
-- [x] **Config Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preserving ports across base and variant URLs.
-- [x] **Cloud-Native Environment Variable Mode**: 100% configurable via Docker env vars.
+- [x] **Native Dispatcharr VOD Proxy Streaming Engine**:
+  - Automatically redirects playback directly to Dispatcharr's Native VOD Proxy (`/proxy/vod/movie/{uuid}` and `/proxy/vod/episode/{uuid}`).
+  - Authenticates via `DISPATCHARR_API_KEY`, rendering separate XC subscriber credentials optional.
+- [x] **Duplicate Year & Clean NFO Title Sanitization**:
+  - Strips trailing release years from NFO `<title>` and `<originaltitle>` tags to eliminate duplicate year rendering in Emby UI.
+  - Automatically collapses duplicate consecutive year tags (e.g. `(2022) (2022)` ➔ `(2022)`) across all folders and filenames.
 - [x] **Category / Group / Adult Filtering Managed in Dispatcharr**: Filtering managed directly upstream in Dispatcharr.
 
 ---
