@@ -83,9 +83,15 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 	}
 
 	seriesFolder := filepath.Join(tempDir, "TV Shows", "Breaking Bad (2008) [tmdbid=1396]")
-	placeholderSTRM := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01 - Play to Activate Series.strm")
-	if _, err := os.Stat(placeholderSTRM); os.IsNotExist(err) {
-		t.Errorf("Expected placeholder STRM file to exist at %s", placeholderSTRM)
+	episode1STRM := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.strm")
+	episode1NFO := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01.nfo")
+
+	if _, err := os.Stat(episode1STRM); os.IsNotExist(err) {
+		t.Errorf("Expected S01E01 STRM file to exist at %s", episode1STRM)
+	}
+	nfoBytes, err := os.ReadFile(episode1NFO)
+	if err != nil || !strings.Contains(string(nfoBytes), "Play to Activate Series") {
+		t.Errorf("Expected Pass 1 NFO to contain 'Play to Activate Series', got: %s", string(nfoBytes))
 	}
 
 	// 3. Test Series Activation with empty directory string (should auto-resolve from SQLite state)
@@ -94,15 +100,15 @@ func TestSyncerPass1AndActivation(t *testing.T) {
 		t.Fatalf("PopulateActivatedSeries failed: %v", err)
 	}
 
-	// Placeholder must be deleted!
-	if _, err := os.Stat(placeholderSTRM); !os.IsNotExist(err) {
-		t.Errorf("Expected placeholder STRM file to be deleted after activation")
+	// S01E01 STRM must still exist (not deleted or renamed!)
+	if _, err := os.Stat(episode1STRM); os.IsNotExist(err) {
+		t.Errorf("Expected S01E01 STRM file to remain on disk after activation")
 	}
 
-	// Real episode S01E01 must exist!
-	realEpisodeSTRM := filepath.Join(seriesFolder, "Season 01", "Breaking Bad (2008) - S01E01 - Pilot.strm")
-	if _, err := os.Stat(realEpisodeSTRM); os.IsNotExist(err) {
-		t.Errorf("Expected real episode STRM file to exist at %s", realEpisodeSTRM)
+	// S01E01 NFO must now be updated with real title "Pilot"!
+	nfoBytesUpdated, err := os.ReadFile(episode1NFO)
+	if err != nil || !strings.Contains(string(nfoBytesUpdated), "Pilot") {
+		t.Errorf("Expected activated NFO to contain 'Pilot', got: %s", string(nfoBytesUpdated))
 	}
 
 	// 4. Test Movie Activation with empty directory string (should auto-resolve from SQLite state)

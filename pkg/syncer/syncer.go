@@ -537,12 +537,12 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		}
 	}
 
-	// 2. Write Pass 1 Season 01 Activation Episode placeholder
+	// 2. Write Pass 1 Season 01 S01E01 Activation placeholder
 	season1Dir := filepath.Join(seriesDir, "Season 01")
-	actStrmFilename := fmt.Sprintf("%s - S01E01 - Play to Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle))
+	actStrmFilename := fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))
 	actStrmPath := filepath.Join(season1Dir, actStrmFilename)
 
-	actNFOFilename := fmt.Sprintf("%s - S01E01 - Play to Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle))
+	actNFOFilename := fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle))
 	actNFOPath := filepath.Join(season1Dir, actNFOFilename)
 
 	actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, series.ID, 1, 1, "base")
@@ -558,7 +558,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	}
 
 	actPlot := fmt.Sprintf("Play this episode to dynamically populate all seasons and episodes for %s in Emby.", cleanTitle)
-	nfoUpdated, err = nfo.WriteEpisodeNFO(actNFOPath, "Play Episode to Activate Series Content", 1, 1, actPlot, series.TMDBID)
+	nfoUpdated, err = nfo.WriteEpisodeNFO(actNFOPath, "Play to Activate Series", 1, 1, actPlot, series.TMDBID)
 	if err == nil {
 		if nfoUpdated {
 			created++
@@ -577,7 +577,7 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	return created, preserved, strmCreated, artDur, diskDur, nil
 }
 
-// PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm files on disk.
+// PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm and .nfo files on disk.
 func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, cleanTitle, seriesDir string) (created, preserved int, err error) {
 	// Auto-resolve canonical seriesDir and cleanTitle if not provided
 	if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
@@ -614,7 +614,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
 	}
 
-	// Delete Pass 1 Activation placeholder files if present in Season 01
+	// Delete legacy Pass 1 Activation placeholder files if present in Season 01
 	season1Dir := filepath.Join(seriesDir, "Season 01")
 	if entries, readErr := os.ReadDir(season1Dir); readErr == nil {
 		for _, entry := range entries {
@@ -626,9 +626,11 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 
 	for _, ep := range episodes {
 		seasonDir := filepath.Join(seriesDir, fmt.Sprintf("Season %02d", ep.SeasonNumber))
-		epTitle := sanitizer.CleanEpisodeTitle(ep.Name, cleanTitle, ep.SeasonNumber, ep.EpisodeNumber)
-		filename := fmt.Sprintf("%s - S%02dE%02d - %s.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber, epTitle)
+		filename := fmt.Sprintf("%s - S%02dE%02d.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
 		strmPath := filepath.Join(seasonDir, filename)
+
+		nfoFilename := fmt.Sprintf("%s - S%02dE%02d.nfo", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
+		nfoPath := filepath.Join(seasonDir, nfoFilename)
 
 		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesID, ep.SeasonNumber, ep.EpisodeNumber, "base")
 
@@ -668,6 +670,26 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			created++
 		} else {
 			preserved++
+		}
+
+		// Write or update Episode NFO with real title & plot
+		epPlot := ep.Description
+		if epPlot == "" {
+			epPlot = fmt.Sprintf("Episode %d of %s Season %d", ep.EpisodeNumber, cleanTitle, ep.SeasonNumber)
+		}
+		epTitle := ep.Name
+		if epTitle == "" {
+			epTitle = fmt.Sprintf("Episode %d", ep.EpisodeNumber)
+		} else {
+			epTitle = sanitizer.CleanEpisodeTitle(ep.Name, cleanTitle, ep.SeasonNumber, ep.EpisodeNumber)
+		}
+		nUpdated, nErr := nfo.WriteEpisodeNFO(nfoPath, epTitle, ep.SeasonNumber, ep.EpisodeNumber, epPlot, ep.TMDBID)
+		if nErr == nil {
+			if nUpdated {
+				created++
+			} else {
+				preserved++
+			}
 		}
 	}
 
@@ -873,10 +895,13 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
-// TriggerTargetedEmbySeriesRefresh sends a library refresh to Emby when a series is activated.
+// TriggerTargetedEmbySeriesRefresh sends a library refresh to Emby after a 15-second grace window to allow active playback streams to buffer.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
-	s.triggerEmbyRefresh(ctx)
+	go func() {
+		time.Sleep(15 * time.Second)
+		s.triggerEmbyRefresh(context.Background())
+	}()
 }

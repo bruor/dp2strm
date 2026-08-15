@@ -17,8 +17,8 @@
   - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
 - **Clean Extensionless Obfuscated URLs**: `.strm` files output clean extensionless URLs (`http://dp2strm:8080/play/movie/1058902`, `http://dp2strm:8080/play/series/30998/1/1`). Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
 - **On-Demand TV Series Activation Lifecycle**:
-  - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01 - Play to Activate Series.strm` & `.nfo`. Keeps initial library indexing fast across thousands of series.
-  - **Pass 2 (On Play)**: Playing Episode 1 **immediately (<50ms)** 302 redirects to playable video while asynchronously populating all real episode `.strm` files, purging placeholders, and updating Emby in the background.
+  - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01.strm` along with an instructional `S01E01.nfo` ("Play to Activate Series"). Keeps initial library indexing blazing fast across thousands of series.
+  - **Pass 2 (On Play)**: Playing Episode 1 **immediately (<50ms)** 302 redirects to stream, while an async worker populates all real episode `.strm` files and updates `S01E01.nfo` with real episode title/plot in-place without deleting or renaming files on disk.
 - **On-Demand Movie Quality Activation**:
   - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with 100% real NFO metadata and artwork.
   - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.

@@ -20,8 +20,8 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - Series URLs: `/play/series/{series_id}/{season}/{episode}`
   - Completely obfuscates upstream subscriber credentials (`agy/agypassword`) from disk files and Emby library.
 - [x] **On-Demand TV Series Activation & Clean-Up Lifecycle**:
-  - **Pass 1**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01 - Play to Activate Series.strm` & `.nfo`.
-  - **Pass 2 (On Play)**: Immediate (<50ms) 302 redirect to stream, while an async worker populates all episode `.strm` files, purges placeholders, and updates Emby.
+  - **Pass 1**: Generates `tvshow.nfo`, posters, and `Season 01/Show Name - S01E01.strm` & `S01E01.nfo` ("Play to Activate Series").
+  - **Pass 2 (On Play)**: Immediate (<50ms) 302 redirect to stream, while an async worker populates all remaining episode `.strm` files and updates `S01E01.nfo` in-place with real episode title/plot.
 - [x] **On-Demand Movie Quality Activation & Multi-Version Resolution**:
   - **Pass 1**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}`.
   - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite (`stream_variants`), writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
