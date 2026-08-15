@@ -1,12 +1,12 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -957,54 +957,76 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
-// TriggerTargetedEmbySeriesRefresh triggers an Emby library refresh to discover all newly populated episodes.
+// TriggerTargetedEmbySeriesRefresh triggers a targeted Emby rescan for the activated series by TMDB ID or title.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
 	go func() {
-		// Send targeted path notification if folder found
-		var folderName string
+		var tmdbID, title string
 		if s.database != nil {
-			if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.FolderName != "" {
-				folderName = st.FolderName
+			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
+				tmdbID = st.TMDBID
+				title = st.Title
 			}
 		}
 
-		if folderName != "" {
-			baseDir := s.cfg.OutputDir
-			if s.cfg.EmbyMediaPath != "" {
-				baseDir = s.cfg.EmbyMediaPath
+		// Helper to search Emby by query parameter and return internal Item ID
+		findEmbyItemID := func(param string) string {
+			searchURL := fmt.Sprintf("%s/Items?%s&IncludeItemTypes=Series&Recursive=true", strings.TrimRight(s.cfg.EmbyURL, "/"), param)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, searchURL, nil)
+			if err != nil {
+				return ""
 			}
-			seriesEmbyPath := filepath.Join(baseDir, "TV Shows", folderName)
+			req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
+			req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
 
-			embyEndpoint := fmt.Sprintf("%s/Library/Media/Updated", strings.TrimRight(s.cfg.EmbyURL, "/"))
-
-			payload := map[string]any{
-				"Updates": []map[string]string{
-					{
-						"Path":       seriesEmbyPath,
-						"UpdateType": "Created",
-					},
-				},
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil || resp == nil {
+				return ""
 			}
-			if jsonBody, jErr := json.Marshal(payload); jErr == nil {
-				if req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint, bytes.NewReader(jsonBody)); err == nil {
-					req.Header.Set("Content-Type", "application/json")
-					req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
-					req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
-					if resp, dErr := http.DefaultClient.Do(req); dErr == nil && resp != nil {
-						defer resp.Body.Close()
-						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-							log.Printf("[Emby] Successfully sent targeted series rescan for %s", seriesEmbyPath)
-							return
-						}
+			defer resp.Body.Close()
+
+			var searchResult struct {
+				Items []struct {
+					ID string `json:"Id"`
+				} `json:"Items"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&searchResult); err == nil && len(searchResult.Items) > 0 {
+				return searchResult.Items[0].ID
+			}
+			return ""
+		}
+
+		var embyItemID string
+		if tmdbID != "" {
+			embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=tmdb.%s", tmdbID))
+		}
+		if embyItemID == "" && title != "" {
+			escapedTitle := url.QueryEscape(title)
+			embyItemID = findEmbyItemID(fmt.Sprintf("searchTerm=%s", escapedTitle))
+		}
+
+		if embyItemID != "" {
+			// Trigger targeted item refresh directly on the specific series item
+			refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default", strings.TrimRight(s.cfg.EmbyURL, "/"), embyItemID)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, refreshURL, nil)
+			if err == nil {
+				req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
+				req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
+				req.Header.Set("Content-Type", "application/json")
+				resp, dErr := http.DefaultClient.Do(req)
+				if dErr == nil && resp != nil {
+					defer resp.Body.Close()
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s)", title, embyItemID)
+						return
 					}
 				}
 			}
 		}
 
-		// Fallback to global refresh ONLY if targeted notification was not sent
+		// Fallback to global refresh if item was not found in Emby
 		s.triggerEmbyRefresh(context.Background())
 	}()
 }
