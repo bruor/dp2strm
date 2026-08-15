@@ -25,6 +25,7 @@ type Config struct {
 	PageWorkers           int           `json:"page_workers"`
 	EmbyURL               string        `json:"emby_url"`
 	EmbyAPIKey            string        `json:"emby_api_key"`
+	EmbyMediaPath         string        `json:"emby_media_path"`
 	Ordering              string        `json:"ordering"`
 	EnableNFO             bool          `json:"enable_nfo"`
 }

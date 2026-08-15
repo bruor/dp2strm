@@ -167,6 +167,7 @@ services:
 | `DISPATCHARR_ORDERING` | `-created_at` | Server-side ordering parameter for Dispatcharr VOD endpoints |
 | `EMBY_URL` | `""` | Optional Emby/Jellyfin server URL for library refresh hooks |
 | `EMBY_API_KEY` | `""` | Optional Emby/Jellyfin API key |
+| `EMBY_MEDIA_PATH` | `""` | Optional Emby internal mount path (e.g. `/media/strm`) for targeted `/Library/Media/Updated` rescans |
 
 ---
 

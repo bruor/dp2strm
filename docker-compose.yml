@@ -44,3 +44,4 @@ services:
       # --- Emby / Jellyfin Rescan Hooks (Optional) ---
       - EMBY_URL=
       - EMBY_API_KEY=
+      - EMBY_MEDIA_PATH= # Optional: Emby container path mount for strm directory (e.g. /media/strm) for targeted rescans

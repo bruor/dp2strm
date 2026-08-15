@@ -1,7 +1,9 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -938,13 +940,61 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
-// TriggerTargetedEmbySeriesRefresh sends a library refresh to Emby after a 15-second grace window to allow active playback streams to buffer.
+// TriggerTargetedEmbySeriesRefresh sends a targeted path notification to Emby (/Library/Media/Updated) after a 15-second grace window, or falls back to global refresh.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
 	go func() {
 		time.Sleep(15 * time.Second)
+
+		// Look up series folder from database
+		var folderName string
+		if s.database != nil {
+			if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.FolderName != "" {
+				folderName = st.FolderName
+			}
+		}
+
+		if folderName != "" {
+			// Calculate Emby container path using EmbyMediaPath if provided, else OutputDir
+			baseDir := s.cfg.OutputDir
+			if s.cfg.EmbyMediaPath != "" {
+				baseDir = s.cfg.EmbyMediaPath
+			}
+			seriesEmbyPath := filepath.Join(baseDir, "TV Shows", folderName)
+
+			// Send targeted POST /Library/Media/Updated
+			embyEndpoint := fmt.Sprintf("%s/Library/Media/Updated", strings.TrimRight(s.cfg.EmbyURL, "/"))
+			query := url.Values{}
+			query.Set("api_key", s.cfg.EmbyAPIKey)
+
+			payload := map[string]any{
+				"Updates": []map[string]string{
+					{
+						"Path":       seriesEmbyPath,
+						"UpdateType": "Created",
+					},
+				},
+			}
+			jsonBody, jErr := json.Marshal(payload)
+			if jErr == nil {
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, embyEndpoint+"?"+query.Encode(), bytes.NewReader(jsonBody))
+				if err == nil {
+					req.Header.Set("Content-Type", "application/json")
+					resp, dErr := http.DefaultClient.Do(req)
+					if dErr == nil && resp != nil {
+						defer resp.Body.Close()
+						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							log.Printf("[Emby] Successfully triggered targeted series rescan for %s", seriesEmbyPath)
+							return
+						}
+					}
+				}
+			}
+		}
+
+		// Fallback to global refresh if targeted path scan failed or folder not found
 		s.triggerEmbyRefresh(context.Background())
 	}()
 }

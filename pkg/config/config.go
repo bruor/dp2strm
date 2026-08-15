@@ -35,6 +35,7 @@ func DefaultConfig() *models.Config {
 		PageWorkers:           5,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
+		EmbyMediaPath:         "",
 		Ordering:              "-created_at",
 		EnableNFO:             false,
 	}
@@ -78,6 +79,9 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("EMBY_API_KEY"); v != "" {
 		cfg.EmbyAPIKey = v
+	}
+	if v := os.Getenv("EMBY_MEDIA_PATH"); v != "" {
+		cfg.EmbyMediaPath = v
 	}
 	if v := os.Getenv("SYNC_CRON"); v != "" {
 		cfg.SyncCron = v
