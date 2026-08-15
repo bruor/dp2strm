@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -44,6 +45,7 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 	mux.HandleFunc("/play/series/", srv.handleSeriesPlay)
 	mux.HandleFunc("/activate", srv.handleActivate)
 	mux.HandleFunc("/healthz", srv.handleHealth)
+	mux.HandleFunc("/status", srv.handleStatus)
 
 	srv.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -79,6 +81,32 @@ func (s *Server) Stop(ctx context.Context) error {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var pending, inProgress, failed int
+	if s.database != nil {
+		pending, inProgress, failed, _ = s.database.GetQueueStats()
+	}
+
+	status := map[string]any{
+		"status":              "online",
+		"port":                s.cfg.Port,
+		"sync_interval":       s.cfg.SyncInterval.String(),
+		"reconcile_interval":  s.cfg.ReconcileInterval.String(),
+		"dispatcharr_workers": s.cfg.DispatcharrWorkers,
+		"emby_workers":        s.cfg.EmbyWorkers,
+		"emby_pace_delay":     s.cfg.EmbyPaceDelay.String(),
+		"queue": map[string]int{
+			"pending":     pending,
+			"in_progress": inProgress,
+			"failed":      failed,
+		},
+		"emby_configured": s.cfg.EmbyURL != "" && s.cfg.EmbyAPIKey != "",
+	}
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 // format302Target formats the final 302 target URL, appending ?url= parameter for streamcache if configured.
