@@ -1233,6 +1233,13 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			continue
 		}
 
+		// If Emby is actively running a media library scan, pause worker to let Emby finish cleanly
+		if s.embyClient.IsConfigured() && s.embyClient.IsLibraryScanRunning(ctx) {
+			log.Printf("[Worker #%d] Emby is currently performing a media library scan. Pausing worker until scan finishes...", workerID)
+			s.embyClient.WaitForScanCompletion(ctx, 10*time.Minute)
+			log.Printf("[Worker #%d] Emby media library scan completed. Resuming worker.", workerID)
+		}
+
 		task, err := s.database.PopNextTask(preferredType)
 		if err != nil {
 			log.Printf("[Worker #%d] Error polling queue: %v", workerID, err)

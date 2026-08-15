@@ -428,3 +428,40 @@ func (c *Client) WaitForScanCompletion(ctx context.Context, timeout time.Duratio
 	}
 	return false
 }
+
+// IsLibraryScanRunning checks if Emby's media library scan is actively running.
+func (c *Client) IsLibraryScanRunning(ctx context.Context) bool {
+	if !c.IsConfigured() {
+		return false
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/ScheduledTasks", strings.TrimRight(c.cfg.EmbyURL, "/")), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+	req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	var tasks []struct {
+		Key   string `json:"Key"`
+		State string `json:"State"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err == nil {
+		for _, t := range tasks {
+			if t.Key == "RefreshLibrary" && t.State == "Running" {
+				return true
+			}
+		}
+	}
+	return false
+}
