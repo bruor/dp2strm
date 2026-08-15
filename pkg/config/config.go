@@ -25,17 +25,24 @@ func DefaultConfig() *models.Config {
 		RetentionGraceDays:    7,
 		Port:                  8080,
 		URL:                   "http://localhost:8080",
-		SyncInterval:          0, // 0 = run once by default
+		SyncInterval:          4 * time.Hour,
 		SyncCron:              "",
+		ReconcileInterval:     24 * time.Hour,
+		ReconcileCron:         "",
 		TZ:                    "UTC",
 		BatchSize:             0, // 0 = unlimited
 		CircuitBreakerEnabled: true,
 		MaxProbeConcurrency:   5,
 		PageSize:              100,
-		PageWorkers:           5,
+		PageWorkers:           1,
+		DispatcharrWorkers:    1,
+		EmbyWorkers:           1,
+		EmbyPaceDelay:         100 * time.Millisecond,
 		EmbyURL:               "",
 		EmbyAPIKey:            "",
 		EmbyMediaPath:         "",
+		EmbyTVLibrary:         "",
+		EmbyMoviesLibrary:     "",
 		Ordering:              "-created_at",
 		EnableNFO:             false,
 	}
@@ -83,8 +90,17 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("EMBY_MEDIA_PATH"); v != "" {
 		cfg.EmbyMediaPath = v
 	}
+	if v := os.Getenv("EMBY_TV_LIBRARY"); v != "" {
+		cfg.EmbyTVLibrary = v
+	}
+	if v := os.Getenv("EMBY_MOVIES_LIBRARY"); v != "" {
+		cfg.EmbyMoviesLibrary = v
+	}
 	if v := os.Getenv("SYNC_CRON"); v != "" {
 		cfg.SyncCron = v
+	}
+	if v := os.Getenv("RECONCILE_CRON"); v != "" {
+		cfg.ReconcileCron = v
 	}
 	if v := os.Getenv("TZ"); v != "" {
 		cfg.TZ = v
@@ -124,14 +140,43 @@ func LoadConfig() *models.Config {
 			cfg.PageSize = ps
 		}
 	}
-	if v := os.Getenv("PAGE_WORKERS"); v != "" {
+	if v := os.Getenv("DISPATCHARR_WORKERS"); v != "" {
+		if dw, err := strconv.Atoi(v); err == nil && dw > 0 {
+			cfg.DispatcharrWorkers = dw
+			cfg.PageWorkers = dw
+		}
+	} else if v := os.Getenv("PAGE_WORKERS"); v != "" {
 		if pw, err := strconv.Atoi(v); err == nil && pw > 0 {
 			cfg.PageWorkers = pw
+			cfg.DispatcharrWorkers = pw
+		}
+	}
+	if v := os.Getenv("EMBY_WORKERS"); v != "" {
+		if ew, err := strconv.Atoi(v); err == nil && ew > 0 {
+			cfg.EmbyWorkers = ew
+		}
+	} else if v := os.Getenv("EMBY_CONCURRENCY"); v != "" {
+		if ew, err := strconv.Atoi(v); err == nil && ew > 0 {
+			cfg.EmbyWorkers = ew
+		}
+	}
+	if v := os.Getenv("EMBY_PACE_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.EmbyPaceDelay = d
 		}
 	}
 	if v := os.Getenv("SYNC_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.SyncInterval = d
+		}
+	}
+	if v := os.Getenv("RECONCILE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ReconcileInterval = d
+		}
+	} else if v := os.Getenv("RECONCILER_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ReconcileInterval = d
 		}
 	}
 	if v := os.Getenv("CIRCUIT_BREAKER_ENABLED"); v != "" {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"dp2strm/pkg/models"
 	_ "modernc.org/sqlite"
 )
 
@@ -150,9 +151,24 @@ func (d *DB) initSchema() error {
 		soft_deleted_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS sync_queue (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		item_type TEXT NOT NULL,
+		item_id INTEGER NOT NULL,
+		action TEXT NOT NULL,
+		priority INTEGER NOT NULL DEFAULT 10,
+		status TEXT NOT NULL DEFAULT 'pending',
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT DEFAULT '',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		UNIQUE(item_type, item_id, action)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_series_state_activated ON series_state(is_activated, status);
 	CREATE INDEX IF NOT EXISTS idx_movie_state_activated ON movie_state(is_activated);
 	CREATE INDEX IF NOT EXISTS idx_stream_variants_lookup ON stream_variants(item_id, item_type, season_num, episode_num, variant_key);
+	CREATE INDEX IF NOT EXISTS idx_sync_queue_poll ON sync_queue(status, priority DESC, id ASC);
 	`
 
 	if _, err := d.conn.Exec(schema); err != nil {
@@ -433,4 +449,165 @@ func (d *DB) RemoveSoftDeletedItem(itemPath string) error {
 	query := `DELETE FROM soft_deleted_items WHERE item_path = ?`
 	_, err := d.conn.Exec(query, itemPath)
 	return err
+}
+
+// --- Sync Queue Queries ---
+
+// EnqueueTask adds or updates a task in the sync queue. If task already exists, it boosts priority if higher and resets to pending.
+func (d *DB) EnqueueTask(itemType string, itemID int, action string, priority int) error {
+	now := time.Now()
+	query := `
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
+		priority = CASE WHEN EXCLUDED.priority > sync_queue.priority THEN EXCLUDED.priority ELSE sync_queue.priority END,
+		status = CASE WHEN sync_queue.status = 'completed' THEN 'pending' ELSE sync_queue.status END,
+		updated_at = EXCLUDED.updated_at;
+	`
+	_, err := d.conn.Exec(query, itemType, itemID, action, priority, now, now)
+	return err
+}
+
+// PopNextTask atomically retrieves and marks in-progress the next pending task.
+// If there are high-priority tasks (VIP >= 50), they are returned first.
+// Otherwise, it favors preferredType to support balanced round-robin between movies and series.
+func (d *DB) PopNextTask(preferredType string) (*models.QueueItem, error) {
+	now := time.Now()
+
+	// 1. First check for any high-priority tasks (VIP user activations >= 50)
+	highPriorityQuery := `
+	SELECT id, item_type, item_id, action, priority, status, attempts, last_error, created_at, updated_at
+	FROM sync_queue
+	WHERE status = 'pending' AND priority >= 50
+	ORDER BY priority DESC, id ASC
+	LIMIT 1
+	`
+	item, err := d.scanQueueRow(d.conn.QueryRow(highPriorityQuery))
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	// 2. If no VIP task, try preferred item type (round-robin)
+	if item == nil && preferredType != "" {
+		roundRobinQuery := `
+		SELECT id, item_type, item_id, action, priority, status, attempts, last_error, created_at, updated_at
+		FROM sync_queue
+		WHERE status = 'pending' AND item_type = ?
+		ORDER BY priority DESC, id ASC
+		LIMIT 1
+		`
+		item, err = d.scanQueueRow(d.conn.QueryRow(roundRobinQuery, preferredType))
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+	}
+
+	// 3. Fallback to any pending task
+	if item == nil {
+		fallbackQuery := `
+		SELECT id, item_type, item_id, action, priority, status, attempts, last_error, created_at, updated_at
+		FROM sync_queue
+		WHERE status = 'pending'
+		ORDER BY priority DESC, id ASC
+		LIMIT 1
+		`
+		item, err = d.scanQueueRow(d.conn.QueryRow(fallbackQuery))
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, err
+		}
+	}
+
+	if item == nil {
+		return nil, nil
+	}
+
+	// Atomically mark in_progress
+	updateQuery := `UPDATE sync_queue SET status = 'in_progress', updated_at = ? WHERE id = ? AND status = 'pending'`
+	res, uErr := d.conn.Exec(updateQuery, now, item.ID)
+	if uErr != nil {
+		return nil, uErr
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		// Another worker claimed this task in the microsecond interval, retry
+		return d.PopNextTask(preferredType)
+	}
+
+	item.Status = "in_progress"
+	item.UpdatedAt = now
+	return item, nil
+}
+
+func (d *DB) scanQueueRow(row *sql.Row) (*models.QueueItem, error) {
+	var item models.QueueItem
+	var lastErr sql.NullString
+	err := row.Scan(
+		&item.ID,
+		&item.ItemType,
+		&item.ItemID,
+		&item.Action,
+		&item.Priority,
+		&item.Status,
+		&item.Attempts,
+		&lastErr,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if lastErr.Valid {
+		item.LastError = lastErr.String
+	}
+	return &item, nil
+}
+
+// MarkTaskComplete removes a completed task from the sync queue.
+func (d *DB) MarkTaskComplete(taskID int) error {
+	query := `DELETE FROM sync_queue WHERE id = ?`
+	_, err := d.conn.Exec(query, taskID)
+	return err
+}
+
+// MarkTaskFailed records failure on a task, increments attempts, and marks status as failed.
+func (d *DB) MarkTaskFailed(taskID int, errMsg string) error {
+	query := `UPDATE sync_queue SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?`
+	_, err := d.conn.Exec(query, errMsg, time.Now(), taskID)
+	return err
+}
+
+// ResetInProgressTasks resets any hanging in_progress tasks back to pending (e.g. on daemon startup).
+func (d *DB) ResetInProgressTasks() error {
+	query := `UPDATE sync_queue SET status = 'pending', updated_at = ? WHERE status = 'in_progress'`
+	_, err := d.conn.Exec(query, time.Now())
+	return err
+}
+
+// GetQueueStats returns the count of pending, in_progress, and failed tasks in the queue.
+func (d *DB) GetQueueStats() (pending, inProgress, failed int, err error) {
+	query := `
+	SELECT 
+		SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+	FROM sync_queue
+	`
+	var p, ip, f sql.NullInt64
+	err = d.conn.QueryRow(query).Scan(&p, &ip, &f)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if p.Valid {
+		pending = int(p.Int64)
+	}
+	if ip.Valid {
+		inProgress = int(ip.Int64)
+	}
+	if f.Valid {
+		failed = int(f.Int64)
+	}
+	return pending, inProgress, failed, nil
 }

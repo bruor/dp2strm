@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"dp2strm/pkg/models"
 )
 
 func TestSQLiteStateEngine(t *testing.T) {
@@ -202,5 +204,67 @@ func TestSQLiteStateEngine(t *testing.T) {
 
 	if err := d.RemoveSoftDeletedItem(itemPath); err != nil {
 		t.Fatalf("Failed to remove soft deleted item: %v", err)
+	}
+
+	// 4. Test Sync Queue Operations
+	// Enqueue batch tasks (Priority 10)
+	if err := d.EnqueueTask("movie", 1001, "pass1", models.PriorityBatch); err != nil {
+		t.Fatalf("Failed to enqueue movie batch task: %v", err)
+	}
+	if err := d.EnqueueTask("series", 2001, "pass1", models.PriorityBatch); err != nil {
+		t.Fatalf("Failed to enqueue series batch task: %v", err)
+	}
+	if err := d.EnqueueTask("movie", 1002, "pass1", models.PriorityBatch); err != nil {
+		t.Fatalf("Failed to enqueue second movie batch task: %v", err)
+	}
+
+	pending, inProgress, failed, err := d.GetQueueStats()
+	if err != nil || pending != 3 || inProgress != 0 || failed != 0 {
+		t.Fatalf("Expected 3 pending tasks, got pending=%d, inProgress=%d, failed=%d, err=%v", pending, inProgress, failed, err)
+	}
+
+	// Pop with preferredType "series" (round-robin)
+	task1, err := d.PopNextTask("series")
+	if err != nil || task1 == nil || task1.ItemType != "series" || task1.ItemID != 2001 {
+		t.Fatalf("Expected task 2001 (series), got %+v, err: %v", task1, err)
+	}
+
+	// Enqueue VIP On-Demand Activation (Priority 100) while worker is processing
+	if err := d.EnqueueTask("series", 3001, "activate", models.PriorityVIP); err != nil {
+		t.Fatalf("Failed to enqueue VIP activation: %v", err)
+	}
+
+	// Pop next task: VIP item (3001) MUST jump the queue ahead of remaining movie tasks!
+	task2, err := d.PopNextTask("movie")
+	if err != nil || task2 == nil || task2.Priority != models.PriorityVIP || task2.ItemID != 3001 {
+		t.Fatalf("Expected VIP task 3001 to jump queue, got %+v, err: %v", task2, err)
+	}
+
+	// Mark VIP task complete
+	if err := d.MarkTaskComplete(task2.ID); err != nil {
+		t.Fatalf("Failed to mark task complete: %v", err)
+	}
+
+	// Mark task1 failed
+	if err := d.MarkTaskFailed(task1.ID, "Emby timeout"); err != nil {
+		t.Fatalf("Failed to mark task failed: %v", err)
+	}
+
+	pending, inProgress, failed, _ = d.GetQueueStats()
+	if pending != 2 || failed != 1 {
+		t.Errorf("Expected pending=2, failed=1, got pending=%d, failed=%d", pending, failed)
+	}
+
+	// Test ResetInProgressTasks
+	task3, _ := d.PopNextTask("")
+	if task3 == nil {
+		t.Fatalf("Expected task3, got nil")
+	}
+	if err := d.ResetInProgressTasks(); err != nil {
+		t.Fatalf("Failed to reset in-progress tasks: %v", err)
+	}
+	pending, inProgress, _, _ = d.GetQueueStats()
+	if pending != 2 || inProgress != 0 {
+		t.Errorf("Expected pending=2, inProgress=0 after reset, got pending=%d, inProgress=%d", pending, inProgress)
 	}
 }

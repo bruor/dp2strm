@@ -139,23 +139,27 @@ func main() {
 	}
 	log.Printf("[Main] Daemon active. Timezone: %s", loc.String())
 
-	// Execute Initial Startup Sync Pass (unless SKIP_STARTUP_SYNC=true)
+	// Start background Emby workers and Reconciler
+	syncEngine.StartWorkers(ctx)
+	defer syncEngine.StopWorkers()
+
+	// Execute Initial Startup Staging Pass (unless SKIP_STARTUP_SYNC=true)
 	if !cfg.SkipStartupSync {
-		log.Println("[Main] Executing initial startup sync pass...")
-		if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
-			log.Printf("[Main] Error during initial sync pass: %v", err)
+		log.Println("[Main] Executing initial startup catalog staging pass...")
+		if err := syncEngine.StageCatalogDelta(ctx); err != nil {
+			log.Printf("[Main] Error during initial staging pass: %v", err)
 		}
 	} else {
-		log.Println("[Main] SKIP_STARTUP_SYNC enabled. Skipping initial startup sync pass.")
+		log.Println("[Main] SKIP_STARTUP_SYNC enabled. Skipping initial catalog staging pass.")
 	}
 
 	// Setup Cron Scheduler or Duration Ticker
 	if cfg.SyncCron != "" {
 		cronRunner := cron.New(cron.WithLocation(loc))
 		_, err := cronRunner.AddFunc(cfg.SyncCron, func() {
-			log.Printf("[Main] Cron schedule '%s' triggered (Time: %s). Executing sync pass...", cfg.SyncCron, time.Now().In(loc).Format(time.RFC3339))
-			if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
-				log.Printf("[Main] Error during scheduled sync pass: %v", err)
+			log.Printf("[Main] Cron schedule '%s' triggered (Time: %s). Executing catalog staging pass...", cfg.SyncCron, time.Now().In(loc).Format(time.RFC3339))
+			if err := syncEngine.StageCatalogDelta(ctx); err != nil {
+				log.Printf("[Main] Error during scheduled staging pass: %v", err)
 			}
 		})
 		if err == nil {
@@ -170,13 +174,13 @@ func main() {
 		log.Printf("[Main] Warning: Failed to parse SYNC_CRON %q (%v). Falling back to interval ticker.", cfg.SyncCron, err)
 	}
 
-	// Fallback to Ticker Interval (Default 1h if interval is 0 or unspecified)
+	// Fallback to Ticker Interval (Default 4h)
 	syncInterval := cfg.SyncInterval
 	if syncInterval <= 0 {
-		syncInterval = 1 * time.Hour
+		syncInterval = 4 * time.Hour
 	}
 
-	log.Printf("[Main] Scheduled background sync ticker active every: %v", syncInterval)
+	log.Printf("[Main] Scheduled catalog staging ticker active every: %v", syncInterval)
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 
@@ -186,9 +190,9 @@ func main() {
 			log.Println("[Main] Context cancelled. Exiting daemon.")
 			return
 		case <-ticker.C:
-			log.Println("[Main] Ticker fired. Executing scheduled sync pass...")
-			if err := syncEngine.SyncSharedPass(ctx, *dryRun); err != nil {
-				log.Printf("[Main] Error during scheduled sync pass: %v", err)
+			log.Println("[Main] Ticker fired. Executing scheduled catalog staging pass...")
+			if err := syncEngine.StageCatalogDelta(ctx); err != nil {
+				log.Printf("[Main] Error during scheduled staging pass: %v", err)
 			}
 		}
 	}

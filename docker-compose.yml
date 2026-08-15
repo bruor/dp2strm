@@ -24,16 +24,20 @@ services:
       - PORT=8080
       - URL=http://dp2strm:8080
 
-      # --- Scheduling & Timezone Options ---
+      # --- Scheduling & Worker Pipeline Options ---
       - TZ=America/Toronto
-      - SYNC_INTERVAL=1h
-      - SYNC_CRON= # Optional: e.g. "0 3 * * *" for 3:00 AM daily
-      - SKIP_STARTUP_SYNC=false # Set to true to skip initial sync pass on boot
+      - SYNC_INTERVAL=4h # Dispatcharr catalog delta ingest interval (Default: 4h)
+      - SYNC_CRON= # Optional: e.g. "0 */4 * * *" for cron schedule
+      - RECONCILE_INTERVAL=24h # Daily deep disk reconciler interval (Default: 24h)
+      - RECONCILE_CRON= # Optional: e.g. "0 3 * * *" for 3:00 AM daily reconciliation
+      - SKIP_STARTUP_SYNC=false # Set to true to skip initial staging pass on boot
       - BATCH_SIZE=0 # 0 = Unlimited full library sync, >0 = shared budget with dynamic rollover
       - DISPATCHARR_ORDERING=-created_at # Server-side sorting prioritizing recent updates & additions
       - PAGE_SIZE=100 # Number of items fetched per API page request (Default: 100)
-      - PAGE_WORKERS=5 # Number of concurrent page fetch workers (Default: 5)
-      - MAX_PROBE_CONCURRENCY=5 # Number of parallel worker goroutines for movie sync (5 = Low CPU)
+      - DISPATCHARR_WORKERS=1 # Number of concurrent workers staging from Dispatcharr (Default: 1)
+      - EMBY_WORKERS=1 # Number of concurrent workers processing queue & Emby updates (Default: 1)
+      - EMBY_PACE_DELAY=100ms # Delay between items processed by Emby worker (Default: 100ms)
+      - MAX_PROBE_CONCURRENCY=5 # Number of parallel worker goroutines for direct movie sync (Default: 5)
       - ENABLE_NFO=false # Disabled by default. Unactivated S01E01 NFO is still created, then purged & touched on activation
 
       # --- Streamcache Integration Options (Optional) ---
@@ -41,7 +45,9 @@ services:
       - FETCH_AHEAD_COUNT=2 # Active only when STREAMCACHE_URL is set
       - RETENTION_GRACE_DAYS=7
 
-      # --- Emby / Jellyfin Rescan Hooks (Optional) ---
-      - EMBY_URL=
-      - EMBY_API_KEY=
-      - EMBY_MEDIA_PATH= # Optional: Emby container path mount for strm directory (e.g. /media/strm) for targeted rescans
+      # --- Emby / Jellyfin Rescan Hooks (Zero-Config Auto-Discovered) ---
+      - EMBY_URL= # e.g. http://emby:8096
+      - EMBY_API_KEY= # Emby API Token
+      - EMBY_MEDIA_PATH= # Optional override: only needed if auto-discovery fails (e.g. /media/strm)
+      - EMBY_TV_LIBRARY= # Optional override: library name if multiple TV libraries exist (e.g. "TV shows")
+      - EMBY_MOVIES_LIBRARY= # Optional override: library name if multiple Movie libraries exist (e.g. "Movies")

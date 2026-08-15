@@ -19,6 +19,8 @@ type Config struct {
 	URL                   string        `json:"url"`
 	SyncInterval          time.Duration `json:"sync_interval"`
 	SyncCron              string        `json:"sync_cron"`
+	ReconcileInterval     time.Duration `json:"reconcile_interval"`
+	ReconcileCron         string        `json:"reconcile_cron"`
 	TZ                    string        `json:"tz"`
 	BatchSize             int           `json:"batch_size"`
 	SkipStartupSync       bool          `json:"skip_startup_sync"`
@@ -26,11 +28,37 @@ type Config struct {
 	MaxProbeConcurrency   int           `json:"max_probe_concurrency"`
 	PageSize              int           `json:"page_size"`
 	PageWorkers           int           `json:"page_workers"`
+	DispatcharrWorkers    int           `json:"dispatcharr_workers"`
+	EmbyWorkers           int           `json:"emby_workers"`
+	EmbyPaceDelay         time.Duration `json:"emby_pace_delay"`
 	EmbyURL               string        `json:"emby_url"`
 	EmbyAPIKey            string        `json:"emby_api_key"`
 	EmbyMediaPath         string        `json:"emby_media_path"`
+	EmbyTVLibrary         string        `json:"emby_tv_library"`
+	EmbyMoviesLibrary     string        `json:"emby_movies_library"`
 	Ordering              string        `json:"ordering"`
 	EnableNFO             bool          `json:"enable_nfo"`
+}
+
+// Queue priorities
+const (
+	PriorityVIP    = 100 // On-demand user playback / manual activation
+	PriorityAiring = 50  // Airing show episode updates
+	PriorityBatch  = 10  // Batch catalog intake
+)
+
+// QueueItem represents a task in the SQLite persistent sync_queue.
+type QueueItem struct {
+	ID        int       `json:"id"`
+	ItemType  string    `json:"item_type"` // "series" or "movie"
+	ItemID    int       `json:"item_id"`
+	Action    string    `json:"action"` // "pass1", "activate", "update_episodes", "delete"
+	Priority  int       `json:"priority"`
+	Status    string    `json:"status"` // "pending", "in_progress", "completed", "failed"
+	Attempts  int       `json:"attempts"`
+	LastError string    `json:"last_error"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Category represents a VOD category.

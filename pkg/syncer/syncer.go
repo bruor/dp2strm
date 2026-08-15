@@ -17,6 +17,7 @@ import (
 	"dp2strm/pkg/artwork"
 	"dp2strm/pkg/client"
 	"dp2strm/pkg/db"
+	"dp2strm/pkg/emby"
 	"dp2strm/pkg/models"
 	"dp2strm/pkg/nfo"
 	"dp2strm/pkg/sanitizer"
@@ -27,16 +28,20 @@ import (
 type Syncer struct {
 	cfg            *models.Config
 	client         *client.Client
+	embyClient     *emby.Client
 	database       *db.DB
 	circuitTripped bool
+	workerCancel   context.CancelFunc
+	workerWg       sync.WaitGroup
 	mu             sync.Mutex
 }
 
 func NewSyncer(cfg *models.Config, client *client.Client, database *db.DB) *Syncer {
 	return &Syncer{
-		cfg:      cfg,
-		client:   client,
-		database: database,
+		cfg:        cfg,
+		client:     client,
+		embyClient: emby.NewClient(cfg),
+		database:   database,
 	}
 }
 
@@ -1037,4 +1042,337 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		// Fallback to global refresh if item was not found in Emby
 		s.triggerEmbyRefresh(context.Background())
 	}()
+}
+
+// --- Background Worker Pipeline & Stager ---
+
+// StartWorkers initializes Emby library discovery, resets in-progress queue items, and launches background Emby workers and reconciler.
+func (s *Syncer) StartWorkers(ctx context.Context) {
+	// 1. Auto-discover Emby libraries
+	if s.embyClient.IsConfigured() {
+		if err := s.embyClient.DiscoverLibraries(ctx); err != nil {
+			log.Printf("[Emby] Library auto-discovery notice: %v", err)
+		}
+	}
+
+	// 2. Reset hanging in_progress tasks back to pending
+	if s.database != nil {
+		if err := s.database.ResetInProgressTasks(); err != nil {
+			log.Printf("[Syncer] Error resetting in-progress tasks: %v", err)
+		}
+	}
+
+	workerCtx, cancel := context.WithCancel(ctx)
+	s.workerCancel = cancel
+
+	numWorkers := s.cfg.EmbyWorkers
+	if numWorkers <= 0 {
+		numWorkers = 1
+	}
+
+	log.Printf("[Syncer] Starting %d Emby processing worker(s) (Pacing Delay: %v)...", numWorkers, s.cfg.EmbyPaceDelay)
+	for i := 1; i <= numWorkers; i++ {
+		s.workerWg.Add(1)
+		go s.embyWorkerLoop(workerCtx, i)
+	}
+
+	// Start background reconciler
+	s.workerWg.Add(1)
+	go s.reconcilerLoop(workerCtx)
+}
+
+// StopWorkers cleanly stops all active workers and the reconciler.
+func (s *Syncer) StopWorkers() {
+	if s.workerCancel != nil {
+		s.workerCancel()
+	}
+	s.workerWg.Wait()
+}
+
+// EnqueueUserActivation queues a series for VIP on-demand activation (Priority 100).
+func (s *Syncer) EnqueueUserActivation(seriesID int) error {
+	if s.database == nil {
+		return nil
+	}
+	return s.database.EnqueueTask("series", seriesID, "activate", models.PriorityVIP)
+}
+
+// StageCatalogDelta fetches the latest movies and series catalog from Dispatcharr and populates the SQLite sync_queue.
+func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
+	log.Println("[Stager] Starting Dispatcharr catalog ingest & delta staging pass...")
+	start := time.Now()
+	s.resetCircuitBreaker()
+
+	if s.database == nil {
+		return fmt.Errorf("database required for staging")
+	}
+
+	pageSize := s.cfg.PageSize
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+	workers := s.cfg.DispatcharrWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+
+	// 1. Stage Movies
+	moviesCount := 0
+	page1Movies, err := s.client.FetchMoviePage(ctx, 1, pageSize)
+	if err == nil && page1Movies != nil {
+		for _, mv := range page1Movies.Results {
+			cleanTitle := sanitizer.CleanTitle(mv.Name)
+			folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
+			_ = s.database.UpsertInitialMovieState(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName)
+			_ = s.database.EnqueueTask("movie", mv.ID, "pass1", models.PriorityBatch)
+			moviesCount++
+		}
+		totalMoviePages := (page1Movies.Count + pageSize - 1) / pageSize
+		for p := 2; p <= totalMoviePages; p++ {
+			if s.isCircuitTripped() {
+				break
+			}
+			mvs, pErr := s.client.FetchMoviePage(ctx, p, pageSize)
+			if pErr != nil || mvs == nil {
+				continue
+			}
+			for _, mv := range mvs.Results {
+				cleanTitle := sanitizer.CleanTitle(mv.Name)
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
+				_ = s.database.UpsertInitialMovieState(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName)
+				_ = s.database.EnqueueTask("movie", mv.ID, "pass1", models.PriorityBatch)
+				moviesCount++
+			}
+		}
+	}
+
+	// 2. Stage Series
+	seriesCount := 0
+	page1Series, sErr := s.client.FetchSeriesPage(ctx, 1, pageSize)
+	if sErr == nil && page1Series != nil {
+		for _, srs := range page1Series.Results {
+			cleanTitle := sanitizer.CleanTitle(srs.Name)
+			folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
+			_ = s.database.UpsertInitialSeriesState(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
+
+			st, _ := s.database.GetSeriesState(srs.ID)
+			if st != nil && st.IsActivated {
+				if st.Status != "Ended" {
+					_ = s.database.EnqueueTask("series", srs.ID, "update_episodes", models.PriorityAiring)
+				}
+			} else {
+				_ = s.database.EnqueueTask("series", srs.ID, "pass1", models.PriorityBatch)
+			}
+			seriesCount++
+		}
+		totalSeriesPages := (page1Series.Count + pageSize - 1) / pageSize
+		for p := 2; p <= totalSeriesPages; p++ {
+			if s.isCircuitTripped() {
+				break
+			}
+			seriesList, pErr := s.client.FetchSeriesPage(ctx, p, pageSize)
+			if pErr != nil || seriesList == nil {
+				continue
+			}
+			for _, srs := range seriesList.Results {
+				cleanTitle := sanitizer.CleanTitle(srs.Name)
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
+				_ = s.database.UpsertInitialSeriesState(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
+
+				st, _ := s.database.GetSeriesState(srs.ID)
+				if st != nil && st.IsActivated {
+					if st.Status != "Ended" {
+						_ = s.database.EnqueueTask("series", srs.ID, "update_episodes", models.PriorityAiring)
+					}
+				} else {
+					_ = s.database.EnqueueTask("series", srs.ID, "pass1", models.PriorityBatch)
+				}
+				seriesCount++
+			}
+		}
+	}
+
+	pending, inProgress, failed, _ := s.database.GetQueueStats()
+	log.Printf("[Stager] Catalog delta staged in %v. Total: %d movies, %d series. Queue state -> Pending: %d, InProgress: %d, Failed: %d", time.Since(start), moviesCount, seriesCount, pending, inProgress, failed)
+	return nil
+}
+
+// embyWorkerLoop processes queue items one-by-one with round-robin balancing and Emby verification.
+func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
+	defer s.workerWg.Done()
+	log.Printf("[Worker #%d] Emby worker online.", workerID)
+
+	preferredType := "series" // Start alternating with series
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[Worker #%d] Shutting down.", workerID)
+			return
+		default:
+		}
+
+		if s.database == nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		task, err := s.database.PopNextTask(preferredType)
+		if err != nil {
+			log.Printf("[Worker #%d] Error polling queue: %v", workerID, err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if task == nil {
+			// Queue is empty, idle wait
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		// Alternate preferred type for balanced round-robin
+		if task.ItemType == "series" {
+			preferredType = "movie"
+		} else {
+			preferredType = "series"
+		}
+
+		// Process task
+		pErr := s.processQueueTask(ctx, task)
+		if pErr != nil {
+			log.Printf("[Worker #%d] Task %d failed (%s %d: %s): %v", workerID, task.ID, task.ItemType, task.ItemID, task.Action, pErr)
+			_ = s.database.MarkTaskFailed(task.ID, pErr.Error())
+		} else {
+			_ = s.database.MarkTaskComplete(task.ID)
+		}
+
+		// Apply pacing delay to keep Emby CPU cool
+		if s.cfg.EmbyPaceDelay > 0 {
+			time.Sleep(s.cfg.EmbyPaceDelay)
+		}
+	}
+}
+
+func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) error {
+	switch task.Action {
+	case "pass1":
+		if task.ItemType == "series" {
+			st, err := s.database.GetSeriesState(task.ItemID)
+			if err != nil || st == nil {
+				srs, fErr := s.client.FetchSingleSeries(ctx, task.ItemID)
+				if fErr != nil || srs == nil {
+					return fmt.Errorf("series not found: %w", fErr)
+				}
+				_, _, _ = s.processSingleSeriesPass1(ctx, *srs, false)
+			} else {
+				seriesModel := models.Series{
+					ID:     st.SeriesID,
+					TMDBID: st.TMDBID,
+					IMDBID: st.IMDBID,
+					Name:   st.Title,
+					Year:   st.Year,
+				}
+				_, _, _ = s.processSingleSeriesPass1(ctx, seriesModel, false)
+			}
+			// Adaptive Emby sync
+			if s.embyClient.IsConfigured() {
+				if !s.embyClient.HasRealtimeMonitor("series") {
+					_ = s.embyClient.RefreshTVLibrary(ctx)
+				}
+			}
+		} else {
+			mst, err := s.database.GetMovieState(task.ItemID)
+			if err != nil || mst == nil {
+				mv, fErr := s.client.FetchSingleMovie(ctx, task.ItemID)
+				if fErr != nil || mv == nil {
+					return fmt.Errorf("movie not found: %w", fErr)
+				}
+				_, _, _ = s.processSingleMovie(ctx, *mv, false)
+			} else {
+				movieModel := models.Movie{
+					ID:     mst.MovieID,
+					TMDBID: mst.TMDBID,
+					IMDBID: mst.IMDBID,
+					Name:   mst.Title,
+					Year:   mst.Year,
+				}
+				_, _, _ = s.processSingleMovie(ctx, movieModel, false)
+			}
+			// Adaptive Emby sync
+			if s.embyClient.IsConfigured() {
+				if !s.embyClient.HasRealtimeMonitor("movie") {
+					_ = s.embyClient.RefreshMoviesLibrary(ctx)
+				}
+			}
+		}
+		return nil
+
+	case "activate":
+		if task.ItemType == "series" {
+			_, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
+			if err != nil {
+				return err
+			}
+			s.TriggerTargetedEmbySeriesRefresh(ctx, task.ItemID)
+		}
+		return nil
+
+	case "update_episodes":
+		if task.ItemType == "series" {
+			_, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
+			if err != nil {
+				return err
+			}
+			s.TriggerTargetedEmbySeriesRefresh(ctx, task.ItemID)
+		}
+		return nil
+
+	case "delete":
+		return nil
+	}
+	return nil
+}
+
+// reconcilerLoop runs the daily disk reconciler at the configured interval.
+func (s *Syncer) reconcilerLoop(ctx context.Context) {
+	defer s.workerWg.Done()
+
+	interval := s.cfg.ReconcileInterval
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+
+	log.Printf("[Reconciler] Daily disk reconciler active every: %v", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = s.ReconcileDiskState(ctx)
+		}
+	}
+}
+
+// ReconcileDiskState performs deep reconciliation between on-disk files and SQLite state.
+func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
+	log.Println("[Reconciler] Starting daily disk reconciliation pass...")
+	start := time.Now()
+
+	// 1. Purge expired soft-deleted items
+	if s.database != nil && s.cfg.RetentionGraceDays > 0 {
+		expiredPaths, err := s.database.GetExpiredSoftDeletedItems(s.cfg.RetentionGraceDays)
+		if err == nil && len(expiredPaths) > 0 {
+			log.Printf("[Reconciler] Purging %d expired soft-deleted items from disk...", len(expiredPaths))
+			for _, p := range expiredPaths {
+				_ = os.RemoveAll(p)
+				_ = s.database.RemoveSoftDeletedItem(p)
+			}
+		}
+	}
+
+	log.Printf("[Reconciler] Reconciliation pass complete in %v.", time.Since(start))
+	return nil
 }

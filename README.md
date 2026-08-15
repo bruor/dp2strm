@@ -23,7 +23,18 @@
   - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with 100% real NFO metadata and artwork.
   - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
   - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
-- **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` (or output dir) using WAL (Write-Ahead Logging) mode (`series_state`, `movie_state`, `stream_variants`).
+- **Dedicated Staged-Queue & Worker Pipeline**:
+  - **Catalog Stager (`DISPATCHARR_WORKERS`)**: Fast, lightweight catalog staging runs on a timer (default: `4h`), populating the SQLite `sync_queue` without blocking on disk I/O or Emby scans.
+  - **Paced Emby Processing Workers (`EMBY_WORKERS`)**: Workers process queue items one-by-one with **Round-Robin balancing (1 Movie ⇄ 1 TV Show)** and configurable pacing delay (`EMBY_PACE_DELAY=100ms`) to protect Emby from CPU overload.
+  - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show, it jumps directly to the front of the queue; the currently running item wraps up cleanly, and the requested show is activated immediately with `<50ms` instant 302 playback redirection.
+- **Zero-Config Emby Library Auto-Discovery**:
+  - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status.
+  - Supports multi-library environments with optional name targeting (`EMBY_TV_LIBRARY`, `EMBY_MOVIES_LIBRARY`).
+- **Targeted Online Provider ID Refresh (`POST /Items/{Id}/Refresh`)**:
+  - Refreshes series and movies directly via TMDB/IMDb IDs (`AnyProviderIdEquals=tmdb.XXXXX`), rescanning only that specific show's folder in `<1s` without running global library scans.
+- **Daily Deep Disk Reconciler (`RECONCILE_INTERVAL`)**:
+  - Configurable daily janitor (default: `24h` / `0 3 * * *`) that reconciles the on-disk `.strm` tree against SQLite state, safely pruning dead files and orphaned directories.
+- **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` using WAL mode (`series_state`, `movie_state`, `sync_queue`, `stream_variants`).
 - **Smart Series Update Scheduling Engine**:
   - Unactivated & `Ended` series skip fetching episode lists on scheduled sync runs (0 API calls!).
   - `Continuing` series skip checks until `current_date >= next_episode_air_date`.
@@ -75,7 +86,7 @@ services:
 
       # Timezone & Scheduling
       - TZ=America/Toronto
-      - SYNC_INTERVAL=1h
+      - SYNC_INTERVAL=4h
       - BATCH_SIZE=100 # Shared budget per run (50% movies / 50% series with rollover)
       - DISPATCHARR_ORDERING=-created_at # Server-side sorting prioritizing recent updates & additions
       - PAGE_SIZE=100 # Number of items fetched per API page request (Dispatcharr max: 100)
@@ -152,22 +163,28 @@ services:
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
 | `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
 | `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
+| `SYNC_INTERVAL` | `4h` | Background catalog staging interval (`4h`, `1h`, `0` for single run) |
+| `SYNC_CRON` | `""` | Optional 5-field cron schedule expression (e.g., `0 */4 * * *`) |
+| `RECONCILE_INTERVAL` | `24h` | Daily deep disk reconciliation janitor interval (Default: `24h`) |
+| `RECONCILE_CRON` | `""` | Optional 5-field cron expression for reconciler (e.g., `0 3 * * *`) |
+| `DISPATCHARR_WORKERS` | `1` | Number of concurrent workers staging from Dispatcharr |
+| `EMBY_WORKERS` | `1` | Number of concurrent workers processing queue tasks & Emby updates |
+| `EMBY_PACE_DELAY` | `100ms` | Delay between items processed by Emby workers to keep CPU cool |
 | `PAGE_SIZE` | `100` | Number of items fetched per API page request |
-| `PAGE_WORKERS` | `5` | Number of concurrent page fetch workers |
 | `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |
 | `ENABLE_NFO` | `false` | Enable local NFO metadata file generation (`false` = disabled by default, Emby uses TMDB scrapers) |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
-| `SYNC_INTERVAL` | `1h` | Background sync ticker duration (`1h`, `30m`, `0` for single run) |
-| `SYNC_CRON` | `""` | Optional 5-field cron schedule expression (e.g., `0 3 * * *`) |
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |
-| `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial sync pass on container startup |
-| `BATCH_SIZE` | `0` | Shared batch creation limit per run (`0` = Unlimited, `100` = 50 movies + 50 series with rollover) |
+| `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial staging pass on container startup |
+| `BATCH_SIZE` | `0` | Shared batch creation limit per run (`0` = Unlimited) |
 | `DISPATCHARR_ORDERING` | `-created_at` | Server-side ordering parameter for Dispatcharr VOD endpoints |
 | `EMBY_URL` | `""` | Optional Emby/Jellyfin server URL for library refresh hooks |
 | `EMBY_API_KEY` | `""` | Optional Emby/Jellyfin API key |
-| `EMBY_MEDIA_PATH` | `""` | Optional Emby internal mount path (e.g. `/media/strm`) for targeted `/Library/Media/Updated` rescans |
+| `EMBY_MEDIA_PATH` | `""` | Optional override: internal Emby mount path for `.strm` media folder |
+| `EMBY_TV_LIBRARY` | `""` | Optional override: library name if multiple TV libraries exist (e.g. `"TV shows"`) |
+| `EMBY_MOVIES_LIBRARY` | `""` | Optional override: library name if multiple Movie libraries exist (e.g. `"Movies"`) |
 
 ---
 
