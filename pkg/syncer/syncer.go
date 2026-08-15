@@ -1346,43 +1346,23 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 		}
 	}
 
-	realtimeTV := s.embyClient.HasRealtimeMonitor("series")
-	realtimeMovies := s.embyClient.HasRealtimeMonitor("movie")
+	log.Printf("[Worker #%d] Batch of %d item(s) written to disk (%d total tasks). Triggering Emby scan...", workerID, newCount, len(tasks))
 
-	if realtimeTV || realtimeMovies {
-		// Real-time filesystem monitoring is active:
-		// Halt disk writes and dynamically poll Emby for index confirmation of the sample item
-		log.Printf("[Worker #%d] Batch of %d new item(s) written to disk (%d total tasks). Polling Emby for index confirmation...", 
-			workerID, newCount, len(tasks))
-
-		if lastCreated != nil && (lastCreated.TMDBID != "" || lastCreated.Title != "") {
-			indexed := s.embyClient.VerifyItemIndexed(ctx, lastCreated.ItemType, lastCreated.TMDBID, lastCreated.IMDBID, lastCreated.Title, 45*time.Second)
-			if indexed {
-				log.Printf("[Worker #%d] Emby pickup verified for batch (Sample: %q). Continuing to next batch.", workerID, lastCreated.Title)
-			} else {
-				log.Printf("[Worker #%d] Index poll window elapsed for %d new item(s). Continuing to next batch.", workerID, newCount)
-			}
-		}
-
-		// If Emby is actively running a media library scan, pause worker until scan finishes completely
-		if s.embyClient.IsLibraryScanRunning(ctx) {
-			log.Printf("[Worker #%d] Emby media library scan is running. Pausing worker until scan finishes...", workerID)
-			s.embyClient.WaitForScanCompletion(ctx, 15*time.Minute)
-			log.Printf("[Worker #%d] Emby media library scan finished. Resuming worker.", workerID)
-		}
-	} else {
-		// Real-time filesystem monitoring is DISABLED:
-		// Trigger targeted library refresh via API and wait for scan completion
-		log.Printf("[Worker #%d] Realtime monitoring disabled. Triggering library refresh for batch of %d new item(s)...", workerID, newCount)
-		if hasTV {
-			_ = s.embyClient.RefreshTVLibrary(ctx)
-		}
-		if hasMovies {
-			_ = s.embyClient.RefreshMoviesLibrary(ctx)
-		}
-		s.embyClient.WaitForScanCompletion(ctx, 30*time.Second)
-		log.Printf("[Worker #%d] Emby scan complete for batch of %d new item(s). Continuing to next batch.", workerID, newCount)
+	// 1. Tell Emby to scan the updated libraries
+	if hasTV {
+		_ = s.embyClient.RefreshTVLibrary(ctx)
 	}
+	if hasMovies {
+		_ = s.embyClient.RefreshMoviesLibrary(ctx)
+	}
+
+	// 2. Wait 1s for Emby task state to flip to Running
+	time.Sleep(1 * time.Second)
+
+	// 3. Wait until Emby finishes scanning and returns to 100% Idle
+	log.Printf("[Worker #%d] Waiting for Emby to complete scan and reach Idle before next batch...", workerID)
+	s.embyClient.WaitForScanCompletion(ctx, 30*time.Minute)
+	log.Printf("[Worker #%d] Emby is Idle. Ready for next batch.", workerID)
 }
 
 func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (error, *itemSummary) {
