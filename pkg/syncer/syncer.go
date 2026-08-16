@@ -600,14 +600,12 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		}
 	}
 
-	if s.cfg.EnableNFO {
-		nfoUpdated, err := nfo.WriteActivationEpisodeNFO(actNFOPath, cleanTitle)
-		if err == nil {
-			if nfoUpdated {
-				created++
-			} else {
-				preserved++
-			}
+	nfoUpdated, err := nfo.WriteActivationEpisodeNFO(actNFOPath, cleanTitle)
+	if err == nil {
+		if nfoUpdated {
+			created++
+		} else {
+			preserved++
 		}
 	}
 	diskDur = time.Since(diskStart)
@@ -1476,10 +1474,8 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			if strmUpdated {
 				summary.STRMCreated = true
 			}
-			if s.cfg.EnableNFO {
-				actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
-				_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, st.Title)
-			}
+			actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
+			_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, st.Title)
 
 			// Clean up legacy Season 01 placeholder
 			season1Dir := filepath.Join(currentDir, "Season 01")
@@ -1618,14 +1614,18 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				season1Dir := filepath.Join(seriesDirPath, "Season 01")
 				specialsDir := filepath.Join(seriesDirPath, "Specials")
 				actStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title)))
+				actNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
 
 				needsReconcile := false
 				// Check if on-disk legacy Season 01 exists
 				if _, s1Err := os.Stat(season1Dir); s1Err == nil {
 					needsReconcile = true
 				}
-				// Check if Specials activation placeholder is missing on disk
+				// Check if Specials activation placeholder STRM or NFO is missing on disk
 				if _, actErr := os.Stat(actStrm); os.IsNotExist(actErr) {
+					needsReconcile = true
+				}
+				if _, actNFOErr := os.Stat(actNFO); os.IsNotExist(actNFOErr) {
 					needsReconcile = true
 				}
 
