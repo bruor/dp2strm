@@ -12,21 +12,21 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **4-Tier Quality Classification Waterfall**: Category ➜ Title ➜ Probe ➜ Fallback (0 network calls for category-tagged 4K content).
 - [x] **Circuit Breaker & Safe Fallback**: Halts active sync pass on HTTP 429 Too Many Requests rate limits and logs clear warnings without crashing; self-heals on subsequent runs.
 - [x] **Credential-Free STRM File Generator & `mtime` Preservation**: Writes `.strm` files with extensionless URLs and preserves timestamps via `os.Chtimes` to avoid Emby library re-scans.
-- [x] **Configurable Metadata NFO XML Generator (`pkg/nfo`)**: Creates `movie.nfo` and `tvshow.nfo` with `mtime` timestamp preservation when `ENABLE_NFO=true` (disabled by default so Emby scrapes TMDB/TVDB directly). Unactivated `S01E01.nfo` is created in Pass 1, then purged and touched on activation.
+- [x] **Configurable Metadata NFO XML Generator (`pkg/nfo`)**: Creates `movie.nfo` and `tvshow.nfo` with `mtime` timestamp preservation when `ENABLE_NFO=true` (disabled by default so Emby scrapes TMDB/TVDB directly). Unactivated `S00E99.nfo` instructions are always created in Pass 1, then purged on activation.
 - [x] **Artwork Downloader (`pkg/artwork`)**: Downloads `poster.jpg` and `fanart.jpg` into `.strm` item folders and tracks `?v=<hash>` query parameters to auto-update artwork when changed.
 - [x] **`dp2strm` Playback Handler & Clean Extensionless URL Architecture (`pkg/proxy`)**:
   - Serves sub-50ms HTTP `302 Found` redirects.
   - Movie URLs: `/play/movie/{movie_id}` (or `/play/movie/{movie_id}/4k`)
   - Completely obfuscates upstream subscriber credentials (`agy/agypassword`) from disk files and Emby library.
 - [x] **Specials-Based TV Series Activation & Video Bumper Architecture (`pkg/proxy`, `pkg/syncer`, `pkg/assets`)**:
-  - **Pass 1**: Generates posters, and `Specials/Show Name - S00E99 - Activate Series.strm` & `S00E99.nfo`.
-  - **Pass 2 (On Play)**: Immediate stream of embedded 5-second **FastStart MP4 video bumper (`activated.mp4`)**, while an async background worker writes Season 1 episodes and issues a targeted single-item Emby refresh (`POST /Items/{SeriesId}/Refresh`). **`S01E01` remains 100% unwatched** in the user's library history!
+  - **Pass 1**: Generates posters, and `Specials/Show Name - S00E99 - Activate Series.strm` & `S00E99.nfo` (`⚡ Play to Activate Series` instructions).
+  - **Pass 2 (On Play)**: Immediate stream of embedded 5-second **FastStart MP4 video bumper (`activated.mp4`)**, while an async background worker halts any active background global Emby scans (`DELETE /ScheduledTasks/Running/{Id}`), writes Season 1 episodes, and issues a targeted single-item Emby refresh (`POST /Items/{SeriesId}/Refresh`). **`S01E01` remains 100% unwatched** in the user's library history!
 - [x] **Universal TaskManager Batch Synchronization (`pkg/emby`, `pkg/syncer`)**:
   - Micro-batches (25–30 items) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and poll `GET /ScheduledTasks` once every 1s until Emby reaches **100% Idle** before releasing the next batch.
   - Replaced legacy per-item sleeps with zero-contention TaskManager synchronization.
 - [x] **Unified Multi-Tier Priority Queue Engine (`pkg/db`, `pkg/syncer`)**:
   - SQLite `sync_queue` ordered by `priority DESC, id ASC`.
-  - `PriorityVIP (100)`: On-demand user playback activations (immediate preemption).
+  - `PriorityVIP (100)`: On-demand user playback activations (immediate preemption & Emby background scan cancellation).
   - `PriorityReconcile (50)`: Daily reconciler disk upgrades & maintenance.
   - `PriorityAiring (30)`: Active series episode drops & background season chunks.
   - `PriorityBatch (10)`: Catalog ingestion backlog.

@@ -1020,12 +1020,25 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
+// CancelRunningEmbyScan cancels any active global media library scan in Emby to immediately clear the way for VIP item activations.
+func (s *Syncer) CancelRunningEmbyScan(ctx context.Context) error {
+	if s.embyClient != nil && s.embyClient.IsConfigured() {
+		return s.embyClient.CancelRunningLibraryScan(ctx)
+	}
+	return nil
+}
+
 // TriggerTargetedEmbySeriesRefresh triggers a targeted Emby rescan for the activated series by TMDB ID or title.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
 	go func() {
+		// Stop any background global scan to ensure the targeted item refresh is processed with zero delay
+		if s.embyClient != nil && s.embyClient.IsConfigured() {
+			_ = s.embyClient.CancelRunningLibraryScan(context.Background())
+		}
+
 		var tmdbID, imdbID, title string
 		if s.database != nil {
 			if st, _ := s.database.GetSeriesState(seriesID); st != nil {

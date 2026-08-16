@@ -495,3 +495,70 @@ func (c *Client) IsLibraryScanRunning(ctx context.Context) bool {
 	}
 	return false
 }
+
+// CancelRunningLibraryScan checks if a global media library scan (RefreshLibrary) is currently running in Emby and stops it immediately so high-priority activations are not delayed.
+func (c *Client) CancelRunningLibraryScan(ctx context.Context) error {
+	if !c.IsConfigured() {
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/ScheduledTasks", strings.TrimRight(c.cfg.EmbyURL, "/")), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+	req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil || resp == nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ScheduledTasks returned status %d", resp.StatusCode)
+	}
+
+	var tasks []struct {
+		ID    string `json:"Id"`
+		Key   string `json:"Key"`
+		State string `json:"State"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+		return err
+	}
+
+	for _, t := range tasks {
+		if t.Key == "RefreshLibrary" && (t.State == "Running" || t.State == "Cancelling") {
+			log.Printf("[Emby] ⚡ VIP Activation Priority: Stopping active global media library scan (Task ID: %s)...", t.ID)
+			stopURL := fmt.Sprintf("%s/ScheduledTasks/Running/%s", strings.TrimRight(c.cfg.EmbyURL, "/"), t.ID)
+			stopReq, sErr := http.NewRequestWithContext(ctx, http.MethodDelete, stopURL, nil)
+			if sErr != nil {
+				return sErr
+			}
+			stopReq.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+			stopReq.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+
+			stopResp, dErr := c.httpClient.Do(stopReq)
+			if dErr != nil {
+				return fmt.Errorf("failed to cancel scheduled task: %w", dErr)
+			}
+			defer stopResp.Body.Close()
+
+			if stopResp.StatusCode < 200 || stopResp.StatusCode >= 300 {
+				// Fallback to POST /ScheduledTasks/Running/{Id}/Delete for older Emby versions
+				postStopURL := fmt.Sprintf("%s/ScheduledTasks/Running/%s/Delete", strings.TrimRight(c.cfg.EmbyURL, "/"), t.ID)
+				if postReq, pErr := http.NewRequestWithContext(ctx, http.MethodPost, postStopURL, nil); pErr == nil {
+					postReq.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+					postReq.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+					if pResp, pe := c.httpClient.Do(postReq); pe == nil {
+						pResp.Body.Close()
+					}
+				}
+			}
+			log.Printf("[Emby] Active media library scan cancelled successfully.")
+			return nil
+		}
+	}
+	return nil
+}

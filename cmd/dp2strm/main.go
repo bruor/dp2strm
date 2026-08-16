@@ -81,6 +81,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
+		// Cancel any running global library scan so Emby is immediately free to process this VIP activation
+		_ = syncEngine.CancelRunningEmbyScan(ctx)
+
 		_, _, err := syncEngine.PopulateActivatedSeries(ctx, seriesID, "", "")
 		if err != nil {
 			log.Printf("[Activation] Error populating series ID %d: %v", seriesID, err)
@@ -94,6 +97,9 @@ func main() {
 		log.Printf("[Activation] User played Movie ID %d! Resolving provider streams and quality variants...", movieID)
 		mCtx, mCancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer mCancel()
+
+		// Cancel any running global library scan so Emby is immediately free to process this VIP activation
+		_ = syncEngine.CancelRunningEmbyScan(mCtx)
 
 		_, _, baseTargetURL, err := syncEngine.PopulateActivatedMovie(mCtx, movieID, "", "", 0, "")
 		if err != nil {

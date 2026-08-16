@@ -70,6 +70,22 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 					{"IndexNumber": 99, "ParentIndexNumber": 0},
 				},
 			})
+		case "/ScheduledTasks":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id":                        "task-12345",
+					"Key":                       "RefreshLibrary",
+					"State":                     "Running",
+					"CurrentProgressPercentage": 45.0,
+				},
+			})
+		case "/ScheduledTasks/Running/task-12345":
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		case "/Items/49/Refresh", "/Items/3/Refresh", "/Items/4/Refresh":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusNoContent)
@@ -127,5 +143,10 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 	// 6. Test VerifyItemIndexed
 	if !client.VerifyItemIndexed(ctx, "series", "254528", "", "The Hawk", 2*time.Second) {
 		t.Errorf("Expected VerifyItemIndexed to return true for '254528'")
+	}
+
+	// 7. Test CancelRunningLibraryScan
+	if err := client.CancelRunningLibraryScan(ctx); err != nil {
+		t.Errorf("CancelRunningLibraryScan failed: %v", err)
 	}
 }

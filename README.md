@@ -17,16 +17,16 @@
   - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
 - **Clean Extensionless Obfuscated URLs**: `.strm` files output clean extensionless URLs (`http://dp2strm:8080/play/movie/1058902`, `http://dp2strm:8080/play/series/30998/1/1`). Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
 - **Specials-Based TV Series Activation Lifecycle (`Specials/S00E99`)**:
-  - **Pass 1 (Lightweight Sync)**: Generates `tvshow.nfo`, posters, and a special placeholder `Specials/Show Name - S00E99 - Activate Series.strm`. Keeps initial library indexing blazing fast across thousands of series without cluttering Season 1.
-  - **Pass 2 (On Play)**: Clicking Play on the Special immediately streams an embedded **5-second FastStart video bumper (`activated.mp4`)**, while an async background worker writes Season 1 `.strm` files and triggers a targeted Emby series refresh. **`S01E01` remains 100% unwatched** in the user's history!
+  - **Pass 1 (Lightweight Sync)**: Generates posters and a special placeholder `Specials/Show Name - S00E99 - Activate Series.strm` accompanied by an explicit instructions NFO (`⚡ Play to Activate Series`). The activation NFO is always generated regardless of `ENABLE_NFO` so users have clear instructions in Emby's UI.
+  - **Pass 2 (On Play)**: Clicking Play on the Special immediately streams an embedded **5-second FastStart video bumper (`activated.mp4`)**, while an async background worker halts any active background global library scans, writes Season 1 `.strm` files, and triggers a targeted Emby series refresh. **`S01E01` remains 100% unwatched** in the user's history!
 - **On-Demand Movie Quality Activation**:
-  - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with 100% real NFO metadata and artwork.
-  - **On Play**: `handleMoviePlay` resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
+  - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with artwork (and NFO metadata if enabled).
+  - **On Play**: `handleMoviePlay` cancels any running background library scans, resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
   - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
 - **Dedicated Staged-Queue & Worker Pipeline**:
   - **Catalog Stager (`DISPATCHARR_WORKERS`)**: Fast, lightweight catalog staging runs on a timer (default: `4h`), populating the SQLite `sync_queue` without blocking on disk I/O or Emby scans.
   - **Universal TaskManager Batch Synchronization**: Micro-batches (e.g. 25–30 items) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and halt until Emby returns to **100% Idle** before releasing the next batch. Completely eliminates file collisions and race conditions.
-  - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show or movie, it jumps directly to the front of the queue (`PriorityVIP`); the requested show is activated immediately with instant `<50ms` streaming.
+  - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show or movie, it jumps directly to the front of the queue (`PriorityVIP`); any active background library scan is stopped instantly via `DELETE /ScheduledTasks/Running/{Id}` so Emby can index and stream the activated item with zero delay. Secondary activations stack safely without interference.
 - **Zero-Config Emby Library Auto-Discovery**:
   - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status.
   - Supports multi-library environments with optional name targeting (`EMBY_TV_LIBRARY`, `EMBY_MOVIES_LIBRARY`).
@@ -172,7 +172,7 @@ services:
 | `EMBY_PACE_DELAY` | `100ms` | Delay between items processed by Emby workers to keep CPU cool |
 | `PAGE_SIZE` | `100` | Number of items fetched per API page request |
 | `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |
-| `ENABLE_NFO` | `false` | Enable local NFO metadata file generation (`false` = disabled by default, Emby uses TMDB scrapers) |
+| `ENABLE_NFO` | `false` | Enable local NFO metadata generation for actual content (`false` = disabled by default so Emby scrapes TMDB/TVDB directly; synthetic `S00E99` instructions NFO is always generated) |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
