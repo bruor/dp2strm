@@ -25,7 +25,7 @@
   - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
 - **Dedicated Staged-Queue & Worker Pipeline**:
   - **Catalog Stager (`DISPATCHARR_WORKERS`)**: Fast, lightweight catalog staging runs on a timer (default: `4h`), populating the SQLite `sync_queue` without blocking on disk I/O or Emby scans.
-  - **Universal TaskManager Batch Synchronization**: Micro-batches (e.g. 25–30 items) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and halt until Emby returns to **100% Idle** before releasing the next batch. Completely eliminates file collisions and race conditions.
+  - **Universal TaskManager Batch Synchronization & Dynamic ETA**: Micro-batches (configured via `EMBY_BATCH_SIZE`, default: 25) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and halt until Emby returns to **100% Idle** before releasing the next batch. Completely eliminates file collisions and race conditions. Logs real-time overall queue progress (`Processed/Total [%]`, remaining items & batches) and dynamically estimates time-to-sync completion based on rolling average Emby library scan durations.
   - **⭐ VIP On-Demand User Playback (Priority 100)**: When a user presses play on an unactivated show or movie, it jumps directly to the front of the queue (`PriorityVIP`); any active background library scan is stopped instantly via `DELETE /ScheduledTasks/Running/{Id}` so Emby can index and stream the activated item with zero delay. Secondary activations stack safely without interference.
 - **Zero-Config Emby Library Auto-Discovery**:
   - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status.
@@ -169,6 +169,7 @@ services:
 | `RECONCILE_CRON` | `""` | Optional 5-field cron expression for reconciler (e.g., `0 3 * * *`) |
 | `DISPATCHARR_WORKERS` | `1` | Number of concurrent workers staging from Dispatcharr |
 | `EMBY_WORKERS` | `1` | Number of concurrent workers processing queue tasks & Emby updates |
+| `EMBY_BATCH_SIZE` | `25` | Micro-batch size of newly written media files before triggering Emby scan |
 | `EMBY_PACE_DELAY` | `100ms` | Delay between items processed by Emby workers to keep CPU cool |
 | `PAGE_SIZE` | `100` | Number of items fetched per API page request |
 | `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |

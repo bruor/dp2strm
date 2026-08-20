@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dp2strm/pkg/client"
 	"dp2strm/pkg/db"
@@ -245,3 +246,150 @@ func TestSyncSharedPassRollover(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		d        time.Duration
+		expected string
+	}{
+		{0, "0s"},
+		{-5 * time.Second, "0s"},
+		{45 * time.Second, "45s"},
+		{90 * time.Second, "1m 30s"},
+		{2 * time.Minute, "2m"},
+		{12*time.Minute + 5*time.Second, "12m 05s"},
+		{1*time.Hour + 23*time.Minute + 10*time.Second, "1h 23m"},
+		{2 * time.Hour, "2h"},
+	}
+
+	for _, tt := range tests {
+		actual := formatDuration(tt.d)
+		if actual != tt.expected {
+			t.Errorf("formatDuration(%v) = %q, expected %q", tt.d, actual, tt.expected)
+		}
+	}
+}
+
+func TestQueueProgressSummaryAndEstimation(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	cfg := &models.Config{
+		EmbyBatchSize: 30,
+	}
+	s := NewSyncer(cfg, nil, database)
+
+	// 1. Initial empty state
+	summary := s.GetQueueProgressSummary()
+	if summary.CompletedTasks != 0 || summary.RemainingTasks != 0 || summary.TotalTasks != 0 {
+		t.Errorf("Unexpected initial summary: %+v", summary)
+	}
+	if summary.RemainingString() != "0 items left" {
+		t.Errorf("Expected '0 items left', got %q", summary.RemainingString())
+	}
+	if summary.EstimateString() != "Sync complete" {
+		t.Errorf("Expected 'Sync complete', got %q", summary.EstimateString())
+	}
+
+	// 2. Enqueue 90 tasks
+	for i := 1; i <= 90; i++ {
+		_ = database.EnqueueTask("movie", i, "pass1", models.PriorityBatch)
+	}
+
+	summary = s.GetQueueProgressSummary()
+	if summary.PendingTasks != 90 || summary.RemainingTasks != 90 || summary.TotalTasks != 90 {
+		t.Errorf("Expected 90 pending tasks, got %+v", summary)
+	}
+	if summary.RemainingBatches != 3 {
+		t.Errorf("Expected 3 remaining batches (90 / 30), got %d", summary.RemainingBatches)
+	}
+	if summary.HasScanHistory {
+		t.Errorf("Expected HasScanHistory to be false before any scan")
+	}
+	if summary.ProgressString() != "0/90 (0.0%)" {
+		t.Errorf("Expected '0/90 (0.0%%%%)', got %q", summary.ProgressString())
+	}
+	if summary.RemainingString() != "90 item(s) left (~3 batches)" {
+		t.Errorf("Expected '90 item(s) left (~3 batches)', got %q", summary.RemainingString())
+	}
+	if summary.EstimateString() != "Est. remaining: calculating after first scan..." {
+		t.Errorf("Expected 'Est. remaining: calculating after first scan...', got %q", summary.EstimateString())
+	}
+
+	// 3. Record 1st Emby scan (30s) and 30 completed tasks
+	s.recordEmbyScanDuration(30 * time.Second)
+	s.progressMu.Lock()
+	s.completedTasks = 30
+	s.progressMu.Unlock()
+
+	// Simulate 30 tasks popped and completed (60 remaining in DB)
+	for i := 1; i <= 30; i++ {
+		_ = database.MarkTaskComplete(i)
+	}
+
+	summary = s.GetQueueProgressSummary()
+	if summary.CompletedTasks != 30 || summary.RemainingTasks != 60 || summary.TotalTasks != 90 {
+		t.Errorf("Expected 30 completed, 60 remaining, 90 total; got %+v", summary)
+	}
+	if summary.ProgressPct < 33.3 || summary.ProgressPct > 33.4 {
+		t.Errorf("Expected ~33.3%% progress, got %.2f%%", summary.ProgressPct)
+	}
+	if summary.RemainingBatches != 2 {
+		t.Errorf("Expected 2 remaining batches, got %d", summary.RemainingBatches)
+	}
+	if !summary.HasScanHistory {
+		t.Errorf("Expected HasScanHistory to be true")
+	}
+	if summary.AvgScanDuration != 30*time.Second {
+		t.Errorf("Expected AvgScanDuration 30s, got %v", summary.AvgScanDuration)
+	}
+	// 2 remaining batches * 30s avg = 60s (1m)
+	if summary.EstimatedDuration != 60*time.Second {
+		t.Errorf("Expected EstimatedDuration 60s, got %v", summary.EstimatedDuration)
+	}
+	if summary.EstimateString() != "Est. remaining: ~1m (avg 30s/batch)" {
+		t.Errorf("Expected 'Est. remaining: ~1m (avg 30s/batch)', got %q", summary.EstimateString())
+	}
+
+	// 4. Record 2nd Emby scan (40s) and 30 more completed tasks
+	s.recordEmbyScanDuration(40 * time.Second)
+	s.progressMu.Lock()
+	s.completedTasks = 60
+	s.progressMu.Unlock()
+
+	for i := 31; i <= 60; i++ {
+		_ = database.MarkTaskComplete(i)
+	}
+
+	summary = s.GetQueueProgressSummary()
+	if summary.CompletedTasks != 60 || summary.RemainingTasks != 30 || summary.TotalTasks != 90 {
+		t.Errorf("Expected 60 completed, 30 remaining, 90 total; got %+v", summary)
+	}
+	// Avg scan: (30s + 40s)/2 = 35s
+	if summary.AvgScanDuration != 35*time.Second {
+		t.Errorf("Expected AvgScanDuration 35s, got %v", summary.AvgScanDuration)
+	}
+	// 1 remaining batch * 35s avg = 35s
+	if summary.EstimatedDuration != 35*time.Second {
+		t.Errorf("Expected EstimatedDuration 35s, got %v", summary.EstimatedDuration)
+	}
+	if summary.EstimateString() != "Est. remaining: ~35s (avg 35s/batch)" {
+		t.Errorf("Expected 'Est. remaining: ~35s (avg 35s/batch)', got %q", summary.EstimateString())
+	}
+
+	// 5. Test resetCompletedTasks (retains scan duration history for future passes)
+	s.resetCompletedTasks()
+	summary = s.GetQueueProgressSummary()
+	if summary.CompletedTasks != 0 {
+		t.Errorf("Expected CompletedTasks reset to 0, got %d", summary.CompletedTasks)
+	}
+	if !summary.HasScanHistory || summary.AvgScanDuration != 35*time.Second {
+		t.Errorf("Expected scan history preserved after task count reset, got avg %v", summary.AvgScanDuration)
+	}
+}
+

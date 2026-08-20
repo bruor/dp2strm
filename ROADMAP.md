@@ -21,9 +21,11 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **Specials-Based TV Series Activation & Video Bumper Architecture (`pkg/proxy`, `pkg/syncer`, `pkg/assets`)**:
   - **Pass 1**: Generates posters, and `Specials/Show Name - S00E99 - Activate Series.strm` & `S00E99.nfo` (`⚡ Play to Activate Series` instructions).
   - **Pass 2 (On Play)**: Immediate stream of embedded 5-second **FastStart MP4 video bumper (`activated.mp4`)**, while an async background worker halts any active background global Emby scans (`DELETE /ScheduledTasks/Running/{Id}`), writes Season 1 episodes, and issues a targeted single-item Emby refresh (`POST /Items/{SeriesId}/Refresh`). **`S01E01` remains 100% unwatched** in the user's library history!
-- [x] **Universal TaskManager Batch Synchronization (`pkg/emby`, `pkg/syncer`)**:
-  - Micro-batches (25–30 items) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and poll `GET /ScheduledTasks` once every 1s until Emby reaches **100% Idle** before releasing the next batch.
+- [x] **Universal TaskManager Batch Synchronization & Dynamic ETA (`pkg/emby`, `pkg/syncer`)**:
+  - Micro-batches (`EMBY_BATCH_SIZE`, default: 25) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and poll `GET /ScheduledTasks` once every 1s until Emby reaches **100% Idle** before releasing the next batch.
   - Replaced legacy per-item sleeps with zero-contention TaskManager synchronization.
+  - Real-time overall queue progress logging (`Processed/Total [%]`, remaining items, and estimated batches remaining).
+  - Profiling of Emby library scan durations with dynamic ETA calculation based on rolling average refresh times.
 - [x] **Unified Multi-Tier Priority Queue Engine (`pkg/db`, `pkg/syncer`)**:
   - SQLite `sync_queue` ordered by `priority DESC, id ASC`.
   - `PriorityVIP (100)`: On-demand user playback activations (immediate preemption & Emby background scan cancellation).
