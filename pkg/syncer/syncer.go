@@ -35,6 +35,11 @@ type Syncer struct {
 	workerWg       sync.WaitGroup
 	mu             sync.Mutex
 
+	// VIP Series Activation coordinator
+	activationMu      sync.Mutex
+	activationCond    *sync.Cond
+	activeActivations int64
+
 	// Queue progress and Emby scan timing metrics
 	progressMu         sync.Mutex
 	completedTasks     int64
@@ -44,12 +49,14 @@ type Syncer struct {
 }
 
 func NewSyncer(cfg *models.Config, client *client.Client, database *db.DB) *Syncer {
-	return &Syncer{
+	s := &Syncer{
 		cfg:        cfg,
 		client:     client,
 		embyClient: emby.NewClient(cfg),
 		database:   database,
 	}
+	s.activationCond = sync.NewCond(&s.activationMu)
+	return s
 }
 
 func (s *Syncer) isCircuitTripped() bool {
@@ -1040,6 +1047,58 @@ func (s *Syncer) triggerEmbyRefresh(ctx context.Context) {
 	}
 }
 
+// BeginVIPActivation acquires a VIP series activation lock, halts any active global library scan,
+// and pauses background batch workers until all active series activations are complete.
+func (s *Syncer) BeginVIPActivation(ctx context.Context, seriesID int) func() {
+	s.activationMu.Lock()
+	s.activeActivations++
+	activeCount := s.activeActivations
+	s.activationMu.Unlock()
+
+	log.Printf("[Activation] ⚡ VIP lock acquired for Series ID %d (active: %d). Pausing background batch workers...", seriesID, activeCount)
+	_ = s.CancelRunningEmbyScan(ctx)
+
+	return func() {
+		s.activationMu.Lock()
+		s.activeActivations--
+		if s.activeActivations < 0 {
+			s.activeActivations = 0
+		}
+		remaining := s.activeActivations
+		if remaining == 0 {
+			s.activationCond.Broadcast()
+		}
+		s.activationMu.Unlock()
+
+		if remaining == 0 {
+			log.Printf("[Activation] ⚡ All VIP series activations completed. Resuming background batch workers.")
+		} else {
+			log.Printf("[Activation] ⚡ VIP activation for Series ID %d completed (%d still active).", seriesID, remaining)
+		}
+	}
+}
+
+// WaitForVIPActivations blocks if any VIP series activations are currently in progress.
+func (s *Syncer) WaitForVIPActivations(ctx context.Context) {
+	s.activationMu.Lock()
+	defer s.activationMu.Unlock()
+	for s.activeActivations > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		s.activationCond.Wait()
+	}
+}
+
+// IsVIPActivationInProgress returns whether any VIP activations are currently active.
+func (s *Syncer) IsVIPActivationInProgress() bool {
+	s.activationMu.Lock()
+	defer s.activationMu.Unlock()
+	return s.activeActivations > 0
+}
+
 // CancelRunningEmbyScan cancels any active global media library scan in Emby to immediately clear the way for VIP item activations.
 func (s *Syncer) CancelRunningEmbyScan(ctx context.Context) error {
 	if s.embyClient != nil && s.embyClient.IsConfigured() {
@@ -1301,6 +1360,9 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			continue
 		}
 
+		// Pause worker if any VIP series activations are in flight
+		s.WaitForVIPActivations(ctx)
+
 		// If Emby is actively running a media library scan, pause worker to let Emby finish cleanly
 		if s.embyClient.IsConfigured() && s.embyClient.IsLibraryScanRunning(ctx) {
 			log.Printf("[Worker #%d] Emby is currently performing a media library scan. Pausing worker until scan finishes...", workerID)
@@ -1311,6 +1373,9 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 				log.Printf("[Worker #%d] Emby media library scan completed in %s. Resuming worker.", workerID, formatDuration(scanDur))
 			}
 		}
+
+		// Check again after scan wait in case an activation just cancelled the scan
+		s.WaitForVIPActivations(ctx)
 
 		task, err := s.database.PopNextTask(preferredType)
 		if err != nil {
@@ -1447,6 +1512,9 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 		return
 	}
 
+	// Pause if any VIP activations are in flight before triggering global scan
+	s.WaitForVIPActivations(ctx)
+
 	summaryBeforeScan := s.GetQueueProgressSummary()
 	log.Printf("[Worker #%d] Batch complete: %d new .strm file(s) written (%s). Triggering Emby library scan... | Overall Progress: %s | %s | %s",
 		workerID, newCount, batchSummaryStr, summaryBeforeScan.ProgressString(), summaryBeforeScan.RemainingString(), summaryBeforeScan.EstimateString())
@@ -1469,6 +1537,9 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 			workerID, formatDuration(scanDur), formatDuration(summary.AvgScanDuration), summary.CompletedScans,
 			summary.ProgressString(), summary.RemainingString(), summary.EstimateString())
 	}
+
+	// If a VIP activation cancelled the scan during WaitForScanCompletion, wait for it to finish
+	s.WaitForVIPActivations(ctx)
 }
 
 func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (error, *itemSummary) {

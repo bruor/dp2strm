@@ -81,8 +81,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		// Cancel any running global library scan so Emby is immediately free to process this VIP activation
-		_ = syncEngine.CancelRunningEmbyScan(ctx)
+		// Acquire VIP activation lock to halt any running global scan and pause background batch workers
+		unlock := syncEngine.BeginVIPActivation(ctx, seriesID)
+		defer unlock()
 
 		_, _, err := syncEngine.PopulateActivatedSeries(ctx, seriesID, "", "")
 		if err != nil {
@@ -90,6 +91,7 @@ func main() {
 			return
 		}
 		syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
+		time.Sleep(2 * time.Second) // Brief settle window for Emby to index series
 	}
 
 	// Movie Activation Callback Worker (auto-resolves canonical title & folder)

@@ -28,7 +28,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - Profiling of Emby library scan durations with dynamic ETA calculation based on rolling average refresh times.
 - [x] **Unified Multi-Tier Priority Queue Engine (`pkg/db`, `pkg/syncer`)**:
   - SQLite `sync_queue` ordered by `priority DESC, id ASC`.
-  - `PriorityVIP (100)`: On-demand user playback activations (immediate preemption & Emby background scan cancellation).
+  - `PriorityVIP (100)`: On-demand series playback activations (reference-counted VIP lock, background worker pause guard, and Emby global scan cancellation).
   - `PriorityReconcile (50)`: Daily reconciler disk upgrades & maintenance.
   - `PriorityAiring (30)`: Active series episode drops & background season chunks.
   - `PriorityBatch (10)`: Catalog ingestion backlog.

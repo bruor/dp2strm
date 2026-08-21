@@ -399,3 +399,71 @@ func TestQueueProgressSummaryAndEstimation(t *testing.T) {
 	}
 }
 
+func TestVIPActivationPauseCoordination(t *testing.T) {
+	cfg := &models.Config{
+		EmbyBatchSize: 30,
+	}
+	s := NewSyncer(cfg, nil, nil)
+
+	if s.IsVIPActivationInProgress() {
+		t.Errorf("Expected IsVIPActivationInProgress to be false initially")
+	}
+
+	ctx := context.Background()
+
+	// 1. Acquire VIP lock for Show A
+	unlockA := s.BeginVIPActivation(ctx, 1001)
+	if !s.IsVIPActivationInProgress() {
+		t.Errorf("Expected IsVIPActivationInProgress to be true after Show A lock")
+	}
+
+	// 2. Acquire VIP lock for Show B (concurrent activation)
+	unlockB := s.BeginVIPActivation(ctx, 1002)
+	if !s.IsVIPActivationInProgress() {
+		t.Errorf("Expected IsVIPActivationInProgress to be true with 2 locks")
+	}
+
+	// 3. Worker trying to wait should block while activations are active
+	workerUnblocked := make(chan struct{})
+	go func() {
+		s.WaitForVIPActivations(ctx)
+		close(workerUnblocked)
+	}()
+
+	// Verify worker is still blocked
+	select {
+	case <-workerUnblocked:
+		t.Fatalf("Worker unblocked prematurely while Show A and B are active!")
+	case <-time.After(50 * time.Millisecond):
+		// Expected to remain blocked
+	}
+
+	// 4. Show A finishes (Show B still in progress)
+	unlockA()
+	if !s.IsVIPActivationInProgress() {
+		t.Errorf("Expected IsVIPActivationInProgress to be true while Show B is still active")
+	}
+
+	// Verify worker is STILL blocked
+	select {
+	case <-workerUnblocked:
+		t.Fatalf("Worker unblocked prematurely while Show B is still active!")
+	case <-time.After(50 * time.Millisecond):
+		// Expected to remain blocked
+	}
+
+	// 5. Show B finishes (all activations complete)
+	unlockB()
+	if s.IsVIPActivationInProgress() {
+		t.Errorf("Expected IsVIPActivationInProgress to be false after all locks released")
+	}
+
+	// Verify worker unblocks cleanly
+	select {
+	case <-workerUnblocked:
+		// Success!
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Worker failed to unblock after all VIP activation locks were released")
+	}
+}
+
