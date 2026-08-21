@@ -276,8 +276,11 @@ func TestSQLiteStateEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDetailedQueueStats failed: %v", err)
 	}
-	if detailedStats.Adds != 2 || detailedStats.Updates != 1 || detailedStats.Reconciles != 1 {
+	if detailedStats.MovieAdds != 2 || detailedStats.SeriesUpdates != 1 || detailedStats.MovieReconciles != 1 {
 		t.Errorf("Unexpected detailed stats: %+v", detailedStats)
+	}
+	if detailedStats.TotalMovies() != 3 || detailedStats.TotalSeries() != 1 {
+		t.Errorf("Expected TotalMovies=3, TotalSeries=1; got %d, %d", detailedStats.TotalMovies(), detailedStats.TotalSeries())
 	}
 
 	// Test Delta Staging: First batch stages new movies and enqueues pass1 tasks
@@ -296,8 +299,8 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 
 	statsAfterFirstStage, _ := d.GetDetailedQueueStats()
-	if statsAfterFirstStage.Adds != 4 { // 2 original + 2 new
-		t.Errorf("Expected 4 Adds in queue, got %d", statsAfterFirstStage.Adds)
+	if statsAfterFirstStage.MovieAdds != 4 { // 2 original + 2 new
+		t.Errorf("Expected 4 MovieAdds in queue, got %d", statsAfterFirstStage.MovieAdds)
 	}
 
 	// Second staging pass with same movies (should update state timestamp but NOT re-enqueue)
@@ -306,7 +309,7 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 
 	statsAfterSecondStage, _ := d.GetDetailedQueueStats()
-	if statsAfterSecondStage.Adds != 4 {
-		t.Errorf("Expected Adds count to remain 4 (no duplicate enqueue), got %d", statsAfterSecondStage.Adds)
+	if statsAfterSecondStage.MovieAdds != 4 {
+		t.Errorf("Expected MovieAdds count to remain 4 (no duplicate enqueue), got %d", statsAfterSecondStage.MovieAdds)
 	}
 }

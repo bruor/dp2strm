@@ -305,8 +305,11 @@ func TestQueueProgressSummaryAndEstimation(t *testing.T) {
 	if summary.PendingTasks != 90 || summary.RemainingTasks != 90 || summary.TotalTasks != 90 {
 		t.Errorf("Expected 90 pending tasks, got %+v", summary)
 	}
-	if summary.AddsCount != 90 {
-		t.Errorf("Expected 90 AddsCount, got %d", summary.AddsCount)
+	if summary.MovieAdds != 90 {
+		t.Errorf("Expected 90 MovieAdds, got %d", summary.MovieAdds)
+	}
+	if summary.TotalMovies() != 90 {
+		t.Errorf("Expected 90 TotalMovies, got %d", summary.TotalMovies())
 	}
 	if summary.RemainingBatches != 3 {
 		t.Errorf("Expected 3 remaining batches (90 / 30), got %d", summary.RemainingBatches)
@@ -317,8 +320,8 @@ func TestQueueProgressSummaryAndEstimation(t *testing.T) {
 	if summary.ProgressString() != "0/90 (0.0%)" {
 		t.Errorf("Expected '0/90 (0.0%%%%)', got %q", summary.ProgressString())
 	}
-	if summary.RemainingString() != "90 task(s) remaining (90 Adds) (~3 batches)" {
-		t.Errorf("Expected '90 task(s) remaining (90 Adds) (~3 batches)', got %q", summary.RemainingString())
+	if summary.RemainingString() != "90 task(s) remaining [90 Movies: 90 Adds] (~3 batches)" {
+		t.Errorf("Expected '90 task(s) remaining [90 Movies: 90 Adds] (~3 batches)', got %q", summary.RemainingString())
 	}
 	if summary.EstimateString() != "Est. remaining: calculating after first scan..." {
 		t.Errorf("Expected 'Est. remaining: calculating after first scan...', got %q", summary.EstimateString())

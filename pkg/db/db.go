@@ -703,16 +703,28 @@ func (d *DB) ResetInProgressTasks() error {
 	return err
 }
 
-// QueueStats represents queue status and breakdown by task action type.
+// QueueStats represents queue status and breakdown by media type and task action type.
 type QueueStats struct {
-	Pending     int
-	InProgress  int
-	Failed      int
-	Adds        int // pass1
-	Updates     int // update_episodes
-	Reconciles  int // reconcile_series, reconcile_movie
-	Activations int // activate
-	Deletes     int // delete
+	Pending           int
+	InProgress        int
+	Failed            int
+	MovieAdds         int // movie + pass1
+	MovieReconciles   int // movie + reconcile_movie
+	MovieActivations  int // movie + activate
+	MovieDeletes      int // movie + delete
+	SeriesAdds        int // series + pass1
+	SeriesUpdates     int // series + update_episodes
+	SeriesReconciles  int // series + reconcile_series
+	SeriesActivations int // series + activate
+	SeriesDeletes     int // series + delete
+}
+
+func (q QueueStats) TotalMovies() int {
+	return q.MovieAdds + q.MovieReconciles + q.MovieActivations + q.MovieDeletes
+}
+
+func (q QueueStats) TotalSeries() int {
+	return q.SeriesAdds + q.SeriesUpdates + q.SeriesReconciles + q.SeriesActivations + q.SeriesDeletes
 }
 
 // GetQueueStats returns the count of pending, in_progress, and failed tasks in the queue.
@@ -724,22 +736,28 @@ func (d *DB) GetQueueStats() (pending, inProgress, failed int, err error) {
 	return stats.Pending, stats.InProgress, stats.Failed, nil
 }
 
-// GetDetailedQueueStats returns full queue counts and breakdown by action type.
+// GetDetailedQueueStats returns full queue counts and breakdown by media type and action type.
 func (d *DB) GetDetailedQueueStats() (QueueStats, error) {
 	query := `
 	SELECT 
 		SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN action = 'pass1' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
-		SUM(CASE WHEN action = 'update_episodes' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
-		SUM(CASE WHEN action LIKE 'reconcile%' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
-		SUM(CASE WHEN action = 'activate' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
-		SUM(CASE WHEN action = 'delete' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END)
+		SUM(CASE WHEN item_type = 'movie' AND action = 'pass1' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'movie' AND action LIKE 'reconcile%' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'movie' AND action = 'activate' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'movie' AND action = 'delete' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'series' AND action = 'pass1' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'series' AND action = 'update_episodes' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'series' AND action LIKE 'reconcile%' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'series' AND action = 'activate' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN item_type = 'series' AND action = 'delete' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END)
 	FROM sync_queue
 	`
-	var p, ip, f, adds, updates, reconciles, acts, dels sql.NullInt64
-	err := d.conn.QueryRow(query).Scan(&p, &ip, &f, &adds, &updates, &reconciles, &acts, &dels)
+	var p, ip, f sql.NullInt64
+	var mAdds, mRec, mAct, mDel sql.NullInt64
+	var sAdds, sUpd, sRec, sAct, sDel sql.NullInt64
+	err := d.conn.QueryRow(query).Scan(&p, &ip, &f, &mAdds, &mRec, &mAct, &mDel, &sAdds, &sUpd, &sRec, &sAct, &sDel)
 	if err != nil {
 		return QueueStats{}, err
 	}
@@ -753,20 +771,32 @@ func (d *DB) GetDetailedQueueStats() (QueueStats, error) {
 	if f.Valid {
 		stats.Failed = int(f.Int64)
 	}
-	if adds.Valid {
-		stats.Adds = int(adds.Int64)
+	if mAdds.Valid {
+		stats.MovieAdds = int(mAdds.Int64)
 	}
-	if updates.Valid {
-		stats.Updates = int(updates.Int64)
+	if mRec.Valid {
+		stats.MovieReconciles = int(mRec.Int64)
 	}
-	if reconciles.Valid {
-		stats.Reconciles = int(reconciles.Int64)
+	if mAct.Valid {
+		stats.MovieActivations = int(mAct.Int64)
 	}
-	if acts.Valid {
-		stats.Activations = int(acts.Int64)
+	if mDel.Valid {
+		stats.MovieDeletes = int(mDel.Int64)
 	}
-	if dels.Valid {
-		stats.Deletes = int(dels.Int64)
+	if sAdds.Valid {
+		stats.SeriesAdds = int(sAdds.Int64)
+	}
+	if sUpd.Valid {
+		stats.SeriesUpdates = int(sUpd.Int64)
+	}
+	if sRec.Valid {
+		stats.SeriesReconciles = int(sRec.Int64)
+	}
+	if sAct.Valid {
+		stats.SeriesActivations = int(sAct.Int64)
+	}
+	if sDel.Valid {
+		stats.SeriesDeletes = int(sDel.Int64)
 	}
 	return stats, nil
 }

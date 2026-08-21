@@ -1387,19 +1387,33 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 		return
 	}
 
-	var batchAdds, batchUpdates, batchReconciles, batchActs, batchDels int
+	var mAdds, mRec, mAct, mDel int
+	var sAdds, sUpd, sRec, sAct, sDel int
 	for _, t := range tasks {
-		switch {
-		case t.Action == "pass1":
-			batchAdds++
-		case t.Action == "update_episodes":
-			batchUpdates++
-		case strings.HasPrefix(t.Action, "reconcile"):
-			batchReconciles++
-		case t.Action == "activate":
-			batchActs++
-		case t.Action == "delete":
-			batchDels++
+		if t.ItemType == "movie" {
+			switch {
+			case t.Action == "pass1":
+				mAdds++
+			case strings.HasPrefix(t.Action, "reconcile"):
+				mRec++
+			case t.Action == "activate":
+				mAct++
+			case t.Action == "delete":
+				mDel++
+			}
+		} else {
+			switch {
+			case t.Action == "pass1":
+				sAdds++
+			case t.Action == "update_episodes":
+				sUpd++
+			case strings.HasPrefix(t.Action, "reconcile"):
+				sRec++
+			case t.Action == "activate":
+				sAct++
+			case t.Action == "delete":
+				sDel++
+			}
 		}
 		_ = s.database.MarkTaskComplete(t.ID)
 	}
@@ -1408,27 +1422,20 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	s.completedTasks += int64(len(tasks))
 	s.progressMu.Unlock()
 
-	var bParts []string
-	if batchAdds > 0 {
-		bParts = append(bParts, fmt.Sprintf("%d Adds", batchAdds))
+	var batchSections []string
+	totalM := mAdds + mRec + mAct + mDel
+	totalS := sAdds + sUpd + sRec + sAct + sDel
+	if mStr := formatActionBreakdown(totalM, "Movies", mAdds, 0, mRec, mAct, mDel); mStr != "" {
+		batchSections = append(batchSections, mStr)
 	}
-	if batchUpdates > 0 {
-		bParts = append(bParts, fmt.Sprintf("%d Updates", batchUpdates))
+	if sStr := formatActionBreakdown(totalS, "Series", sAdds, sUpd, sRec, sAct, sDel); sStr != "" {
+		batchSections = append(batchSections, sStr)
 	}
-	if batchReconciles > 0 {
-		bParts = append(bParts, fmt.Sprintf("%d Reconciles", batchReconciles))
-	}
-	if batchActs > 0 {
-		bParts = append(bParts, fmt.Sprintf("%d Activations", batchActs))
-	}
-	if batchDels > 0 {
-		bParts = append(bParts, fmt.Sprintf("%d Deletes", batchDels))
-	}
-	batchSummaryStr := strings.Join(bParts, ", ")
+	batchSummaryStr := strings.Join(batchSections, " | ")
 	if batchSummaryStr == "" {
 		batchSummaryStr = fmt.Sprintf("%d total tasks", len(tasks))
 	} else {
-		batchSummaryStr = fmt.Sprintf("%d total tasks: %s", len(tasks), batchSummaryStr)
+		batchSummaryStr = fmt.Sprintf("%d total tasks [%s]", len(tasks), batchSummaryStr)
 	}
 
 	if !s.embyClient.IsConfigured() || newCount == 0 {
@@ -1808,6 +1815,32 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 	return nil
 }
 
+func formatActionBreakdown(total int, label string, adds, updates, reconciles, acts, dels int) string {
+	if total == 0 {
+		return ""
+	}
+	var sub []string
+	if adds > 0 {
+		sub = append(sub, fmt.Sprintf("%d Adds", adds))
+	}
+	if updates > 0 {
+		sub = append(sub, fmt.Sprintf("%d Updates", updates))
+	}
+	if reconciles > 0 {
+		sub = append(sub, fmt.Sprintf("%d Reconciles", reconciles))
+	}
+	if acts > 0 {
+		sub = append(sub, fmt.Sprintf("%d Activations", acts))
+	}
+	if dels > 0 {
+		sub = append(sub, fmt.Sprintf("%d Deletes", dels))
+	}
+	if len(sub) == 0 {
+		return fmt.Sprintf("%d %s", total, label)
+	}
+	return fmt.Sprintf("%d %s: %s", total, label, strings.Join(sub, ", "))
+}
+
 // QueueProgressSummary captures real-time queue completion status and Emby refresh time estimations.
 type QueueProgressSummary struct {
 	CompletedTasks    int64
@@ -1824,12 +1857,24 @@ type QueueProgressSummary struct {
 	CompletedScans    int64
 	EstimatedDuration time.Duration
 	HasScanHistory    bool
-	// Task Action Breakdown
-	AddsCount        int
-	UpdatesCount     int
-	ReconcilesCount  int
-	ActivationsCount int
-	DeletesCount     int
+	// Media Type & Action Breakdown
+	MovieAdds         int
+	MovieReconciles   int
+	MovieActivations  int
+	MovieDeletes      int
+	SeriesAdds        int
+	SeriesUpdates     int
+	SeriesReconciles  int
+	SeriesActivations int
+	SeriesDeletes     int
+}
+
+func (p QueueProgressSummary) TotalMovies() int {
+	return p.MovieAdds + p.MovieReconciles + p.MovieActivations + p.MovieDeletes
+}
+
+func (p QueueProgressSummary) TotalSeries() int {
+	return p.SeriesAdds + p.SeriesUpdates + p.SeriesReconciles + p.SeriesActivations + p.SeriesDeletes
 }
 
 // GetQueueProgressSummary queries database queue state and computes overall progress and estimated time.
@@ -1890,11 +1935,15 @@ func (s *Syncer) GetQueueProgressSummary() QueueProgressSummary {
 		CompletedScans:    scans,
 		EstimatedDuration: estDur,
 		HasScanHistory:    hasHistory,
-		AddsCount:         qStats.Adds,
-		UpdatesCount:      qStats.Updates,
-		ReconcilesCount:   qStats.Reconciles,
-		ActivationsCount:  qStats.Activations,
-		DeletesCount:      qStats.Deletes,
+		MovieAdds:         qStats.MovieAdds,
+		MovieReconciles:   qStats.MovieReconciles,
+		MovieActivations:  qStats.MovieActivations,
+		MovieDeletes:      qStats.MovieDeletes,
+		SeriesAdds:        qStats.SeriesAdds,
+		SeriesUpdates:     qStats.SeriesUpdates,
+		SeriesReconciles:  qStats.SeriesReconciles,
+		SeriesActivations: qStats.SeriesActivations,
+		SeriesDeletes:     qStats.SeriesDeletes,
 	}
 }
 
@@ -1944,26 +1993,17 @@ func (p QueueProgressSummary) RemainingString() string {
 	if p.RemainingTasks == 0 {
 		return "0 tasks left"
 	}
-	var parts []string
-	if p.AddsCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d Adds", p.AddsCount))
+	var sections []string
+	if mStr := formatActionBreakdown(p.TotalMovies(), "Movies", p.MovieAdds, 0, p.MovieReconciles, p.MovieActivations, p.MovieDeletes); mStr != "" {
+		sections = append(sections, mStr)
 	}
-	if p.UpdatesCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d Updates", p.UpdatesCount))
-	}
-	if p.ReconcilesCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d Reconciles", p.ReconcilesCount))
-	}
-	if p.ActivationsCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d Activations", p.ActivationsCount))
-	}
-	if p.DeletesCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d Deletes", p.DeletesCount))
+	if sStr := formatActionBreakdown(p.TotalSeries(), "Series", p.SeriesAdds, p.SeriesUpdates, p.SeriesReconciles, p.SeriesActivations, p.SeriesDeletes); sStr != "" {
+		sections = append(sections, sStr)
 	}
 
 	breakdown := ""
-	if len(parts) > 0 {
-		breakdown = fmt.Sprintf(" (%s)", strings.Join(parts, ", "))
+	if len(sections) > 0 {
+		breakdown = fmt.Sprintf(" [%s]", strings.Join(sections, " | "))
 	}
 
 	if p.RemainingBatches <= 1 {
