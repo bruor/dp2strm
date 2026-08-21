@@ -1346,7 +1346,7 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		if !batchStarted {
 			batchStarted = true
 			summary := s.GetQueueProgressSummary()
-			log.Printf("[Worker #%d] Handling next batch of up to %d items... | Overall Progress: %s | %s | %s",
+			log.Printf("[Worker #%d] Processing batch (target: %d new files)... | Overall Progress: %s | %s | %s",
 				workerID, batchSize, summary.ProgressString(), summary.RemainingString(), summary.EstimateString())
 		}
 
@@ -1387,7 +1387,20 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 		return
 	}
 
+	var batchAdds, batchUpdates, batchReconciles, batchActs, batchDels int
 	for _, t := range tasks {
+		switch {
+		case t.Action == "pass1":
+			batchAdds++
+		case t.Action == "update_episodes":
+			batchUpdates++
+		case strings.HasPrefix(t.Action, "reconcile"):
+			batchReconciles++
+		case t.Action == "activate":
+			batchActs++
+		case t.Action == "delete":
+			batchDels++
+		}
 		_ = s.database.MarkTaskComplete(t.ID)
 	}
 
@@ -1395,18 +1408,41 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	s.completedTasks += int64(len(tasks))
 	s.progressMu.Unlock()
 
+	var bParts []string
+	if batchAdds > 0 {
+		bParts = append(bParts, fmt.Sprintf("%d Adds", batchAdds))
+	}
+	if batchUpdates > 0 {
+		bParts = append(bParts, fmt.Sprintf("%d Updates", batchUpdates))
+	}
+	if batchReconciles > 0 {
+		bParts = append(bParts, fmt.Sprintf("%d Reconciles", batchReconciles))
+	}
+	if batchActs > 0 {
+		bParts = append(bParts, fmt.Sprintf("%d Activations", batchActs))
+	}
+	if batchDels > 0 {
+		bParts = append(bParts, fmt.Sprintf("%d Deletes", batchDels))
+	}
+	batchSummaryStr := strings.Join(bParts, ", ")
+	if batchSummaryStr == "" {
+		batchSummaryStr = fmt.Sprintf("%d total tasks", len(tasks))
+	} else {
+		batchSummaryStr = fmt.Sprintf("%d total tasks: %s", len(tasks), batchSummaryStr)
+	}
+
 	if !s.embyClient.IsConfigured() || newCount == 0 {
 		if newCount == 0 && len(tasks) > 0 {
 			summary := s.GetQueueProgressSummary()
-			log.Printf("[Worker #%d] Batch of %d item(s) processed (all up to date on disk). | Overall Progress: %s | %s",
-				workerID, len(tasks), summary.ProgressString(), summary.RemainingString())
+			log.Printf("[Worker #%d] Batch of %d item(s) processed (all up to date on disk: %s). | Overall Progress: %s | %s",
+				workerID, len(tasks), batchSummaryStr, summary.ProgressString(), summary.RemainingString())
 		}
 		return
 	}
 
 	summaryBeforeScan := s.GetQueueProgressSummary()
-	log.Printf("[Worker #%d] Batch of %d item(s) written to disk (%d total tasks). Triggering Emby library scan... | Overall Progress: %s | %s | %s",
-		workerID, newCount, len(tasks), summaryBeforeScan.ProgressString(), summaryBeforeScan.RemainingString(), summaryBeforeScan.EstimateString())
+	log.Printf("[Worker #%d] Batch complete: %d new .strm file(s) written (%s). Triggering Emby library scan... | Overall Progress: %s | %s | %s",
+		workerID, newCount, batchSummaryStr, summaryBeforeScan.ProgressString(), summaryBeforeScan.RemainingString(), summaryBeforeScan.EstimateString())
 
 	scanStart := time.Now()
 
@@ -1599,6 +1635,23 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			}
 		}
 
+		// Check if Movie.strm is missing on disk; if so, regenerate it
+		strmPath := filepath.Join(currentDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(mst.Title)))
+		if _, statErr := os.Stat(strmPath); os.IsNotExist(statErr) {
+			movieModel := models.Movie{
+				ID:     mst.MovieID,
+				TMDBID: mst.TMDBID,
+				IMDBID: mst.IMDBID,
+				Name:   mst.Title,
+				Year:   mst.Year,
+			}
+			_, _, strmCreated, _, _, _ := s.processSingleMovieProfiled(ctx, movieModel, false)
+			if strmCreated {
+				summary.STRMCreated = true
+				log.Printf("[Worker] Restored missing Movie STRM file on disk: %q", strmPath)
+			}
+		}
+
 		if s.embyClient.IsConfigured() && summary.STRMCreated {
 			_ = s.embyClient.NotifyMediaUpdated(ctx, "movie", mst.FolderName)
 		}
@@ -1679,7 +1732,7 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
-	// 2. Scan and enqueue unactivated TV Shows needing Specials S00E99 upgrade
+	// 2. Scan and enqueue unactivated TV Shows needing Specials S00E99 upgrade or restored
 	tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
 	if s.database != nil {
 		unactivated, err := s.database.GetUnactivatedSeries()
@@ -1716,18 +1769,34 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
-	// 3. Scan and enqueue Movies needing folder ID upgrade
+	// 3. Scan and enqueue Movies needing folder ID upgrade or missing STRM file restoration
 	moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
-	if entries, err := os.ReadDir(moviesRoot); err == nil && s.database != nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			if !strings.Contains(name, "[tmdbid=") && !strings.Contains(name, "[imdbid=") {
-				title, year := sanitizer.ExtractYearAndTitle(name)
-				mst, _ := s.database.FindMovieByTitleAndYear(title, year)
-				if mst != nil && mst.FolderName != "" && mst.FolderName != name {
+	if s.database != nil {
+		allMovies, err := s.database.GetAllMovieStates()
+		if err == nil {
+			for _, mst := range allMovies {
+				folderName := mst.FolderName
+				if folderName == "" {
+					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(mst.Title), mst.Year, mst.TMDBID, mst.IMDBID)
+				}
+				movieDir := filepath.Join(moviesRoot, folderName)
+				strmPath := filepath.Join(movieDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(mst.Title)))
+
+				needsReconcile := false
+				if _, statErr := os.Stat(strmPath); os.IsNotExist(statErr) {
+					needsReconcile = true
+				}
+				if mst.Year > 0 {
+					legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(mst.Title), mst.Year)
+					legacyDir := filepath.Join(moviesRoot, legacyFolderName)
+					if legacyDir != movieDir {
+						if _, statErr := os.Stat(legacyDir); statErr == nil {
+							needsReconcile = true
+						}
+					}
+				}
+
+				if needsReconcile {
 					_ = s.database.EnqueueTask("movie", mst.MovieID, "reconcile_movie", models.PriorityReconcile)
 					reconcileCount++
 				}
@@ -1755,6 +1824,12 @@ type QueueProgressSummary struct {
 	CompletedScans    int64
 	EstimatedDuration time.Duration
 	HasScanHistory    bool
+	// Task Action Breakdown
+	AddsCount        int
+	UpdatesCount     int
+	ReconcilesCount  int
+	ActivationsCount int
+	DeletesCount     int
 }
 
 // GetQueueProgressSummary queries database queue state and computes overall progress and estimated time.
@@ -1766,12 +1841,12 @@ func (s *Syncer) GetQueueProgressSummary() QueueProgressSummary {
 	lastScanDur := s.lastScanDuration
 	s.progressMu.Unlock()
 
-	var pending, inProgress, failed int
+	var qStats db.QueueStats
 	if s.database != nil {
-		pending, inProgress, failed, _ = s.database.GetQueueStats()
+		qStats, _ = s.database.GetDetailedQueueStats()
 	}
 
-	remaining := pending + inProgress
+	remaining := qStats.Pending + qStats.InProgress
 	total := completed + int64(remaining)
 
 	var pct float64
@@ -1802,9 +1877,9 @@ func (s *Syncer) GetQueueProgressSummary() QueueProgressSummary {
 
 	return QueueProgressSummary{
 		CompletedTasks:    completed,
-		PendingTasks:      pending,
-		InProgressTasks:   inProgress,
-		FailedTasks:       failed,
+		PendingTasks:      qStats.Pending,
+		InProgressTasks:   qStats.InProgress,
+		FailedTasks:       qStats.Failed,
 		RemainingTasks:    remaining,
 		TotalTasks:        total,
 		ProgressPct:       pct,
@@ -1815,6 +1890,11 @@ func (s *Syncer) GetQueueProgressSummary() QueueProgressSummary {
 		CompletedScans:    scans,
 		EstimatedDuration: estDur,
 		HasScanHistory:    hasHistory,
+		AddsCount:         qStats.Adds,
+		UpdatesCount:      qStats.Updates,
+		ReconcilesCount:   qStats.Reconciles,
+		ActivationsCount:  qStats.Activations,
+		DeletesCount:      qStats.Deletes,
 	}
 }
 
@@ -1862,12 +1942,34 @@ func (p QueueProgressSummary) ProgressString() string {
 
 func (p QueueProgressSummary) RemainingString() string {
 	if p.RemainingTasks == 0 {
-		return "0 items left"
+		return "0 tasks left"
 	}
-	if p.RemainingBatches == 1 {
-		return fmt.Sprintf("%d item(s) left (~1 batch)", p.RemainingTasks)
+	var parts []string
+	if p.AddsCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d Adds", p.AddsCount))
 	}
-	return fmt.Sprintf("%d item(s) left (~%d batches)", p.RemainingTasks, p.RemainingBatches)
+	if p.UpdatesCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d Updates", p.UpdatesCount))
+	}
+	if p.ReconcilesCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d Reconciles", p.ReconcilesCount))
+	}
+	if p.ActivationsCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d Activations", p.ActivationsCount))
+	}
+	if p.DeletesCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d Deletes", p.DeletesCount))
+	}
+
+	breakdown := ""
+	if len(parts) > 0 {
+		breakdown = fmt.Sprintf(" (%s)", strings.Join(parts, ", "))
+	}
+
+	if p.RemainingBatches <= 1 {
+		return fmt.Sprintf("%d task(s) remaining%s (~1 batch)", p.RemainingTasks, breakdown)
+	}
+	return fmt.Sprintf("%d task(s) remaining%s (~%d batches)", p.RemainingTasks, breakdown, p.RemainingBatches)
 }
 
 func (p QueueProgressSummary) EstimateString() string {

@@ -267,4 +267,46 @@ func TestSQLiteStateEngine(t *testing.T) {
 	if pending != 2 || inProgress != 0 {
 		t.Errorf("Expected pending=2, inProgress=0 after reset, got pending=%d, inProgress=%d", pending, inProgress)
 	}
+
+	// 5. Test GetDetailedQueueStats and Batch Delta Staging
+	_ = d.EnqueueTask("series", 5001, "update_episodes", models.PriorityAiring)
+	_ = d.EnqueueTask("movie", 6001, "reconcile_movie", models.PriorityReconcile)
+
+	detailedStats, err := d.GetDetailedQueueStats()
+	if err != nil {
+		t.Fatalf("GetDetailedQueueStats failed: %v", err)
+	}
+	if detailedStats.Adds != 2 || detailedStats.Updates != 1 || detailedStats.Reconciles != 1 {
+		t.Errorf("Unexpected detailed stats: %+v", detailedStats)
+	}
+
+	// Test Delta Staging: First batch stages new movies and enqueues pass1 tasks
+	newMovies := []models.Movie{
+		{ID: 7001, TMDBID: "100", Name: "New Movie A", Year: 2024},
+		{ID: 7002, TMDBID: "200", Name: "New Movie B", Year: 2024},
+	}
+	if err := d.BatchStageMovies(newMovies); err != nil {
+		t.Fatalf("BatchStageMovies failed: %v", err)
+	}
+
+	// Verify movies in movie_state (1 from earlier test + 2 new)
+	allMovies, err := d.GetAllMovieStates()
+	if err != nil || len(allMovies) != 3 {
+		t.Errorf("Expected 3 movies in GetAllMovieStates, got %d, err: %v", len(allMovies), err)
+	}
+
+	statsAfterFirstStage, _ := d.GetDetailedQueueStats()
+	if statsAfterFirstStage.Adds != 4 { // 2 original + 2 new
+		t.Errorf("Expected 4 Adds in queue, got %d", statsAfterFirstStage.Adds)
+	}
+
+	// Second staging pass with same movies (should update state timestamp but NOT re-enqueue)
+	if err := d.BatchStageMovies(newMovies); err != nil {
+		t.Fatalf("BatchStageMovies second pass failed: %v", err)
+	}
+
+	statsAfterSecondStage, _ := d.GetDetailedQueueStats()
+	if statsAfterSecondStage.Adds != 4 {
+		t.Errorf("Expected Adds count to remain 4 (no duplicate enqueue), got %d", statsAfterSecondStage.Adds)
+	}
 }

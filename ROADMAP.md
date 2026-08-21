@@ -24,7 +24,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
 - [x] **Universal TaskManager Batch Synchronization & Dynamic ETA (`pkg/emby`, `pkg/syncer`)**:
   - Micro-batches (`EMBY_BATCH_SIZE`, default: 25) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and poll `GET /ScheduledTasks` once every 1s until Emby reaches **100% Idle** before releasing the next batch.
   - Replaced legacy per-item sleeps with zero-contention TaskManager synchronization.
-  - Real-time overall queue progress logging (`Processed/Total [%]`, remaining items, and estimated batches remaining).
+  - Real-time overall queue progress and task action breakdown logging (`Processed/Total [%]`, remaining items & batches, broken down by Adds, Updates, Reconciles, Activations, and Deletes).
   - Profiling of Emby library scan durations with dynamic ETA calculation based on rolling average refresh times.
 - [x] **Unified Multi-Tier Priority Queue Engine (`pkg/db`, `pkg/syncer`)**:
   - SQLite `sync_queue` ordered by `priority DESC, id ASC`.

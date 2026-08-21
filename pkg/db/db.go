@@ -406,6 +406,33 @@ func (d *DB) FindMovieByTitleAndYear(title string, year int) (*MovieState, error
 	return &m, nil
 }
 
+// GetAllMovieStates returns all movie records from SQLite.
+func (d *DB) GetAllMovieStates() ([]*MovieState, error) {
+	query := `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at FROM movie_state`
+	rows, err := d.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*MovieState
+	for rows.Next() {
+		var m MovieState
+		var actAt, chkAt sql.NullTime
+		if err := rows.Scan(&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt); err != nil {
+			continue
+		}
+		if actAt.Valid {
+			m.ActivatedAt = &actAt.Time
+		}
+		if chkAt.Valid {
+			m.LastCheckedAt = &chkAt.Time
+		}
+		results = append(results, &m)
+	}
+	return results, nil
+}
+
 // UpsertInitialMovieState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
 func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, imdbID, title string, year int, folderName string) error {
 	now := time.Now()
@@ -676,30 +703,72 @@ func (d *DB) ResetInProgressTasks() error {
 	return err
 }
 
+// QueueStats represents queue status and breakdown by task action type.
+type QueueStats struct {
+	Pending     int
+	InProgress  int
+	Failed      int
+	Adds        int // pass1
+	Updates     int // update_episodes
+	Reconciles  int // reconcile_series, reconcile_movie
+	Activations int // activate
+	Deletes     int // delete
+}
+
 // GetQueueStats returns the count of pending, in_progress, and failed tasks in the queue.
 func (d *DB) GetQueueStats() (pending, inProgress, failed int, err error) {
+	stats, err := d.GetDetailedQueueStats()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return stats.Pending, stats.InProgress, stats.Failed, nil
+}
+
+// GetDetailedQueueStats returns full queue counts and breakdown by action type.
+func (d *DB) GetDetailedQueueStats() (QueueStats, error) {
 	query := `
 	SELECT 
 		SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+		SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN action = 'pass1' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN action = 'update_episodes' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN action LIKE 'reconcile%' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN action = 'activate' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN action = 'delete' AND status IN ('pending', 'in_progress') THEN 1 ELSE 0 END)
 	FROM sync_queue
 	`
-	var p, ip, f sql.NullInt64
-	err = d.conn.QueryRow(query).Scan(&p, &ip, &f)
+	var p, ip, f, adds, updates, reconciles, acts, dels sql.NullInt64
+	err := d.conn.QueryRow(query).Scan(&p, &ip, &f, &adds, &updates, &reconciles, &acts, &dels)
 	if err != nil {
-		return 0, 0, 0, err
+		return QueueStats{}, err
 	}
+	var stats QueueStats
 	if p.Valid {
-		pending = int(p.Int64)
+		stats.Pending = int(p.Int64)
 	}
 	if ip.Valid {
-		inProgress = int(ip.Int64)
+		stats.InProgress = int(ip.Int64)
 	}
 	if f.Valid {
-		failed = int(f.Int64)
+		stats.Failed = int(f.Int64)
 	}
-	return pending, inProgress, failed, nil
+	if adds.Valid {
+		stats.Adds = int(adds.Int64)
+	}
+	if updates.Valid {
+		stats.Updates = int(updates.Int64)
+	}
+	if reconciles.Valid {
+		stats.Reconciles = int(reconciles.Int64)
+	}
+	if acts.Valid {
+		stats.Activations = int(acts.Int64)
+	}
+	if dels.Valid {
+		stats.Deletes = int(dels.Int64)
+	}
+	return stats, nil
 }
 
 // GetRecentQueueTasks returns the most recent queue tasks (filtered by status if provided).
@@ -737,6 +806,7 @@ func (d *DB) GetRecentQueueTasks(limit int, statusFilter string) ([]models.Queue
 }
 
 // BatchStageMovies stages an entire page of movies in a single atomic SQLite transaction.
+// It updates movie metadata in movie_state and only enqueues new Pass 1 creation tasks for items not yet in movie_state.
 func (d *DB) BatchStageMovies(items []models.Movie) error {
 	if len(items) == 0 {
 		return nil
@@ -747,6 +817,16 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 		return err
 	}
 	defer tx.Rollback()
+
+	queueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	SELECT 'movie', ?, 'pass1', 10, 'pending', 0, ?, ?
+	WHERE NOT EXISTS (SELECT 1 FROM movie_state WHERE movie_id = ?);
+	`)
+	if err != nil {
+		return err
+	}
+	defer queueStmt.Close()
 
 	stateStmt, err := tx.Prepare(`
 	INSERT INTO movie_state (movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
@@ -764,24 +844,13 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 	}
 	defer stateStmt.Close()
 
-	queueStmt, err := tx.Prepare(`
-	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
-	VALUES ('movie', ?, 'pass1', 10, 'pending', 0, ?, ?)
-	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
-		updated_at = EXCLUDED.updated_at;
-	`)
-	if err != nil {
-		return err
-	}
-	defer queueStmt.Close()
-
 	for _, mv := range items {
 		cleanTitle := sanitizer.CleanTitle(mv.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
-		if _, err := stateStmt.Exec(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName, now); err != nil {
+		if _, err := queueStmt.Exec(mv.ID, now, now, mv.ID); err != nil {
 			return err
 		}
-		if _, err := queueStmt.Exec(mv.ID, now, now); err != nil {
+		if _, err := stateStmt.Exec(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName, now); err != nil {
 			return err
 		}
 	}
@@ -790,6 +859,7 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 }
 
 // BatchStageSeries stages an entire page of TV series in a single atomic SQLite transaction.
+// It updates series metadata in series_state and only enqueues new Pass 1 creation tasks for items not yet in series_state.
 func (d *DB) BatchStageSeries(items []models.Series) error {
 	if len(items) == 0 {
 		return nil
@@ -800,6 +870,16 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		return err
 	}
 	defer tx.Rollback()
+
+	queueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	SELECT 'series', ?, 'pass1', 10, 'pending', 0, ?, ?
+	WHERE NOT EXISTS (SELECT 1 FROM series_state WHERE series_id = ?);
+	`)
+	if err != nil {
+		return err
+	}
+	defer queueStmt.Close()
 
 	stateStmt, err := tx.Prepare(`
 	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
@@ -817,24 +897,13 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	}
 	defer stateStmt.Close()
 
-	queueStmt, err := tx.Prepare(`
-	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
-	VALUES ('series', ?, 'pass1', 10, 'pending', 0, ?, ?)
-	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
-		updated_at = EXCLUDED.updated_at;
-	`)
-	if err != nil {
-		return err
-	}
-	defer queueStmt.Close()
-
 	for _, srs := range items {
 		cleanTitle := sanitizer.CleanTitle(srs.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
-		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, now); err != nil {
+		if _, err := queueStmt.Exec(srs.ID, now, now, srs.ID); err != nil {
 			return err
 		}
-		if _, err := queueStmt.Exec(srs.ID, now, now); err != nil {
+		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, now); err != nil {
 			return err
 		}
 	}

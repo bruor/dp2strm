@@ -289,14 +289,14 @@ func TestQueueProgressSummaryAndEstimation(t *testing.T) {
 	if summary.CompletedTasks != 0 || summary.RemainingTasks != 0 || summary.TotalTasks != 0 {
 		t.Errorf("Unexpected initial summary: %+v", summary)
 	}
-	if summary.RemainingString() != "0 items left" {
-		t.Errorf("Expected '0 items left', got %q", summary.RemainingString())
+	if summary.RemainingString() != "0 tasks left" {
+		t.Errorf("Expected '0 tasks left', got %q", summary.RemainingString())
 	}
 	if summary.EstimateString() != "Sync complete" {
 		t.Errorf("Expected 'Sync complete', got %q", summary.EstimateString())
 	}
 
-	// 2. Enqueue 90 tasks
+	// 2. Enqueue 90 tasks (pass1 = Adds)
 	for i := 1; i <= 90; i++ {
 		_ = database.EnqueueTask("movie", i, "pass1", models.PriorityBatch)
 	}
@@ -304,6 +304,9 @@ func TestQueueProgressSummaryAndEstimation(t *testing.T) {
 	summary = s.GetQueueProgressSummary()
 	if summary.PendingTasks != 90 || summary.RemainingTasks != 90 || summary.TotalTasks != 90 {
 		t.Errorf("Expected 90 pending tasks, got %+v", summary)
+	}
+	if summary.AddsCount != 90 {
+		t.Errorf("Expected 90 AddsCount, got %d", summary.AddsCount)
 	}
 	if summary.RemainingBatches != 3 {
 		t.Errorf("Expected 3 remaining batches (90 / 30), got %d", summary.RemainingBatches)
@@ -314,8 +317,8 @@ func TestQueueProgressSummaryAndEstimation(t *testing.T) {
 	if summary.ProgressString() != "0/90 (0.0%)" {
 		t.Errorf("Expected '0/90 (0.0%%%%)', got %q", summary.ProgressString())
 	}
-	if summary.RemainingString() != "90 item(s) left (~3 batches)" {
-		t.Errorf("Expected '90 item(s) left (~3 batches)', got %q", summary.RemainingString())
+	if summary.RemainingString() != "90 task(s) remaining (90 Adds) (~3 batches)" {
+		t.Errorf("Expected '90 task(s) remaining (90 Adds) (~3 batches)', got %q", summary.RemainingString())
 	}
 	if summary.EstimateString() != "Est. remaining: calculating after first scan..." {
 		t.Errorf("Expected 'Est. remaining: calculating after first scan...', got %q", summary.EstimateString())
