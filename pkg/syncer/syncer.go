@@ -763,14 +763,8 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			})
 		}
 
-		// Check if file already exists
-		if _, statErr := os.Stat(strmPath); statErr == nil {
-			preserved++
-			continue
-		}
-
-		// If we reached the batch quota for this pass, track remainder and defer to next batch
-		if created >= maxBatch {
+		// If file doesn't exist and we reached the batch quota for new items in this pass, track remainder and defer
+		if _, statErr := os.Stat(strmPath); os.IsNotExist(statErr) && created >= maxBatch {
 			remainingUnwritten++
 			continue
 		}
@@ -1750,6 +1744,12 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 					_ = os.Remove(season1Dir)
 				}
 			}
+		} else {
+			// If already activated, ensure all episode STRM files on disk contain canonical proxy URLs (in-place updates)
+			created, _, err := s.PopulateActivatedSeries(ctx, st.SeriesID, "", "")
+			if err == nil && created > 0 {
+				summary.STRMCreated = true
+			}
 		}
 
 		if s.embyClient.IsConfigured() && summary.STRMCreated {
@@ -1897,12 +1897,12 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
-	// 2. Scan and enqueue unactivated TV Shows needing Specials S00E99 upgrade or restored
+	// 2. Scan and enqueue TV Shows needing ID upgrade, Specials S00E99 upgrade, or episode URL reconciliation
 	tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
 	if s.database != nil {
-		unactivated, err := s.database.GetUnactivatedSeries()
+		allSeries, err := s.database.GetAllSeriesStates()
 		if err == nil {
-			for _, st := range unactivated {
+			for _, st := range allSeries {
 				canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(st.Title), st.Year, st.TMDBID, st.IMDBID)
 				currentFolderName := st.FolderName
 				if currentFolderName == "" {
@@ -1910,13 +1910,6 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				}
 				seriesDirPath := filepath.Join(tvShowsRoot, currentFolderName)
 				canonicalDirPath := filepath.Join(tvShowsRoot, canonicalFolderName)
-				season1Dir := filepath.Join(seriesDirPath, "Season 01")
-				specialsDir := filepath.Join(seriesDirPath, "Specials")
-				actStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title)))
-				actNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
-
-				expectedIdent := strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, st.SeriesID)
-				expectedActURL := strm.GenerateSeriesProxyURL(s.cfg, expectedIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
 
 				needsReconcile := false
 				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
@@ -1925,18 +1918,29 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 						needsReconcile = true
 					}
 				}
-				// Check if on-disk legacy Season 01 exists
-				if _, s1Err := os.Stat(season1Dir); s1Err == nil {
-					needsReconcile = true
-				}
-				// Check if Specials activation placeholder STRM or NFO is missing or has outdated URL
-				if contentBytes, actErr := os.ReadFile(actStrm); actErr != nil {
-					needsReconcile = true
-				} else if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedActURL) {
-					needsReconcile = true
-				}
-				if _, actNFOErr := os.Stat(actNFO); os.IsNotExist(actNFOErr) {
-					needsReconcile = true
+
+				if !st.IsActivated {
+					season1Dir := filepath.Join(seriesDirPath, "Season 01")
+					specialsDir := filepath.Join(seriesDirPath, "Specials")
+					actStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title)))
+					actNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
+
+					expectedIdent := strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, st.SeriesID)
+					expectedActURL := strm.GenerateSeriesProxyURL(s.cfg, expectedIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+
+					// Check if on-disk legacy Season 01 exists
+					if _, s1Err := os.Stat(season1Dir); s1Err == nil {
+						needsReconcile = true
+					}
+					// Check if Specials activation placeholder STRM or NFO is missing or has outdated URL
+					if contentBytes, actErr := os.ReadFile(actStrm); actErr != nil {
+						needsReconcile = true
+					} else if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedActURL) {
+						needsReconcile = true
+					}
+					if _, actNFOErr := os.Stat(actNFO); os.IsNotExist(actNFOErr) {
+						needsReconcile = true
+					}
 				}
 
 				if needsReconcile {
