@@ -1789,20 +1789,31 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			}
 		}
 
-		// Check if Movie.strm is missing on disk; if so, regenerate it
+		// 2. Ensure Movie.strm contains the canonical proxy URL (in-place update with mtime preservation)
 		strmPath := filepath.Join(currentDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(mst.Title)))
-		if _, statErr := os.Stat(strmPath); os.IsNotExist(statErr) {
-			movieModel := models.Movie{
-				ID:     mst.MovieID,
-				TMDBID: mst.TMDBID,
-				IMDBID: mst.IMDBID,
-				Name:   mst.Title,
-				Year:   mst.Year,
-			}
-			_, _, strmCreated, _, _, _ := s.processSingleMovieProfiled(ctx, movieModel, false)
-			if strmCreated {
+		expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)
+		expectedURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, "base")
+
+		writeStatus, wErr := strm.WriteSTRMFileDetailed(strmPath, expectedURL)
+		if wErr == nil {
+			if writeStatus == strm.STRMCreated {
 				summary.STRMCreated = true
-				log.Printf("[Worker] Restored missing Movie STRM file on disk: %q", strmPath)
+				log.Printf("[Reconciler] Restored missing Movie STRM file on disk: %q", strmPath)
+			}
+		}
+
+		// 3. If activated, also reconcile secondary quality variant STRM files
+		if mst.IsActivated && s.database != nil {
+			variants, _ := s.database.GetMovieStreamVariants(mst.MovieID)
+			for _, v := range variants {
+				if v.VariantKey != "" && v.VariantKey != "base" {
+					varStrmPath := filepath.Join(currentDir, fmt.Sprintf("%s - %s.strm", sanitizer.SanitizeFileName(mst.Title), strings.ToUpper(v.VariantKey)))
+					varURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, v.VariantKey)
+					vStatus, _ := strm.WriteSTRMFileDetailed(varStrmPath, varURL)
+					if vStatus == strm.STRMCreated {
+						summary.STRMCreated = true
+					}
+				}
 			}
 		}
 

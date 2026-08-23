@@ -696,6 +696,26 @@ func (d *DB) GetFirstAvailableSeriesTargetURL(seriesID int, variantKey string) (
 	return targetURL, err
 }
 
+// GetMovieStreamVariants retrieves all stream variant mappings for a movie.
+func (d *DB) GetMovieStreamVariants(movieID int) ([]*StreamVariant, error) {
+	query := `SELECT item_id, item_type, season_num, episode_num, variant_key, target_url, quality, stream_id, container_extension FROM stream_variants WHERE item_id = ? AND item_type = 'movie'`
+	rows, err := d.conn.Query(query, movieID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var variants []*StreamVariant
+	for rows.Next() {
+		var v StreamVariant
+		if err := rows.Scan(&v.ItemID, &v.ItemType, &v.SeasonNum, &v.EpisodeNum, &v.VariantKey, &v.TargetURL, &v.Quality, &v.StreamID, &v.ContainerExtension); err != nil {
+			return nil, err
+		}
+		variants = append(variants, &v)
+	}
+	return variants, rows.Err()
+}
+
 // --- Soft Delete Tracking Queries ---
 
 // SoftDeleteItem records an item path as soft deleted with the current timestamp.
