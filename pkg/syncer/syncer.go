@@ -1006,6 +1006,41 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 				}
 			}
 		}
+
+		// Detect disappeared variants for this movie
+		if s.database != nil {
+			activeKeys := make(map[string]bool)
+			for _, v := range classified {
+				activeKeys[v.VariantKey] = true
+			}
+			if existingVariants, err := s.database.GetMovieStreamVariants(movieID); err == nil {
+				for _, ev := range existingVariants {
+					if ev.VariantKey != "" && ev.VariantKey != "base" && !activeKeys[ev.VariantKey] {
+						varFilename := ""
+						if ev.Quality == "4K" || strings.HasPrefix(ev.VariantKey, "4k") {
+							if ev.VariantKey == "4k" {
+								varFilename = fmt.Sprintf("%s - 4K.strm", sanitizer.SanitizeFileName(cleanTitle))
+							} else {
+								idx := strings.TrimPrefix(ev.VariantKey, "4k-")
+								varFilename = fmt.Sprintf("%s - 4K (%s).strm", sanitizer.SanitizeFileName(cleanTitle), idx)
+							}
+						} else {
+							idx := strings.TrimPrefix(ev.VariantKey, "version")
+							varFilename = fmt.Sprintf("%s - Version %s.strm", sanitizer.SanitizeFileName(cleanTitle), idx)
+						}
+						orphanPath := filepath.Join(movieDir, varFilename)
+						if s.cfg.RetentionGraceDays > 0 {
+							_ = s.database.SoftDeleteItem(orphanPath, "variant")
+							log.Printf("[Syncer] Disappeared variant %q for Movie %d (%s) marked for soft deletion (%d-day grace period).", ev.VariantKey, movieID, cleanTitle, s.cfg.RetentionGraceDays)
+						} else {
+							_ = os.Remove(orphanPath)
+							_ = s.database.DeleteStreamVariant(movieID, "movie", ev.VariantKey)
+							log.Printf("[Syncer] Pruned disappeared variant %q for Movie %d (%s) from disk and database.", ev.VariantKey, movieID, cleanTitle)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if s.database != nil {

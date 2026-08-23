@@ -743,6 +743,13 @@ func (d *DB) GetMovieStreamVariants(movieID int) ([]*StreamVariant, error) {
 	return variants, rows.Err()
 }
 
+// DeleteStreamVariant removes a specific stream variant for a movie or episode from SQLite.
+func (d *DB) DeleteStreamVariant(itemID int, itemType, variantKey string) error {
+	query := `DELETE FROM stream_variants WHERE item_id = ? AND item_type = ? AND variant_key = ?`
+	_, err := d.conn.Exec(query, itemID, itemType, variantKey)
+	return err
+}
+
 // --- Soft Delete Tracking Queries ---
 
 // SoftDeleteItem records an item path as soft deleted with the current timestamp.
