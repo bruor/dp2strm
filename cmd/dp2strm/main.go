@@ -96,16 +96,13 @@ func main() {
 
 	// Movie Activation Callback Worker (auto-resolves canonical title & folder)
 	onMovieActivation := func(movieID int) (string, error) {
-		log.Printf("[Activation] User played Movie ID %d! Resolving provider streams and quality variants...", movieID)
+		log.Printf("[Proxy] User played Movie ID %d! Resolving provider streams and quality variants...", movieID)
 		mCtx, mCancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer mCancel()
 
-		// Cancel any running global library scan so Emby is immediately free to process this VIP activation
-		_ = syncEngine.CancelRunningEmbyScan(mCtx)
-
 		_, _, baseTargetURL, err := syncEngine.PopulateActivatedMovie(mCtx, movieID, "", "", 0, "")
 		if err != nil {
-			log.Printf("[Activation] Error resolving movie ID %d: %v", movieID, err)
+			log.Printf("[Proxy] Error resolving movie ID %d: %v", movieID, err)
 			return "", err
 		}
 		return baseTargetURL, nil

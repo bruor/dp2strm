@@ -72,18 +72,23 @@ func ClassifyMovieStreams(relations []models.ProviderRelation, cleanTitle string
 
 	for _, ts := range tempStreams {
 		var suffix string
+		var varKey string
 		if ts.quality == models.QualityBase {
 			if baseCount == 0 {
 				suffix = "" // Base default version (clean filename)
+				varKey = "base"
 			} else {
 				suffix = fmt.Sprintf(" - Version %d", baseCount+1)
+				varKey = fmt.Sprintf("version%d", baseCount+1)
 			}
 			baseCount++
 		} else {
 			if fourKCount == 0 {
 				suffix = " - 4K"
+				varKey = "4k"
 			} else {
 				suffix = fmt.Sprintf(" - 4K (%d)", fourKCount+1)
+				varKey = fmt.Sprintf("4k-%d", fourKCount+1)
 			}
 			fourKCount++
 		}
@@ -120,6 +125,7 @@ func ClassifyMovieStreams(relations []models.ProviderRelation, cleanTitle string
 			MovieUUID:  movieUUID,
 			Container:  ext,
 			Quality:    ts.quality,
+			VariantKey: varKey,
 			Provider:   providerName,
 			Bitrate:    ts.bitrate,
 			Filename:   filename,

@@ -958,9 +958,9 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 	if len(relations) > 0 {
 		classified := versioning.ClassifyMovieStreams(relations, cleanTitle, year)
 		for _, v := range classified {
-			varKey := "base"
-			if v.Quality == models.Quality4K {
-				varKey = "4k"
+			varKey := v.VariantKey
+			if varKey == "" {
+				varKey = "base"
 			}
 
 			targetUUID := v.MovieUUID
@@ -991,7 +991,7 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 				})
 			}
 
-			// If secondary variant (e.g. 4K), write secondary .strm file on disk for Emby's version dropdown menu
+			// If secondary variant (e.g. 4K, 4k-2, version2), write secondary .strm file on disk for Emby's version dropdown menu
 			if varKey != "base" {
 				secStrmPath := filepath.Join(movieDir, v.Filename)
 				movieIdent := strm.FormatMovieIdentifier(tmdbID, "", movieID)
@@ -1810,7 +1810,19 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			variants, _ := s.database.GetMovieStreamVariants(mst.MovieID)
 			for _, v := range variants {
 				if v.VariantKey != "" && v.VariantKey != "base" {
-					varStrmPath := filepath.Join(currentDir, fmt.Sprintf("%s - %s.strm", sanitizer.SanitizeFileName(mst.Title), strings.ToUpper(v.VariantKey)))
+					varFilename := ""
+					if v.Quality == "4K" || strings.HasPrefix(v.VariantKey, "4k") {
+						if v.VariantKey == "4k" {
+							varFilename = fmt.Sprintf("%s - 4K.strm", sanitizer.SanitizeFileName(mst.Title))
+						} else {
+							idx := strings.TrimPrefix(v.VariantKey, "4k-")
+							varFilename = fmt.Sprintf("%s - 4K (%s).strm", sanitizer.SanitizeFileName(mst.Title), idx)
+						}
+					} else {
+						idx := strings.TrimPrefix(v.VariantKey, "version")
+						varFilename = fmt.Sprintf("%s - Version %s.strm", sanitizer.SanitizeFileName(mst.Title), idx)
+					}
+					varStrmPath := filepath.Join(currentDir, varFilename)
 					varURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, v.VariantKey)
 					vStatus, _ := strm.WriteSTRMFileDetailed(varStrmPath, varURL)
 					if vStatus == strm.STRMCreated {

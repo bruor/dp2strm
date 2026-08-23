@@ -199,6 +199,7 @@ type StreamVersion struct {
 	MovieUUID  string
 	Container  string
 	Quality    QualityTier
+	VariantKey string // e.g. "base", "4k", "4k-2", "version2"
 	Provider   string
 	Bitrate    int
 	Filename   string // e.g. "The Thing (1982).strm" or "The Thing (1982) - 4K.strm"
