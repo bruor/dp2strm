@@ -1359,6 +1359,48 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 		}
 	}
 
+	// 3. Detect disappeared Movies and Series (only if circuit breaker was not tripped and full sync completed)
+	if !s.isCircuitTripped() && s.database != nil {
+		moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
+		if staleMovies, err := s.database.GetStaleMovieStates(start); err == nil && len(staleMovies) > 0 {
+			for _, sm := range staleMovies {
+				folderName := sm.FolderName
+				if folderName == "" {
+					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(sm.Title), sm.Year, sm.TMDBID, sm.IMDBID)
+				}
+				moviePath := filepath.Join(moviesRoot, folderName)
+				if s.cfg.RetentionGraceDays > 0 {
+					_ = s.database.SoftDeleteItem(moviePath, "movie")
+					log.Printf("[Stager] Disappeared movie %q (ID %d) marked for soft deletion (%d-day grace period).", sm.Title, sm.MovieID, s.cfg.RetentionGraceDays)
+				} else {
+					_ = os.RemoveAll(moviePath)
+					_ = s.database.DeleteMovieState(sm.MovieID)
+					_ = s.database.DeleteStreamVariant(sm.MovieID, "movie", "base")
+					log.Printf("[Stager] Pruned disappeared movie %q (ID %d) from disk and database.", sm.Title, sm.MovieID)
+				}
+			}
+		}
+
+		tvRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
+		if staleSeries, err := s.database.GetStaleSeriesStates(start); err == nil && len(staleSeries) > 0 {
+			for _, ss := range staleSeries {
+				folderName := ss.FolderName
+				if folderName == "" {
+					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(ss.Title), ss.Year, ss.TMDBID, ss.IMDBID)
+				}
+				seriesPath := filepath.Join(tvRoot, folderName)
+				if s.cfg.RetentionGraceDays > 0 {
+					_ = s.database.SoftDeleteItem(seriesPath, "series")
+					log.Printf("[Stager] Disappeared TV show %q (ID %d) marked for soft deletion (%d-day grace period).", ss.Title, ss.SeriesID, s.cfg.RetentionGraceDays)
+				} else {
+					_ = os.RemoveAll(seriesPath)
+					_ = s.database.DeleteSeriesState(ss.SeriesID)
+					log.Printf("[Stager] Pruned disappeared TV show %q (ID %d) from disk and database.", ss.Title, ss.SeriesID)
+				}
+			}
+		}
+	}
+
 	summary := s.GetQueueProgressSummary()
 	log.Printf("[Stager] Catalog delta staged in %v. Total: %d movies, %d series. Queue state -> %s | %s | %s",
 		time.Since(start), moviesCount, seriesCount, summary.ProgressString(), summary.RemainingString(), summary.EstimateString())

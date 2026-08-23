@@ -790,6 +790,69 @@ func (d *DB) RemoveSoftDeletedItem(itemPath string) error {
 	return err
 }
 
+// GetStaleMovieStates returns movies that were not updated since cutoffTime (i.e. disappeared from upstream catalog).
+func (d *DB) GetStaleMovieStates(cutoffTime time.Time) ([]*MovieState, error) {
+	query := `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at FROM movie_state WHERE last_checked_at < ?`
+	rows, err := d.conn.Query(query, cutoffTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*MovieState
+	for rows.Next() {
+		var m MovieState
+		var chkAt sql.NullTime
+		if err := rows.Scan(&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &chkAt); err != nil {
+			continue
+		}
+		if chkAt.Valid {
+			m.LastCheckedAt = &chkAt.Time
+		}
+		results = append(results, &m)
+	}
+	return results, nil
+}
+
+// GetStaleSeriesStates returns series that were not updated since cutoffTime (i.e. disappeared from upstream catalog).
+func (d *DB) GetStaleSeriesStates(cutoffTime time.Time) ([]*SeriesState, error) {
+	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE last_checked_at < ?`
+	rows, err := d.conn.Query(query, cutoffTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*SeriesState
+	for rows.Next() {
+		var s SeriesState
+		var actAt, chkAt sql.NullTime
+		if err := rows.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt); err != nil {
+			continue
+		}
+		if actAt.Valid {
+			s.ActivatedAt = &actAt.Time
+		}
+		if chkAt.Valid {
+			s.LastCheckedAt = &chkAt.Time
+		}
+		results = append(results, &s)
+	}
+	return results, nil
+}
+
+// DeleteMovieState permanently deletes a movie record from SQLite.
+func (d *DB) DeleteMovieState(movieID int) error {
+	_, err := d.conn.Exec(`DELETE FROM movie_state WHERE movie_id = ?`, movieID)
+	return err
+}
+
+// DeleteSeriesState permanently deletes a series record from SQLite.
+func (d *DB) DeleteSeriesState(seriesID int) error {
+	_, err := d.conn.Exec(`DELETE FROM series_state WHERE series_id = ?`, seriesID)
+	return err
+}
+
 // --- Sync Queue Queries ---
 
 // EnqueueTask adds or updates a task in the sync queue. If task already exists, it boosts priority if higher and resets to pending.
