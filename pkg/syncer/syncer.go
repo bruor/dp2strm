@@ -1068,7 +1068,7 @@ func (s *Syncer) BeginVIPActivation(ctx context.Context, seriesID int) func() {
 	activeCount := s.activeActivations
 	s.activationMu.Unlock()
 
-	log.Printf("[Activation] ⚡ VIP lock acquired for Series ID %d (active: %d). Pausing background batch workers...", seriesID, activeCount)
+	log.Printf("[VIP Activation] ⚡ VIP lock acquired for Series ID %d (active: %d). Pausing background batch workers...", seriesID, activeCount)
 	_ = s.CancelRunningEmbyScan(ctx)
 
 	return func() {
@@ -1084,9 +1084,9 @@ func (s *Syncer) BeginVIPActivation(ctx context.Context, seriesID int) func() {
 		s.activationMu.Unlock()
 
 		if remaining == 0 {
-			log.Printf("[Activation] ⚡ All VIP series activations completed. Resuming background batch workers.")
+			log.Printf("[VIP Activation] ⚡ All VIP series activations completed. Resuming background batch workers.")
 		} else {
-			log.Printf("[Activation] ⚡ VIP activation for Series ID %d completed (%d still active).", seriesID, remaining)
+			log.Printf("[VIP Activation] ⚡ VIP activation for Series ID %d completed (%d still active).", seriesID, remaining)
 		}
 	}
 }
@@ -1345,7 +1345,7 @@ type itemSummary struct {
 // embyWorkerLoop processes queue items in adaptive batches with idle debounce and Emby verification.
 func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 	defer s.workerWg.Done()
-	log.Printf("[Worker #%d] Emby worker online.", workerID)
+	log.Printf("[Queue] Worker #%d online.", workerID)
 
 	preferredType := "series" // Start alternating with series
 	processedCount := 0
@@ -1357,13 +1357,13 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 	var batchTasks []*models.QueueItem
 	var newItemsCreated int
 	var lastCreatedItem *itemSummary
-	batchStarted := false
+	lastMaintenanceFlush := time.Now()
 	loggedEmpty := false
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[Worker #%d] Shutting down.", workerID)
+			log.Printf("[Queue] Worker #%d shutting down.", workerID)
 			return
 		default:
 		}
@@ -1378,12 +1378,12 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 
 		// If Emby is actively running a media library scan, pause worker to let Emby finish cleanly
 		if s.embyClient.IsConfigured() && s.embyClient.IsLibraryScanRunning(ctx) {
-			log.Printf("[Worker #%d] Emby is currently performing a media library scan. Pausing worker until scan finishes...", workerID)
+			log.Printf("[Ingest] Emby is currently performing a media library scan. Pausing worker until scan finishes...")
 			scanStart := time.Now()
 			if s.embyClient.WaitForScanCompletion(ctx, 24*time.Hour) {
 				scanDur := time.Since(scanStart)
 				s.recordEmbyScanDuration(scanDur)
-				log.Printf("[Worker #%d] Emby media library scan completed in %s. Resuming worker.", workerID, formatDuration(scanDur))
+				log.Printf("[Ingest] Emby media library scan completed in %s. Resuming worker.", formatDuration(scanDur))
 			}
 		}
 
@@ -1392,7 +1392,7 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 
 		task, err := s.database.PopNextTask(preferredType)
 		if err != nil {
-			log.Printf("[Worker #%d] Error polling queue: %v", workerID, err)
+			log.Printf("[Queue] Error polling queue: %v", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -1400,17 +1400,21 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		if task == nil {
 			// If we have items in the current unverified batch, finish verification now
 			if len(batchTasks) > 0 {
-				s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastCreatedItem, newItemsCreated)
+				if newItemsCreated > 0 {
+					s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastCreatedItem, newItemsCreated)
+				} else {
+					s.flushMaintenanceBatch(ctx, workerID, batchTasks, time.Since(lastMaintenanceFlush))
+				}
 				batchTasks = nil
 				newItemsCreated = 0
 				lastCreatedItem = nil
-				batchStarted = false
+				lastMaintenanceFlush = time.Now()
 			}
 			if !loggedEmpty {
 				summary := s.GetQueueProgressSummary()
 				if summary.RemainingTasks == 0 {
 					if summary.CompletedTasks > 0 {
-						log.Printf("[Worker #%d] 🎉 All sync queue tasks completed! Overall Progress: %s. Library is fully in sync with Emby.", workerID, summary.ProgressString())
+						log.Printf("[Queue] 🎉 All sync queue tasks completed! Overall Progress: %s. Library is fully in sync with Emby.", summary.ProgressString())
 					}
 					loggedEmpty = true
 				}
@@ -1420,13 +1424,6 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		}
 
 		loggedEmpty = false
-
-		if !batchStarted {
-			batchStarted = true
-			summary := s.GetQueueProgressSummary()
-			log.Printf("[Worker #%d] Processing batch (target: %d new files)... | Overall Progress: %s | %s | %s",
-				workerID, batchSize, summary.ProgressString(), summary.RemainingString(), summary.EstimateString())
-		}
 
 		// Alternate preferred type for balanced round-robin
 		if task.ItemType == "series" {
@@ -1439,7 +1436,7 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 		// Process task
 		pErr, summary := s.processQueueTask(ctx, task)
 		if pErr != nil {
-			log.Printf("[Worker #%d] Task %d failed (%s %d: %s): %v", workerID, task.ID, task.ItemType, task.ItemID, task.Action, pErr)
+			log.Printf("[Queue] Task %d failed (%s %d: %s): %v", task.ID, task.ItemType, task.ItemID, task.Action, pErr)
 			_ = s.database.MarkTaskFailed(task.ID, pErr.Error())
 		} else {
 			batchTasks = append(batchTasks, task)
@@ -1449,15 +1446,70 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			}
 		}
 
-		// When batch limit of newly created items is reached (or 250 maintenance tasks processed), flush batch
-		if newItemsCreated >= batchSize || len(batchTasks) >= 250 {
+		// Flush rules:
+		// 1. When batch limit of NEWLY CREATED items is reached, trigger Emby batch ingestion
+		if newItemsCreated >= batchSize {
 			s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastCreatedItem, newItemsCreated)
 			batchTasks = nil
 			newItemsCreated = 0
 			lastCreatedItem = nil
-			batchStarted = false
+			lastMaintenanceFlush = time.Now()
+		} else if newItemsCreated == 0 && (time.Since(lastMaintenanceFlush) >= 10*time.Second || len(batchTasks) >= 1000) {
+			// 2. Pure maintenance tasks: flush every 10s on a timer (or max 1000 items in buffer)
+			s.flushMaintenanceBatch(ctx, workerID, batchTasks, time.Since(lastMaintenanceFlush))
+			batchTasks = nil
+			lastMaintenanceFlush = time.Now()
 		}
 	}
+}
+
+func (s *Syncer) flushMaintenanceBatch(ctx context.Context, workerID int, tasks []*models.QueueItem, elapsed time.Duration) {
+	if len(tasks) == 0 {
+		return
+	}
+	for _, t := range tasks {
+		_ = s.database.MarkTaskComplete(t.ID)
+	}
+
+	s.progressMu.Lock()
+	s.completedTasks += int64(len(tasks))
+	s.progressMu.Unlock()
+
+	summary := s.GetQueueProgressSummary()
+
+	// Calculate rate in items/second
+	seconds := elapsed.Seconds()
+	rate := 0
+	if seconds > 0 {
+		rate = int(float64(len(tasks)) / seconds)
+	}
+
+	// Calculate maintenance ETA
+	etaStr := "calculating..."
+	if rate > 0 && summary.RemainingTasks > 0 {
+		remSecs := summary.RemainingTasks / rate
+		etaStr = formatDuration(time.Duration(remSecs) * time.Second)
+	}
+
+	var mRec, sRec int
+	for _, t := range tasks {
+		if t.ItemType == "movie" {
+			mRec++
+		} else {
+			sRec++
+		}
+	}
+	breakdown := ""
+	if mRec > 0 && sRec > 0 {
+		breakdown = fmt.Sprintf("%d Movies, %d Series", mRec, sRec)
+	} else if mRec > 0 {
+		breakdown = fmt.Sprintf("%d Movie Reconciles", mRec)
+	} else {
+		breakdown = fmt.Sprintf("%d Series Reconciles", sRec)
+	}
+
+	log.Printf("[Maintenance] Verified %d items in %s (%s) | Progress: %s | Rate: %d items/s | %d remaining (Est: ~%s)",
+		len(tasks), formatDuration(elapsed), breakdown, summary.ProgressString(), rate, summary.RemainingTasks, etaStr)
 }
 
 func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []*models.QueueItem, lastCreated *itemSummary, newCount int) {
@@ -1517,11 +1569,6 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	}
 
 	if !s.embyClient.IsConfigured() || newCount == 0 {
-		if newCount == 0 && len(tasks) > 0 {
-			summary := s.GetQueueProgressSummary()
-			log.Printf("[Worker #%d] Batch of %d item(s) processed (all up to date on disk: %s). | Overall Progress: %s | %s",
-				workerID, len(tasks), batchSummaryStr, summary.ProgressString(), summary.RemainingString())
-		}
 		return
 	}
 
@@ -1529,8 +1576,8 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	s.WaitForVIPActivations(ctx)
 
 	summaryBeforeScan := s.GetQueueProgressSummary()
-	log.Printf("[Worker #%d] Batch complete: %d new .strm file(s) written (%s). Triggering Emby library scan... | Overall Progress: %s | %s | %s",
-		workerID, newCount, batchSummaryStr, summaryBeforeScan.ProgressString(), summaryBeforeScan.RemainingString(), summaryBeforeScan.EstimateString())
+	log.Printf("[Ingest] Batch complete: %d new .strm file(s) written (%s). Triggering Emby library scan... | Progress: %s | %s | %s",
+		newCount, batchSummaryStr, summaryBeforeScan.ProgressString(), summaryBeforeScan.RemainingString(), summaryBeforeScan.EstimateString())
 
 	scanStart := time.Now()
 
@@ -1541,13 +1588,13 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 	time.Sleep(2 * time.Second)
 
 	// 3. Wait until Emby finishes scanning and returns to 100% Idle
-	log.Printf("[Worker #%d] Waiting for Emby to complete scan and reach Idle before next batch...", workerID)
+	log.Printf("[Ingest] Waiting for Emby to complete scan and reach Idle before next batch...")
 	if s.embyClient.WaitForScanCompletion(ctx, 24*time.Hour) {
 		scanDur := time.Since(scanStart)
 		s.recordEmbyScanDuration(scanDur)
 		summary := s.GetQueueProgressSummary()
-		log.Printf("[Worker #%d] Emby scan completed in %s (avg: %s/batch across %d scan(s)). Ready for next batch. | Overall Progress: %s | %s | %s",
-			workerID, formatDuration(scanDur), formatDuration(summary.AvgScanDuration), summary.CompletedScans,
+		log.Printf("[Ingest] Emby scan completed in %s (avg: %s/batch across %d scan(s)). Ready for next batch. | Progress: %s | %s | %s",
+			formatDuration(scanDur), formatDuration(summary.AvgScanDuration), summary.CompletedScans,
 			summary.ProgressString(), summary.RemainingString(), summary.EstimateString())
 	}
 
