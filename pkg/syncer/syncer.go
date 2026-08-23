@@ -1225,6 +1225,9 @@ func (s *Syncer) StartWorkers(ctx context.Context) {
 		}
 	}
 
+	// 3. Run initial startup disk reconciliation audit to get an accurate snapshot of on-disk state BEFORE workers start
+	_ = s.ReconcileDiskState(ctx)
+
 	workerCtx, cancel := context.WithCancel(ctx)
 	s.workerCancel = cancel
 
@@ -1238,13 +1241,13 @@ func (s *Syncer) StartWorkers(ctx context.Context) {
 		batchSize = 25
 	}
 	summary := s.GetQueueProgressSummary()
-	log.Printf("[Syncer] Starting %d Emby processing worker(s) (Batch Size: %d) | Initial Queue: %s | %s", numWorkers, batchSize, summary.RemainingString(), summary.EstimateString())
+	log.Printf("[Queue] Starting %d Emby processing worker(s) (Batch Size: %d) | Initial Queue: %s | %s", numWorkers, batchSize, summary.RemainingString(), summary.EstimateString())
 	for i := 1; i <= numWorkers; i++ {
 		s.workerWg.Add(1)
 		go s.embyWorkerLoop(workerCtx, i)
 	}
 
-	// Start background reconciler
+	// Start background scheduled reconciler loop
 	s.workerWg.Add(1)
 	go s.reconcilerLoop(workerCtx)
 }
@@ -1852,7 +1855,7 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 	return nil, summary
 }
 
-// reconcilerLoop runs the daily disk reconciler at the configured interval.
+// reconcilerLoop runs the periodic disk reconciler at the configured interval.
 func (s *Syncer) reconcilerLoop(ctx context.Context) {
 	defer s.workerWg.Done()
 
@@ -1861,10 +1864,7 @@ func (s *Syncer) reconcilerLoop(ctx context.Context) {
 		interval = 24 * time.Hour
 	}
 
-	log.Printf("[Reconciler] Daily disk reconciler active every: %v", interval)
-
-	// Run initial reconciliation audit immediately on startup ASAP!
-	_ = s.ReconcileDiskState(ctx)
+	log.Printf("[Reconciler] Scheduled disk reconciler active every: %v", interval)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
