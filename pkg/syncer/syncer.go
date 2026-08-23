@@ -1449,8 +1449,8 @@ func (s *Syncer) embyWorkerLoop(ctx context.Context, workerID int) {
 			}
 		}
 
-		// When batch limit of newly created items is reached, pause to let Emby ingest and verify
-		if newItemsCreated >= batchSize {
+		// When batch limit of newly created items is reached (or 250 maintenance tasks processed), flush batch
+		if newItemsCreated >= batchSize || len(batchTasks) >= 250 {
 			s.verifyAndFlushBatch(ctx, workerID, batchTasks, lastCreatedItem, newItemsCreated)
 			batchTasks = nil
 			newItemsCreated = 0
