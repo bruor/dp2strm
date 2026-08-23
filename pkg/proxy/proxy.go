@@ -178,12 +178,12 @@ func format302Target(rawURL, streamcacheURL string) string {
 
 func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 	// Extensionless Path formats:
-	// 1. /play/movie/{movie_id}
-	// 2. /play/movie/{movie_id}/{variant} (e.g. 4k)
+	// 1. /play/movie/{identifier} (e.g. tmdb:1739639, imdb:tt36615831, or 1198086)
+	// 2. /play/movie/{identifier}/{variant} (e.g. tmdb:1739639/4k)
 	path := strings.TrimPrefix(r.URL.Path, "/play/movie/")
 	path = strings.TrimSuffix(path, "/")
 	if path == "" {
-		http.Error(w, "Movie ID required", http.StatusBadRequest)
+		http.Error(w, "Movie identifier required", http.StatusBadRequest)
 		return
 	}
 
@@ -194,10 +194,21 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 		rawID = rawID[:idx]
 	}
 
-	movieID, err := strconv.Atoi(rawID)
-	if err != nil {
-		http.Error(w, "Invalid movie ID", http.StatusBadRequest)
-		return
+	movieID := 0
+	if s.database != nil {
+		resolvedID, _, resErr := s.database.GetMovieIDByIdentifier(rawID)
+		if resErr == nil && resolvedID > 0 {
+			movieID = resolvedID
+		}
+	}
+
+	if movieID == 0 {
+		if numID, err := strconv.Atoi(rawID); err == nil && numID > 0 {
+			movieID = numID
+		} else {
+			http.Error(w, fmt.Sprintf("Invalid movie identifier %q", rawID), http.StatusBadRequest)
+			return
+		}
 	}
 
 	variantKey := "base"
@@ -226,6 +237,32 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 			} else if s.database != nil {
 				targetURL, _ = s.database.GetMovieTargetURL(movieID, variantKey)
 			}
+		} else if s.database != nil {
+			// Self-Healing Fallback: Check if movie ID was re-assigned upstream in Dispatcharr
+			if healedID, fErr := s.database.FindMovieByFingerprint(movieID, "", 0); fErr == nil && healedID > 0 && healedID != movieID {
+				log.Printf("[Proxy] Self-Healing: Stale movie ID %d healed to active Dispatcharr ID %d. Retrying activation...", movieID, healedID)
+				healedBaseURL, hErr := s.onMovieActivation(healedID)
+				if hErr == nil && healedBaseURL != "" {
+					staleMovieID := movieID
+					movieID = healedID
+					if variantKey == "base" {
+						targetURL = healedBaseURL
+					} else {
+						targetURL, _ = s.database.GetMovieTargetURL(movieID, variantKey)
+					}
+					// 1. Alias in stream_variants for stale ID so subsequent requests before disk reconciliation resolve in <1ms
+					_ = s.database.SaveStreamVariant(&db.StreamVariant{
+						ItemID:             staleMovieID,
+						ItemType:           "movie",
+						VariantKey:         variantKey,
+						TargetURL:          targetURL,
+						Quality:            "1080p",
+						ContainerExtension: "mkv",
+					})
+					// 2. Enqueue reconcile task so disk .strm file gets corrected during next maintenance run
+					_ = s.database.EnqueueTask("movie", healedID, "reconcile_movie", models.PriorityReconcile)
+				}
+			}
 		}
 	}
 
@@ -235,14 +272,14 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
-	log.Printf("[Proxy] Movie %d (Variant '%s') -> HTTP 302 Redirect: %s", movieID, variantKey, finalRedirectURL)
+	log.Printf("[Proxy] Movie %s (Resolved ID: %d, Variant '%s') -> HTTP 302 Redirect: %s", rawID, movieID, variantKey, finalRedirectURL)
 	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
 }
 
 func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	// Extensionless Path formats:
-	// 1. /play/series/{series_id}/{season}/{episode}
-	// 2. /play/series/{series_id}/{season}/{episode}/{variant} (e.g. 4k)
+	// 1. /play/series/{identifier}/{season}/{episode} (e.g. tmdb:218510/1/1 or 30998/1/1)
+	// 2. /play/series/{identifier}/{season}/{episode}/{variant} (e.g. 4k)
 	path := strings.TrimPrefix(r.URL.Path, "/play/series/")
 	path = strings.TrimSuffix(path, "/")
 	parts := strings.Split(path, "/")
@@ -252,7 +289,27 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawSeriesID := parts[0]
-	seriesID, sErr := strconv.Atoi(rawSeriesID)
+	if idx := strings.Index(rawSeriesID, "."); idx != -1 {
+		rawSeriesID = rawSeriesID[:idx]
+	}
+
+	seriesID := 0
+	if s.database != nil {
+		resolvedID, _, resErr := s.database.GetSeriesIDByIdentifier(rawSeriesID)
+		if resErr == nil && resolvedID > 0 {
+			seriesID = resolvedID
+		}
+	}
+
+	if seriesID == 0 {
+		if numID, err := strconv.Atoi(rawSeriesID); err == nil && numID > 0 {
+			seriesID = numID
+		} else {
+			http.Error(w, fmt.Sprintf("Invalid series identifier %q", rawSeriesID), http.StatusBadRequest)
+			return
+		}
+	}
+
 	seasonNum, seErr := strconv.Atoi(parts[1])
 
 	rawEp := parts[2]
@@ -261,7 +318,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	}
 	epNum, epErr := strconv.Atoi(rawEp)
 
-	if sErr != nil || seErr != nil || epErr != nil {
+	if seErr != nil || epErr != nil {
 		http.Error(w, "Invalid numeric parameters in series path", http.StatusBadRequest)
 		return
 	}
@@ -306,7 +363,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		log.Printf("[Proxy] Series %d: Streaming 5s Activation Bumper to client...", seriesID)
+		log.Printf("[Proxy] Series %s (ID: %d): Streaming 5s Activation Bumper to client...", rawSeriesID, seriesID)
 		w.Header().Set("Content-Type", "video/mp4")
 		http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
 
@@ -342,6 +399,31 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 				s.activeSeries.Delete(seriesID)
 				if s.database != nil {
 					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+					// Self-Healing Fallback for Series if targetURL still empty
+					if targetURL == "" {
+						if healedID, fErr := s.database.FindSeriesByFingerprint(seriesID, "", 0); fErr == nil && healedID > 0 && healedID != seriesID {
+							log.Printf("[Proxy] Self-Healing: Stale series ID %d healed to active Dispatcharr ID %d. Retrying activation...", seriesID, healedID)
+							staleSeriesID := seriesID
+							seriesID = healedID
+							s.onActivation(healedID)
+							targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+							if targetURL != "" {
+								// 1. Alias in stream_variants for stale ID so subsequent requests before disk reconciliation resolve in <1ms
+								_ = s.database.SaveStreamVariant(&db.StreamVariant{
+									ItemID:             staleSeriesID,
+									ItemType:           "series",
+									SeasonNum:          seasonNum,
+									EpisodeNum:         epNum,
+									VariantKey:         variantKey,
+									TargetURL:          targetURL,
+									Quality:            "1080p",
+									ContainerExtension: "mkv",
+								})
+								// 2. Enqueue reconcile task so disk .strm file gets corrected during next maintenance run
+								_ = s.database.EnqueueTask("series", healedID, "reconcile_series", models.PriorityReconcile)
+							}
+						}
+					}
 				}
 			} else {
 				go func(sid int) {
@@ -364,15 +446,15 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
-	log.Printf("[Proxy] Series %d S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
+	log.Printf("[Proxy] Series %s (Resolved ID: %d) S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", rawSeriesID, seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
 
 	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
 	if s.cfg.FetchAheadCount > 0 && s.cfg.StreamcacheURL != "" {
-		go func(sid, sNum, eNum, count int) {
+		go func(rawSid string, sNum, eNum, count int) {
 			for i := 1; i <= count; i++ {
 				nextEp := eNum + i
 				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				prefetchURL := fmt.Sprintf("%s/play/series/%d/%d/%d", strings.TrimRight(s.cfg.URL, "/"), sid, sNum, nextEp)
+				prefetchURL := fmt.Sprintf("%s/play/series/%s/%d/%d", strings.TrimRight(s.cfg.URL, "/"), rawSid, sNum, nextEp)
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
 				if err == nil {
 					resp, pErr := http.DefaultClient.Do(req)
@@ -382,7 +464,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 				}
 				cancel()
 			}
-		}(seriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+		}(rawSeriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
 	}
 
 	// Sub-50ms Immediate 302 Redirect!

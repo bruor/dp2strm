@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"dp2strm/pkg/models"
@@ -171,7 +173,13 @@ func (d *DB) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_series_state_activated ON series_state(is_activated, status);
+	CREATE INDEX IF NOT EXISTS idx_series_state_tmdb ON series_state(tmdb_id);
+	CREATE INDEX IF NOT EXISTS idx_series_state_imdb ON series_state(imdb_id);
+	CREATE INDEX IF NOT EXISTS idx_series_state_title_year ON series_state(title, year);
 	CREATE INDEX IF NOT EXISTS idx_movie_state_activated ON movie_state(is_activated);
+	CREATE INDEX IF NOT EXISTS idx_movie_state_tmdb ON movie_state(tmdb_id);
+	CREATE INDEX IF NOT EXISTS idx_movie_state_imdb ON movie_state(imdb_id);
+	CREATE INDEX IF NOT EXISTS idx_movie_state_title_year ON movie_state(title, year);
 	CREATE INDEX IF NOT EXISTS idx_stream_variants_lookup ON stream_variants(item_id, item_type, season_num, episode_num, variant_key);
 	CREATE INDEX IF NOT EXISTS idx_sync_queue_poll ON sync_queue(status, priority DESC, id ASC);
 	`
@@ -232,7 +240,7 @@ func (d *DB) UpsertInitialSeriesState(seriesID int, tmdbID, imdbID, title string
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
-		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE series_state.folder_name END,
+		folder_name = CASE WHEN series_state.folder_name != '' THEN series_state.folder_name ELSE EXCLUDED.folder_name END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`
 	_, err := d.conn.Exec(query, seriesID, tmdbID, imdbID, title, year, folderName, now)
@@ -352,6 +360,86 @@ func (d *DB) GetActiveSeriesToSync(currentDate string) ([]int, error) {
 	return ids, nil
 }
 
+// GetSeriesIDByIdentifier resolves a series identifier string (e.g. "tmdb:218510", "imdb:tt12345", or "26078") to the active Dispatcharr series ID.
+func (d *DB) GetSeriesIDByIdentifier(identifier string) (int, string, error) {
+	raw := strings.TrimSpace(identifier)
+	if raw == "" {
+		return 0, "", fmt.Errorf("empty series identifier")
+	}
+
+	// 1. TMDB ID Prefix
+	if strings.HasPrefix(strings.ToLower(raw), "tmdb:") {
+		tmdb := strings.TrimPrefix(raw, "tmdb:")
+		tmdb = strings.TrimPrefix(tmdb, "TMDB:")
+		var seriesID int
+		var foundTMDB string
+		err := d.conn.QueryRow(`SELECT series_id, tmdb_id FROM series_state WHERE tmdb_id = ? ORDER BY series_id DESC LIMIT 1`, tmdb).Scan(&seriesID, &foundTMDB)
+		if err == sql.ErrNoRows {
+			return 0, tmdb, nil
+		}
+		return seriesID, foundTMDB, err
+	}
+
+	// 2. IMDb ID Prefix
+	if strings.HasPrefix(strings.ToLower(raw), "imdb:") {
+		imdb := strings.TrimPrefix(raw, "imdb:")
+		imdb = strings.TrimPrefix(imdb, "IMDB:")
+		var seriesID int
+		var foundTMDB string
+		err := d.conn.QueryRow(`SELECT series_id, tmdb_id FROM series_state WHERE imdb_id = ? ORDER BY series_id DESC LIMIT 1`, imdb).Scan(&seriesID, &foundTMDB)
+		if err == sql.ErrNoRows {
+			return 0, "", nil
+		}
+		return seriesID, foundTMDB, err
+	}
+
+	// 3. Pure Numeric ID
+	if numID, err := strconv.Atoi(raw); err == nil && numID > 0 {
+		var seriesID int
+		var foundTMDB string
+		err := d.conn.QueryRow(`SELECT series_id, tmdb_id FROM series_state WHERE series_id = ? LIMIT 1`, numID).Scan(&seriesID, &foundTMDB)
+		if err == nil {
+			return seriesID, foundTMDB, nil
+		}
+		return numID, "", nil
+	}
+
+	return 0, "", fmt.Errorf("unrecognized series identifier format: %s", identifier)
+}
+
+// FindSeriesByFingerprint searches for an active series ID using stored TMDB ID or title + year when an ID has gone stale.
+func (d *DB) FindSeriesByFingerprint(oldSeriesID int, title string, year int) (int, error) {
+	if oldSeriesID > 0 {
+		var tmdbID string
+		var oldTitle string
+		var oldYear int
+		_ = d.conn.QueryRow(`SELECT tmdb_id, title, year FROM series_state WHERE series_id = ?`, oldSeriesID).Scan(&tmdbID, &oldTitle, &oldYear)
+		if tmdbID != "" {
+			var activeID int
+			err := d.conn.QueryRow(`SELECT series_id FROM series_state WHERE tmdb_id = ? AND series_id != ? ORDER BY series_id DESC LIMIT 1`, tmdbID, oldSeriesID).Scan(&activeID)
+			if err == nil && activeID > 0 {
+				return activeID, nil
+			}
+		}
+		if title == "" {
+			title = oldTitle
+		}
+		if year <= 0 {
+			year = oldYear
+		}
+	}
+
+	if title != "" && year > 0 {
+		var activeID int
+		err := d.conn.QueryRow(`SELECT series_id FROM series_state WHERE title = ? AND year = ? AND series_id != ? ORDER BY series_id DESC LIMIT 1`, title, year, oldSeriesID).Scan(&activeID)
+		if err == nil && activeID > 0 {
+			return activeID, nil
+		}
+	}
+
+	return 0, sql.ErrNoRows
+}
+
 // --- Movie State Queries ---
 
 // GetMovieState retrieves the movie state by movie ID.
@@ -433,6 +521,86 @@ func (d *DB) GetAllMovieStates() ([]*MovieState, error) {
 	return results, nil
 }
 
+// GetMovieIDByIdentifier resolves a movie identifier string (e.g. "tmdb:1739639", "imdb:tt36615831", or "1198086") to the active Dispatcharr movie ID.
+func (d *DB) GetMovieIDByIdentifier(identifier string) (int, string, error) {
+	raw := strings.TrimSpace(identifier)
+	if raw == "" {
+		return 0, "", fmt.Errorf("empty movie identifier")
+	}
+
+	// 1. TMDB ID Prefix
+	if strings.HasPrefix(strings.ToLower(raw), "tmdb:") {
+		tmdb := strings.TrimPrefix(raw, "tmdb:")
+		tmdb = strings.TrimPrefix(tmdb, "TMDB:")
+		var movieID int
+		var foundTMDB string
+		err := d.conn.QueryRow(`SELECT movie_id, tmdb_id FROM movie_state WHERE tmdb_id = ? ORDER BY movie_id DESC LIMIT 1`, tmdb).Scan(&movieID, &foundTMDB)
+		if err == sql.ErrNoRows {
+			return 0, tmdb, nil
+		}
+		return movieID, foundTMDB, err
+	}
+
+	// 2. IMDb ID Prefix
+	if strings.HasPrefix(strings.ToLower(raw), "imdb:") {
+		imdb := strings.TrimPrefix(raw, "imdb:")
+		imdb = strings.TrimPrefix(imdb, "IMDB:")
+		var movieID int
+		var foundTMDB string
+		err := d.conn.QueryRow(`SELECT movie_id, tmdb_id FROM movie_state WHERE imdb_id = ? ORDER BY movie_id DESC LIMIT 1`, imdb).Scan(&movieID, &foundTMDB)
+		if err == sql.ErrNoRows {
+			return 0, "", nil
+		}
+		return movieID, foundTMDB, err
+	}
+
+	// 3. Pure Numeric ID
+	if numID, err := strconv.Atoi(raw); err == nil && numID > 0 {
+		var movieID int
+		var foundTMDB string
+		err := d.conn.QueryRow(`SELECT movie_id, tmdb_id FROM movie_state WHERE movie_id = ? LIMIT 1`, numID).Scan(&movieID, &foundTMDB)
+		if err == nil {
+			return movieID, foundTMDB, nil
+		}
+		return numID, "", nil
+	}
+
+	return 0, "", fmt.Errorf("unrecognized movie identifier format: %s", identifier)
+}
+
+// FindMovieByFingerprint searches for an active movie ID using stored TMDB ID or title + year when an ID has gone stale.
+func (d *DB) FindMovieByFingerprint(oldMovieID int, title string, year int) (int, error) {
+	if oldMovieID > 0 {
+		var tmdbID string
+		var oldTitle string
+		var oldYear int
+		_ = d.conn.QueryRow(`SELECT tmdb_id, title, year FROM movie_state WHERE movie_id = ?`, oldMovieID).Scan(&tmdbID, &oldTitle, &oldYear)
+		if tmdbID != "" {
+			var activeID int
+			err := d.conn.QueryRow(`SELECT movie_id FROM movie_state WHERE tmdb_id = ? AND movie_id != ? ORDER BY movie_id DESC LIMIT 1`, tmdbID, oldMovieID).Scan(&activeID)
+			if err == nil && activeID > 0 {
+				return activeID, nil
+			}
+		}
+		if title == "" {
+			title = oldTitle
+		}
+		if year <= 0 {
+			year = oldYear
+		}
+	}
+
+	if title != "" && year > 0 {
+		var activeID int
+		err := d.conn.QueryRow(`SELECT movie_id FROM movie_state WHERE title = ? AND year = ? AND movie_id != ? ORDER BY movie_id DESC LIMIT 1`, title, year, oldMovieID).Scan(&activeID)
+		if err == nil && activeID > 0 {
+			return activeID, nil
+		}
+	}
+
+	return 0, sql.ErrNoRows
+}
+
 // UpsertInitialMovieState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
 func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, imdbID, title string, year int, folderName string) error {
 	now := time.Now()
@@ -444,7 +612,7 @@ func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, imdbID, title string, 
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
-		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE movie_state.folder_name END,
+		folder_name = CASE WHEN movie_state.folder_name != '' THEN movie_state.folder_name ELSE EXCLUDED.folder_name END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`
 	_, err := d.conn.Exec(query, movieID, tmdbID, imdbID, title, year, folderName, now)
@@ -866,7 +1034,7 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
-		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE movie_state.folder_name END,
+		folder_name = CASE WHEN movie_state.folder_name != '' THEN movie_state.folder_name ELSE EXCLUDED.folder_name END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`)
 	if err != nil {
@@ -919,7 +1087,7 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
-		folder_name = CASE WHEN EXCLUDED.folder_name != '' THEN EXCLUDED.folder_name ELSE series_state.folder_name END,
+		folder_name = CASE WHEN series_state.folder_name != '' THEN series_state.folder_name ELSE EXCLUDED.folder_name END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`)
 	if err != nil {
@@ -939,4 +1107,16 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	}
 
 	return tx.Commit()
+}
+
+// UpdateMovieFolderName updates the folder name recorded for a movie when the reconciler migrates its directory on disk.
+func (d *DB) UpdateMovieFolderName(movieID int, folderName string) error {
+	_, err := d.conn.Exec(`UPDATE movie_state SET folder_name = ? WHERE movie_id = ?`, folderName, movieID)
+	return err
+}
+
+// UpdateSeriesFolderName updates the folder name recorded for a series when the reconciler migrates its directory on disk.
+func (d *DB) UpdateSeriesFolderName(seriesID int, folderName string) error {
+	_, err := d.conn.Exec(`UPDATE series_state SET folder_name = ? WHERE series_id = ?`, folderName, seriesID)
+	return err
 }

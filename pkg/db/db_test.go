@@ -312,4 +312,32 @@ func TestSQLiteStateEngine(t *testing.T) {
 	if statsAfterSecondStage.MovieAdds != 4 {
 		t.Errorf("Expected MovieAdds count to remain 4 (no duplicate enqueue), got %d", statsAfterSecondStage.MovieAdds)
 	}
+
+	// 10. Test Identifier Resolution and Self-Healing Fingerprints
+	// Test TMDB identifier resolution
+	resolvedMovieID, tmdbVal, err := d.GetMovieIDByIdentifier("tmdb:100")
+	if err != nil || resolvedMovieID != 7001 || tmdbVal != "100" {
+		t.Errorf("GetMovieIDByIdentifier tmdb:100 got (%d, %q, %v); want (7001, 100, nil)", resolvedMovieID, tmdbVal, err)
+	}
+
+	// Test numeric identifier resolution
+	resolvedNumID, _, err := d.GetMovieIDByIdentifier("7002")
+	if err != nil || resolvedNumID != 7002 {
+		t.Errorf("GetMovieIDByIdentifier numeric got (%d, %v); want (7002, nil)", resolvedNumID, err)
+	}
+
+	// Test series identifier resolution
+	resolvedSeriesID, seriesTMDB, err := d.GetSeriesIDByIdentifier("tmdb:61381")
+	if err != nil || resolvedSeriesID != seriesID || seriesTMDB != "61381" {
+		t.Errorf("GetSeriesIDByIdentifier tmdb:61381 got (%d, %q, %v); want (%d, 61381, nil)", resolvedSeriesID, seriesTMDB, err, seriesID)
+	}
+
+	// Test Self-Healing Fingerprint when Dispatcharr ID changes (7001 -> 8001 with same TMDB 100)
+	if err := d.UpsertInitialMovieState(8001, "100", "", "New Movie A", 2024, "New Movie A (2024) [tmdbid=100]"); err != nil {
+		t.Fatalf("Failed to upsert new movie state: %v", err)
+	}
+	healedMovieID, err := d.FindMovieByFingerprint(7001, "New Movie A", 2024)
+	if err != nil || healedMovieID != 8001 {
+		t.Errorf("FindMovieByFingerprint got (%d, %v); want (8001, nil)", healedMovieID, err)
+	}
 }

@@ -15,12 +15,24 @@
 - **Native Dispatcharr VOD Proxy Streaming**:
   - Automatically redirects playback directly to Dispatcharr's Native VOD Streaming Proxy (`/proxy/vod/movie/{uuid}` and `/proxy/vod/episode/{uuid}`).
   - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
-- **Clean Extensionless Obfuscated URLs**: `.strm` files output clean extensionless URLs (`http://dp2strm:8080/play/movie/1058902`, `http://dp2strm:8080/play/series/30998/1/1`). Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
+- **Resilient External ID Routing (`tmdb:` / `imdb:`)**:
+  - `.strm` files output resilient, permanent external ID URLs (`/play/movie/tmdb:1739639`, `/play/series/tmdb:218510/1/1`, or `/play/movie/imdb:tt36615831`), falling back to numeric Dispatcharr IDs only for unindexed media.
+  - Completely immune to upstream M3U re-imports, stream re-indexing, or internal primary key changes in Dispatcharr.
+  - Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
+- **Self-Healing Legacy Playback & Dual-Key Caching**:
+  - If a legacy numeric ID (e.g. `1168810`) returns a 404 upstream from Dispatcharr, `dp2strm` automatically locates the active stream using the stored TMDB ID or Title + Year fingerprint.
+  - Caches the resolved stream in SQLite under both IDs for sub-millisecond future hits and enqueues a background reconciliation to correct the file on disk.
+- **In-Place STRM URL Reconciliation Fast-Path**:
+  - When `.strm` files on disk require internal URL updates (e.g. upgrading from numeric ID to `tmdb:`), `dp2strm` rewrites the file in-place and preserves its original modification timestamp (`os.Chtimes`).
+  - In-place URL updates finish in `<1ms`, do **not** increment `EMBY_BATCH_SIZE`, and bypass Emby library scan pauses, ensuring zero playback disruption.
+- **Controlled Folder Migrations (Scheduled Reconciler Only)**:
+  - When an unindexed title receives a TMDB ID later, folder paths remain strictly locked during real-time playback to prevent Emby from encountering 404s during probing.
+  - Folder structure renames (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=...]`) are handled exclusively by the scheduled worker reconciliation pass, where each rename is tracked as a structural update (`STRMCreated = true`), notified to Emby (`NotifyMediaUpdated`), and paced through `EMBY_BATCH_SIZE`.
 - **Specials-Based TV Series Activation Lifecycle (`Specials/S00E99`)**:
   - **Pass 1 (Lightweight Sync)**: Generates posters and a special placeholder `Specials/Show Name - S00E99 - Activate Series.strm` accompanied by an explicit instructions NFO (`⚡ Play to Activate Series`). The activation NFO is always generated regardless of `ENABLE_NFO` so users have clear instructions in Emby's UI.
   - **Pass 2 (On Play)**: Clicking Play on the Special immediately streams an embedded **5-second FastStart video bumper (`activated.mp4`)**, while an async background worker halts any active background global library scans, writes Season 1 `.strm` files, and triggers a targeted Emby series refresh. **`S01E01` remains 100% unwatched** in the user's history!
 - **On-Demand Movie Quality Activation**:
-  - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{id}` with artwork (and NFO metadata if enabled).
+  - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{identifier}` with artwork (and NFO metadata if enabled).
   - **On Play**: `handleMoviePlay` cancels any running background library scans, resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
   - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
 - **Dedicated Staged-Queue & Worker Pipeline**:

@@ -5,10 +5,42 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"dp2strm/pkg/models"
 )
+
+// STRMWriteStatus represents the outcome of writing a STRM file on disk.
+type STRMWriteStatus int
+
+const (
+	STRMPreserved STRMWriteStatus = iota // Content identical, mtime preserved
+	STRMUpdated                          // Existing file updated in-place (mtime preserved)
+	STRMCreated                          // Brand-new file created on disk
+)
+
+// FormatMovieIdentifier selects the most permanent identifier for a movie (TMDB > IMDb > Dispatcharr ID).
+func FormatMovieIdentifier(tmdbID, imdbID string, movieID int) string {
+	if t := strings.TrimSpace(tmdbID); t != "" && t != "0" {
+		return "tmdb:" + t
+	}
+	if i := strings.TrimSpace(imdbID); i != "" {
+		return "imdb:" + i
+	}
+	return strconv.Itoa(movieID)
+}
+
+// FormatSeriesIdentifier selects the most permanent identifier for a TV series (TMDB > IMDb > Dispatcharr ID).
+func FormatSeriesIdentifier(tmdbID, imdbID string, seriesID int) string {
+	if t := strings.TrimSpace(tmdbID); t != "" && t != "0" {
+		return "tmdb:" + t
+	}
+	if i := strings.TrimSpace(imdbID); i != "" {
+		return "imdb:" + i
+	}
+	return strconv.Itoa(seriesID)
+}
 
 // getBaseProxyURL extracts and normalizes the base URL, appending cfg.Port if missing and non-standard.
 func getBaseProxyURL(cfg *models.Config) string {
@@ -35,31 +67,30 @@ func getBaseProxyURL(cfg *models.Config) string {
 }
 
 // GenerateMovieProxyURL builds the clean extensionless playback URL pointing to dp2strm playback handler.
-// Format: /play/movie/{movie_id} or /play/movie/{movie_id}/{variant_key}
-func GenerateMovieProxyURL(cfg *models.Config, movieID int, variantKey string) string {
+// Format: /play/movie/{identifier} or /play/movie/{identifier}/{variant_key}
+func GenerateMovieProxyURL(cfg *models.Config, identifier string, variantKey string) string {
 	base := getBaseProxyURL(cfg)
 	if variantKey == "" || variantKey == "base" {
-		return fmt.Sprintf("%s/play/movie/%d", base, movieID)
+		return fmt.Sprintf("%s/play/movie/%s", base, identifier)
 	}
-	return fmt.Sprintf("%s/play/movie/%d/%s", base, movieID, variantKey)
+	return fmt.Sprintf("%s/play/movie/%s/%s", base, identifier, variantKey)
 }
 
 // GenerateSeriesProxyURL builds the clean extensionless playback URL for TV episodes.
-// Format: /play/series/{series_id}/{season}/{episode} or /play/series/{series_id}/{season}/{episode}/{variant_key}
-func GenerateSeriesProxyURL(cfg *models.Config, seriesID int, season int, episode int, variantKey string) string {
+// Format: /play/series/{identifier}/{season}/{episode} or /play/series/{identifier}/{season}/{episode}/{variant_key}
+func GenerateSeriesProxyURL(cfg *models.Config, identifier string, season int, episode int, variantKey string) string {
 	base := getBaseProxyURL(cfg)
 	if variantKey == "" || variantKey == "base" {
-		return fmt.Sprintf("%s/play/series/%d/%d/%d", base, seriesID, season, episode)
+		return fmt.Sprintf("%s/play/series/%s/%d/%d", base, identifier, season, episode)
 	}
-	return fmt.Sprintf("%s/play/series/%d/%d/%d/%s", base, seriesID, season, episode, variantKey)
+	return fmt.Sprintf("%s/play/series/%s/%d/%d/%s", base, identifier, season, episode, variantKey)
 }
 
-// WriteSTRMFile writes a .strm file on disk, preserving mtime if the content is identical.
-// Returns (updated bool, err error).
-func WriteSTRMFile(filePath string, content string) (bool, error) {
+// WriteSTRMFileDetailed writes a .strm file on disk and categorizes the result (Preserved, Updated in-place, Created new).
+func WriteSTRMFileDetailed(filePath string, content string) (STRMWriteStatus, error) {
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0777); err != nil {
-		return false, fmt.Errorf("failed to create directory %s: %w", dir, err)
+		return STRMPreserved, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
 	existingInfo, err := os.Stat(filePath)
@@ -67,15 +98,29 @@ func WriteSTRMFile(filePath string, content string) (bool, error) {
 		existingBytes, readErr := os.ReadFile(filePath)
 		if readErr == nil && strings.TrimSpace(string(existingBytes)) == strings.TrimSpace(content) {
 			mtime := existingInfo.ModTime()
-			atime := mtime
-			_ = os.Chtimes(filePath, atime, mtime)
-			return false, nil // Preserved
+			_ = os.Chtimes(filePath, mtime, mtime)
+			return STRMPreserved, nil // Identical content preserved
 		}
+
+		// File exists but content changed -> update in-place, preserving original mtime
+		if wErr := os.WriteFile(filePath, []byte(content), 0666); wErr != nil {
+			return STRMPreserved, fmt.Errorf("failed to write strm file %s: %w", filePath, wErr)
+		}
+		_ = os.Chtimes(filePath, existingInfo.ModTime(), existingInfo.ModTime())
+		return STRMUpdated, nil // In-place URL update
 	}
 
-	if err := os.WriteFile(filePath, []byte(content), 0666); err != nil {
-		return false, fmt.Errorf("failed to write strm file %s: %w", filePath, err)
+	// Brand-new file creation
+	if wErr := os.WriteFile(filePath, []byte(content), 0666); wErr != nil {
+		return STRMPreserved, fmt.Errorf("failed to write strm file %s: %w", filePath, wErr)
 	}
 
-	return true, nil // Updated
+	return STRMCreated, nil // Brand-new file created
+}
+
+// WriteSTRMFile writes a .strm file on disk, preserving mtime if the content is identical.
+// Returns (updatedOrCreated bool, err error).
+func WriteSTRMFile(filePath string, content string) (bool, error) {
+	status, err := WriteSTRMFileDetailed(filePath, content)
+	return status != STRMPreserved, err
 }

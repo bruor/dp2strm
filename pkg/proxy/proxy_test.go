@@ -142,4 +142,30 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != expectedLocation4k {
 		t.Errorf("Expected 302 Location %s for stripped 4k.mkv, got %s", expectedLocation4k, loc)
 	}
+
+	// 6. Test TMDB Identifier Playback (/play/movie/tmdb:1739639)
+	_ = database.UpsertInitialMovieState(1058902, "1739639", "", "Test Movie", 2026, "Test Movie (2026)")
+	req = httptest.NewRequest("GET", "/play/movie/tmdb:1739639", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for tmdb movie play, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != expectedLocation {
+		t.Errorf("Expected 302 Location %s for tmdb:1739639, got %s", expectedLocation, loc)
+	}
+
+	// 7. Test TMDB Identifier Series Playback (/play/series/tmdb:61381/1/1)
+	_ = database.UpsertInitialSeriesState(30998, "61381", "", "Test Series", 2014, "Test Series (2014)")
+	req = httptest.NewRequest("GET", "/play/series/tmdb:61381/1/1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for tmdb series play, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != expectedSeriesLoc {
+		t.Errorf("Expected 302 Location %s for tmdb:61381, got %s", expectedSeriesLoc, loc)
+	}
 }

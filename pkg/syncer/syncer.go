@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -602,11 +603,12 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	actNFOFilename := fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle))
 	actNFOPath := filepath.Join(specialsDir, actNFOFilename)
 
-	actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, series.ID, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+	seriesIdent := strm.FormatSeriesIdentifier(series.TMDBID, series.IMDBID, series.ID)
+	actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
 
-	strmUpdated, err := strm.WriteSTRMFile(actStrmPath, actProxyURL)
+	writeStatus, err := strm.WriteSTRMFileDetailed(actStrmPath, actProxyURL)
 	if err == nil {
-		if strmUpdated {
+		if writeStatus == strm.STRMCreated {
 			created++
 			strmCreated = true
 		} else {
@@ -724,7 +726,16 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		nfoFilename := fmt.Sprintf("%s - S%02dE%02d.nfo", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
 		nfoPath := filepath.Join(seasonDir, nfoFilename)
 
-		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesID, ep.SeasonNumber, ep.EpisodeNumber, "base")
+		seriesIdent := ""
+		if s.database != nil {
+			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
+				seriesIdent = strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, seriesID)
+			}
+		}
+		if seriesIdent == "" {
+			seriesIdent = strconv.Itoa(seriesID)
+		}
+		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, ep.SeasonNumber, ep.EpisodeNumber, "base")
 
 		ext := ep.ContainerExtension
 		if ext == "" {
@@ -764,13 +775,13 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			continue
 		}
 
-		updated, err := strm.WriteSTRMFile(strmPath, proxyURL)
+		writeStatus, err := strm.WriteSTRMFileDetailed(strmPath, proxyURL)
 		if err != nil {
 			log.Printf("[Syncer] Error writing episode STRM %s: %v", strmPath, err)
 			continue
 		}
 
-		if updated {
+		if writeStatus == strm.STRMCreated {
 			created++
 		} else {
 			preserved++
@@ -870,15 +881,16 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		}
 	}
 
-	// 2. Write clean extensionless .strm file pointing to /play/movie/{movie_id}
+	// 2. Write clean extensionless .strm file pointing to /play/movie/{identifier}
+	movieIdent := strm.FormatMovieIdentifier(movie.TMDBID, movie.IMDBID, movie.ID)
 	strmFilename := fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(cleanTitle))
 	strmPath := filepath.Join(movieDir, strmFilename)
-	proxyURL := strm.GenerateMovieProxyURL(s.cfg, movie.ID, "base")
+	proxyURL := strm.GenerateMovieProxyURL(s.cfg, movieIdent, "base")
 
-	updated, err := strm.WriteSTRMFile(strmPath, proxyURL)
+	writeStatus, err := strm.WriteSTRMFileDetailed(strmPath, proxyURL)
 	if err != nil {
 		log.Printf("[Syncer] Error writing movie STRM %s: %v", strmPath, err)
-	} else if updated {
+	} else if writeStatus == strm.STRMCreated {
 		created++
 		strmCreated = true
 	} else {
@@ -988,10 +1000,11 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 			// If secondary variant (e.g. 4K), write secondary .strm file on disk for Emby's version dropdown menu
 			if varKey != "base" {
 				secStrmPath := filepath.Join(movieDir, v.Filename)
-				secProxyURL := strm.GenerateMovieProxyURL(s.cfg, movieID, varKey)
-				updated, wErr := strm.WriteSTRMFile(secStrmPath, secProxyURL)
+				movieIdent := strm.FormatMovieIdentifier(tmdbID, "", movieID)
+				secProxyURL := strm.GenerateMovieProxyURL(s.cfg, movieIdent, varKey)
+				writeStatus, wErr := strm.WriteSTRMFileDetailed(secStrmPath, secProxyURL)
 				if wErr == nil {
-					if updated {
+					if writeStatus == strm.STRMCreated {
 						created++
 					} else {
 						preserved++
@@ -1638,19 +1651,26 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 		summary.IMDBID = st.IMDBID
 
 		tvShowsRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
-		currentDir := filepath.Join(tvShowsRoot, st.FolderName)
+		canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(st.Title), st.Year, st.TMDBID, st.IMDBID)
+		currentFolderName := st.FolderName
+		if currentFolderName == "" {
+			currentFolderName = canonicalFolderName
+		}
+		currentDir := filepath.Join(tvShowsRoot, currentFolderName)
+		canonicalDir := filepath.Join(tvShowsRoot, canonicalFolderName)
 
-		// 1. Check if legacy folder exists without ID and rename it
-		if st.Year > 0 {
-			legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(st.Title), st.Year)
-			legacyDir := filepath.Join(tvShowsRoot, legacyFolderName)
-			if legacyDir != currentDir {
-				if _, statErr := os.Stat(legacyDir); statErr == nil {
-					if _, canonicalErr := os.Stat(currentDir); os.IsNotExist(canonicalErr) {
-						if rErr := os.Rename(legacyDir, currentDir); rErr == nil {
-							log.Printf("[Worker] Reconciled legacy TV folder: %q -> %q", legacyFolderName, st.FolderName)
-							summary.STRMCreated = true
+		// 1. Check if folder needs migration to canonical name (e.g. ID upgrade)
+		if currentDir != canonicalDir {
+			if _, statErr := os.Stat(currentDir); statErr == nil {
+				if _, canonicalErr := os.Stat(canonicalDir); os.IsNotExist(canonicalErr) {
+					if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
+						log.Printf("[Worker] Reconciled TV Show folder: %q -> %q", currentFolderName, canonicalFolderName)
+						summary.STRMCreated = true
+						if s.database != nil {
+							_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
 						}
+						currentDir = canonicalDir
+						st.FolderName = canonicalFolderName
 					}
 				}
 			}
@@ -1661,10 +1681,11 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			specialsDir := filepath.Join(currentDir, "Specials")
 			actStrmFilename := fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title))
 			actStrmPath := filepath.Join(specialsDir, actStrmFilename)
-			actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, st.SeriesID, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+			seriesIdent := strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, st.SeriesID)
+			actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
 
-			strmUpdated, _ := strm.WriteSTRMFile(actStrmPath, actProxyURL)
-			if strmUpdated {
+			writeStatus, _ := strm.WriteSTRMFileDetailed(actStrmPath, actProxyURL)
+			if writeStatus == strm.STRMCreated {
 				summary.STRMCreated = true
 			}
 			actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
@@ -1696,18 +1717,26 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 		summary.IMDBID = mst.IMDBID
 
 		moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
-		currentDir := filepath.Join(moviesRoot, mst.FolderName)
+		canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(mst.Title), mst.Year, mst.TMDBID, mst.IMDBID)
+		currentFolderName := mst.FolderName
+		if currentFolderName == "" {
+			currentFolderName = canonicalFolderName
+		}
+		currentDir := filepath.Join(moviesRoot, currentFolderName)
+		canonicalDir := filepath.Join(moviesRoot, canonicalFolderName)
 
-		if mst.Year > 0 {
-			legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(mst.Title), mst.Year)
-			legacyDir := filepath.Join(moviesRoot, legacyFolderName)
-			if legacyDir != currentDir {
-				if _, statErr := os.Stat(legacyDir); statErr == nil {
-					if _, canonicalErr := os.Stat(currentDir); os.IsNotExist(canonicalErr) {
-						if rErr := os.Rename(legacyDir, currentDir); rErr == nil {
-							log.Printf("[Worker] Reconciled legacy Movie folder: %q -> %q", legacyFolderName, mst.FolderName)
-							summary.STRMCreated = true
+		// 1. Check if folder needs migration to canonical name (e.g. ID upgrade)
+		if currentDir != canonicalDir {
+			if _, statErr := os.Stat(currentDir); statErr == nil {
+				if _, canonicalErr := os.Stat(canonicalDir); os.IsNotExist(canonicalErr) {
+					if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
+						log.Printf("[Worker] Reconciled Movie folder: %q -> %q", currentFolderName, canonicalFolderName)
+						summary.STRMCreated = true
+						if s.database != nil {
+							_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
 						}
+						currentDir = canonicalDir
+						mst.FolderName = canonicalFolderName
 					}
 				}
 			}
@@ -1816,23 +1845,36 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		unactivated, err := s.database.GetUnactivatedSeries()
 		if err == nil {
 			for _, st := range unactivated {
-				folderName := st.FolderName
-				if folderName == "" {
-					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(st.Title), st.Year, st.TMDBID, st.IMDBID)
+				canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(st.Title), st.Year, st.TMDBID, st.IMDBID)
+				currentFolderName := st.FolderName
+				if currentFolderName == "" {
+					currentFolderName = canonicalFolderName
 				}
-				seriesDirPath := filepath.Join(tvShowsRoot, folderName)
+				seriesDirPath := filepath.Join(tvShowsRoot, currentFolderName)
+				canonicalDirPath := filepath.Join(tvShowsRoot, canonicalFolderName)
 				season1Dir := filepath.Join(seriesDirPath, "Season 01")
 				specialsDir := filepath.Join(seriesDirPath, "Specials")
 				actStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title)))
 				actNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
 
+				expectedIdent := strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, st.SeriesID)
+				expectedActURL := strm.GenerateSeriesProxyURL(s.cfg, expectedIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+
 				needsReconcile := false
+				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
+				if seriesDirPath != canonicalDirPath {
+					if _, statErr := os.Stat(seriesDirPath); statErr == nil {
+						needsReconcile = true
+					}
+				}
 				// Check if on-disk legacy Season 01 exists
 				if _, s1Err := os.Stat(season1Dir); s1Err == nil {
 					needsReconcile = true
 				}
-				// Check if Specials activation placeholder STRM or NFO is missing on disk
-				if _, actErr := os.Stat(actStrm); os.IsNotExist(actErr) {
+				// Check if Specials activation placeholder STRM or NFO is missing or has outdated URL
+				if contentBytes, actErr := os.ReadFile(actStrm); actErr != nil {
+					needsReconcile = true
+				} else if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedActURL) {
 					needsReconcile = true
 				}
 				if _, actNFOErr := os.Stat(actNFO); os.IsNotExist(actNFOErr) {
@@ -1847,31 +1889,35 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		}
 	}
 
-	// 3. Scan and enqueue Movies needing folder ID upgrade or missing STRM file restoration
+	// 3. Scan and enqueue Movies needing folder ID upgrade, missing STRM file restoration, or URL upgrade
 	moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
 	if s.database != nil {
 		allMovies, err := s.database.GetAllMovieStates()
 		if err == nil {
 			for _, mst := range allMovies {
-				folderName := mst.FolderName
-				if folderName == "" {
-					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(mst.Title), mst.Year, mst.TMDBID, mst.IMDBID)
+				canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(mst.Title), mst.Year, mst.TMDBID, mst.IMDBID)
+				currentFolderName := mst.FolderName
+				if currentFolderName == "" {
+					currentFolderName = canonicalFolderName
 				}
-				movieDir := filepath.Join(moviesRoot, folderName)
+				movieDir := filepath.Join(moviesRoot, currentFolderName)
+				canonicalDir := filepath.Join(moviesRoot, canonicalFolderName)
 				strmPath := filepath.Join(movieDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(mst.Title)))
 
+				expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)
+				expectedURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, "base")
+
 				needsReconcile := false
-				if _, statErr := os.Stat(strmPath); os.IsNotExist(statErr) {
-					needsReconcile = true
-				}
-				if mst.Year > 0 {
-					legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(mst.Title), mst.Year)
-					legacyDir := filepath.Join(moviesRoot, legacyFolderName)
-					if legacyDir != movieDir {
-						if _, statErr := os.Stat(legacyDir); statErr == nil {
-							needsReconcile = true
-						}
+				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
+				if movieDir != canonicalDir {
+					if _, statErr := os.Stat(movieDir); statErr == nil {
+						needsReconcile = true
 					}
+				}
+				if contentBytes, statErr := os.ReadFile(strmPath); statErr != nil {
+					needsReconcile = true
+				} else if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedURL) {
+					needsReconcile = true
 				}
 
 				if needsReconcile {
