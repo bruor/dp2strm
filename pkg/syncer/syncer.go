@@ -681,16 +681,25 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 
 	// Auto-clean Pass 1 Season 01 S01E01 activation NFO if ENABLE_NFO is false
 	if !s.cfg.EnableNFO {
-		s01e01NFO := filepath.Join(seriesDir, "Season 01", fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle)))
-		_ = os.Remove(s01e01NFO)
+		season1Dir := filepath.Join(seriesDir, "Season 01")
+		if entries, rErr := os.ReadDir(season1Dir); rErr == nil {
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".nfo") && strings.Contains(entry.Name(), "S01E01") {
+					_ = os.Remove(filepath.Join(season1Dir, entry.Name()))
+				}
+			}
+		}
 	}
 
 	// Auto-clean any legacy Specials S00E99 activation placeholder
 	specialsDir := filepath.Join(seriesDir, "Specials")
-	legacySpecialStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle)))
-	legacySpecialNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle)))
-	_ = os.Remove(legacySpecialStrm)
-	_ = os.Remove(legacySpecialNFO)
+	if entries, rErr := os.ReadDir(specialsDir); rErr == nil {
+		for _, entry := range entries {
+			if strings.Contains(entry.Name(), "Activate Series") || strings.Contains(entry.Name(), "S00E99") {
+				_ = os.Remove(filepath.Join(specialsDir, entry.Name()))
+			}
+		}
+	}
 
 	// Check if upstream Dispatcharr actually has real specials (Season 0)
 	hasRealSpecials := false
@@ -710,8 +719,13 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 	// Clean up temporary Season 01 directory if show starts at Season 2+
 	if !hasS01E01 {
 		season1Dir := filepath.Join(seriesDir, "Season 01")
-		_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))))
-		_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle))))
+		if entries, rErr := os.ReadDir(season1Dir); rErr == nil {
+			for _, entry := range entries {
+				if strings.Contains(entry.Name(), "S01E01") {
+					_ = os.Remove(filepath.Join(season1Dir, entry.Name()))
+				}
+			}
+		}
 		if remaining, _ := os.ReadDir(season1Dir); len(remaining) == 0 {
 			_ = os.Remove(season1Dir)
 		}
