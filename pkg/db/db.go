@@ -790,6 +790,14 @@ func (d *DB) RemoveSoftDeletedItem(itemPath string) error {
 	return err
 }
 
+// GetPendingSoftDeletedCount returns the total number of items currently held in the retention grace period.
+func (d *DB) GetPendingSoftDeletedCount() (int, error) {
+	query := `SELECT COUNT(*) FROM soft_deleted_items`
+	var count int
+	err := d.conn.QueryRow(query).Scan(&count)
+	return count, err
+}
+
 // GetStaleMovieStates returns movies that were not updated since cutoffTime (i.e. disappeared from upstream catalog).
 func (d *DB) GetStaleMovieStates(cutoffTime time.Time) ([]*MovieState, error) {
 	query := `SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at FROM movie_state WHERE last_checked_at < ?`

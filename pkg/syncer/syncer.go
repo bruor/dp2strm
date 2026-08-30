@@ -1968,11 +1968,14 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 	if s.database != nil && s.cfg.RetentionGraceDays > 0 {
 		expiredPaths, err := s.database.GetExpiredSoftDeletedItems(s.cfg.RetentionGraceDays)
 		if err == nil && len(expiredPaths) > 0 {
-			log.Printf("[Reconciler] Purging %d expired soft-deleted items from disk...", len(expiredPaths))
+			log.Printf("[Retention] Purging %d expired soft-deleted items from disk (%d-day grace period exceeded)...", len(expiredPaths), s.cfg.RetentionGraceDays)
 			for _, p := range expiredPaths {
 				_ = os.RemoveAll(p)
 				_ = s.database.RemoveSoftDeletedItem(p)
 			}
+		}
+		if pendingCount, pErr := s.database.GetPendingSoftDeletedCount(); pErr == nil && pendingCount > 0 {
+			log.Printf("[Retention] %d item(s) currently held in grace period waiting for retention timer (%d-day grace period).", pendingCount, s.cfg.RetentionGraceDays)
 		}
 	}
 
