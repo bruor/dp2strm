@@ -340,4 +340,16 @@ func TestSQLiteStateEngine(t *testing.T) {
 	if err != nil || healedMovieID != 8001 {
 		t.Errorf("FindMovieByFingerprint got (%d, %v); want (8001, nil)", healedMovieID, err)
 	}
+
+	// Test FindMovieSupersededState
+	oldState, err := d.FindMovieSupersededState(8001, "100", "New Movie A", 2024)
+	if err != nil || oldState == nil || oldState.MovieID != 7001 {
+		t.Errorf("FindMovieSupersededState got (%+v, %v); want MovieID 7001", oldState, err)
+	}
+	if err := d.DeleteMovieState(7001); err != nil {
+		t.Fatalf("DeleteMovieState failed: %v", err)
+	}
+	if st, err := d.GetMovieState(7001); err != nil || st != nil {
+		t.Errorf("Expected movie 7001 to be deleted from database, got %+v (err: %v)", st, err)
+	}
 }

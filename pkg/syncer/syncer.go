@@ -527,6 +527,25 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID, series.IMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
 
+	// Content Fingerprint Healing: If this series was previously known under a different ID in SQLite,
+	// transfer activation state, immediately purge old folder on disk, and clean up the stale record.
+	if s.database != nil {
+		if oldState, fErr := s.database.FindSeriesSupersededState(series.ID, series.TMDBID, series.Name, series.Year); fErr == nil && oldState != nil {
+			if oldState.FolderName != "" && oldState.FolderName != folderName {
+				oldDir := filepath.Join(s.cfg.OutputDir, "TV Shows", oldState.FolderName)
+				if _, statErr := os.Stat(oldDir); statErr == nil {
+					_ = os.RemoveAll(oldDir)
+					_ = s.database.RemoveSoftDeletedItem(oldDir)
+					log.Printf("[Syncer] Fingerprint Healing: Purged superseded TV show directory %q -> replaced by %q (ID %d -> %d)", oldState.FolderName, folderName, oldState.SeriesID, series.ID)
+				}
+			}
+			if oldState.IsActivated {
+				_ = s.database.SetSeriesActivated(series.ID, series.TMDBID, cleanTitle)
+			}
+			_ = s.database.DeleteSeriesState(oldState.SeriesID)
+		}
+	}
+
 	// Automatically migrate legacy folder without ID if it exists on disk (e.g. "TV Shows/Title (Year)")
 	if series.Year > 0 {
 		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(cleanTitle), series.Year)
@@ -833,6 +852,25 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 	cleanTitle := sanitizer.CleanTitle(movie.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID, movie.IMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
+
+	// Content Fingerprint Healing: If this movie was previously known under a different ID in SQLite,
+	// transfer activation state, immediately purge old folder on disk, and clean up the stale record.
+	if s.database != nil {
+		if oldState, fErr := s.database.FindMovieSupersededState(movie.ID, movie.TMDBID, movie.Name, movie.Year); fErr == nil && oldState != nil {
+			if oldState.FolderName != "" && oldState.FolderName != folderName {
+				oldDir := filepath.Join(s.cfg.OutputDir, "Movies", oldState.FolderName)
+				if _, statErr := os.Stat(oldDir); statErr == nil {
+					_ = os.RemoveAll(oldDir)
+					_ = s.database.RemoveSoftDeletedItem(oldDir)
+					log.Printf("[Syncer] Fingerprint Healing: Purged superseded Movie directory %q -> replaced by %q (ID %d -> %d)", oldState.FolderName, folderName, oldState.MovieID, movie.ID)
+				}
+			}
+			if oldState.IsActivated {
+				_ = s.database.SetMovieActivated(movie.ID, movie.TMDBID, cleanTitle)
+			}
+			_ = s.database.DeleteMovieState(oldState.MovieID)
+		}
+	}
 
 	// Automatically migrate legacy folder without ID if it exists on disk (e.g. "Movies/Title (Year)")
 	if movie.Year > 0 {

@@ -628,6 +628,94 @@ func (d *DB) FindMovieByFingerprint(oldMovieID int, title string, year int) (int
 	return 0, sql.ErrNoRows
 }
 
+// FindMovieSupersededState checks if an older/stale record exists matching the same TMDB ID or (Title + Year) under a different movie ID.
+func (d *DB) FindMovieSupersededState(movieID int, tmdbID string, title string, year int) (*MovieState, error) {
+	cleanTitle := sanitizer.CleanTitle(title)
+	if tmdbID != "" {
+		var m MovieState
+		var actAt, chkAt sql.NullTime
+		err := d.conn.QueryRow(`
+			SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at 
+			FROM movie_state 
+			WHERE tmdb_id = ? AND movie_id != ? 
+			ORDER BY movie_id DESC LIMIT 1`, tmdbID, movieID).Scan(
+			&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt)
+		if err == nil {
+			if actAt.Valid {
+				m.ActivatedAt = &actAt.Time
+			}
+			if chkAt.Valid {
+				m.LastCheckedAt = &chkAt.Time
+			}
+			return &m, nil
+		}
+	}
+	if cleanTitle != "" && year > 0 {
+		var m MovieState
+		var actAt, chkAt sql.NullTime
+		err := d.conn.QueryRow(`
+			SELECT movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at 
+			FROM movie_state 
+			WHERE (title = ? OR title = ?) AND year = ? AND movie_id != ? 
+			ORDER BY movie_id DESC LIMIT 1`, cleanTitle, title, year, movieID).Scan(
+			&m.MovieID, &m.TMDBID, &m.IMDBID, &m.Title, &m.Year, &m.FolderName, &m.IsActivated, &actAt, &chkAt)
+		if err == nil {
+			if actAt.Valid {
+				m.ActivatedAt = &actAt.Time
+			}
+			if chkAt.Valid {
+				m.LastCheckedAt = &chkAt.Time
+			}
+			return &m, nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
+// FindSeriesSupersededState checks if an older/stale record exists matching the same TMDB ID or (Title + Year) under a different series ID.
+func (d *DB) FindSeriesSupersededState(seriesID int, tmdbID string, title string, year int) (*SeriesState, error) {
+	cleanTitle := sanitizer.CleanTitle(title)
+	if tmdbID != "" {
+		var s SeriesState
+		var actAt, chkAt sql.NullTime
+		err := d.conn.QueryRow(`
+			SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at 
+			FROM series_state 
+			WHERE tmdb_id = ? AND series_id != ? 
+			ORDER BY series_id DESC LIMIT 1`, tmdbID, seriesID).Scan(
+			&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.IsActivated, &actAt, &chkAt)
+		if err == nil {
+			if actAt.Valid {
+				s.ActivatedAt = &actAt.Time
+			}
+			if chkAt.Valid {
+				s.LastCheckedAt = &chkAt.Time
+			}
+			return &s, nil
+		}
+	}
+	if cleanTitle != "" && year > 0 {
+		var s SeriesState
+		var actAt, chkAt sql.NullTime
+		err := d.conn.QueryRow(`
+			SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at 
+			FROM series_state 
+			WHERE (title = ? OR title = ?) AND year = ? AND series_id != ? 
+			ORDER BY series_id DESC LIMIT 1`, cleanTitle, title, year, seriesID).Scan(
+			&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.IsActivated, &actAt, &chkAt)
+		if err == nil {
+			if actAt.Valid {
+				s.ActivatedAt = &actAt.Time
+			}
+			if chkAt.Valid {
+				s.LastCheckedAt = &chkAt.Time
+			}
+			return &s, nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
 // UpsertInitialMovieState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
 func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, imdbID, title string, year int, folderName string) error {
 	now := time.Now()
