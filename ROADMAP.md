@@ -18,10 +18,16 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - Serves sub-50ms HTTP `302 Found` redirects.
   - Movie URLs: `/play/movie/{movie_id}` (or `/play/movie/{movie_id}/4k`)
   - Completely obfuscates upstream subscriber credentials (`agy/agypassword`) from disk files and Emby library.
-- [x] **On-Demand TV Series Activation & Session-Aware Refresh Lifecycle (`Season 01/S01E01`) (`pkg/proxy`, `pkg/syncer`, `pkg/emby`)**:
+- [x] **Content Fingerprint Healing & Upstream ID Supersede (`pkg/db`, `pkg/syncer`)**:
+  - Automatically matches streams across upstream provider drop/re-add cycles using content fingerprints (`TMDB ID` or `Title + Year`).
+  - When Dispatcharr issues a new internal ID for previously indexed content, `dp2strm` transfers user activation/watch state, updates SQLite, immediately purges the old obsolete directory on disk (`os.RemoveAll`), and bypasses the 7-day retention grace period.
+- [x] **Immediate Obsolete Folder Pruning on Metadata Upgrade (`pkg/syncer`)**:
+  - Distinguishes between true content deletions (safely buffered by `RETENTION_GRACE_DAYS=7`) vs in-place metadata/folder upgrades (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=12345]`).
+  - When writing or reconciling upgraded folders with rich ID metadata, old un-tagged legacy folders are pruned from disk immediately and unregistered from `soft_deleted_items`, eliminating duplicate entries in Emby.
+- [x] **On-Demand TV Series Activation & Instant Playback Handshake (`Season 01/S01E01`) (`pkg/proxy`, `pkg/syncer`, `pkg/emby`)**:
   - **Pass 1**: Generates posters, and `Season 01/Show Name - S01E01.strm` & `S01E01.nfo` (`⚡ Play to Activate Series` instructions). Shows cleanly as **Unplayed** in Emby and appears in **Next Up**.
-  - **Pass 2 (On Play)**: Immediate **HTTP 302 Found** redirect to real episode stream (zero bumper delay!). For shows starting at Season 2+, streams embedded 5-second `activated.mp4` bumper.
-  - **Session-Aware Refresh**: Verifies active playback session in Emby (`GET /Sessions`, configurable `ACTIVATION_REFRESH_DELAY=10s`), then fires targeted refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) replacing `"⚡ Play to Activate Series"` with `"Pilot"` without interrupting playback.
+  - **Pass 2 (Instant Playback Handshake)**: Immediate **HTTP 302 Found** redirect in `<1s` to real episode stream (zero bumper delay!). For shows starting at Season 2+, streams embedded 5-second `activated.mp4` bumper.
+  - **Asynchronous Session-Aware Refresh**: Holds VIP lock, prunes all `*S01E01*.nfo` files via wildcard scan, verifies active playback session in Emby (`GET /Sessions`), then fires targeted refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) replacing `"⚡ Play to Activate Series"` with real TMDB/TVDB episode titles without interrupting active playback.
 - [x] **Universal TaskManager Batch Synchronization & Dynamic ETA (`pkg/emby`, `pkg/syncer`)**:
   - Micro-batches (`EMBY_BATCH_SIZE`, default: 25) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and poll `GET /ScheduledTasks` once every 1s until Emby reaches **100% Idle** before releasing the next batch.
   - Replaced legacy per-item sleeps with zero-contention TaskManager synchronization.

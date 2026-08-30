@@ -17,8 +17,12 @@
   - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
 - **Resilient External ID Routing (`tmdb:` / `imdb:`)**:
   - `.strm` files output resilient, permanent external ID URLs (`/play/movie/tmdb:1739639`, `/play/series/tmdb:218510/1/1`, or `/play/movie/imdb:tt36615831`), falling back to numeric Dispatcharr IDs only for unindexed media.
-  - Completely immune to upstream M3U re-imports, stream re-indexing, or internal primary key changes in Dispatcharr.
-  - Upstream subscriber credentials and internal URLs are **never written to disk or exposed to Emby**.
+- **Content Fingerprint Healing & Upstream ID Supersede**:
+  - Automatically matches streams across upstream provider drop/re-add cycles using content fingerprints (`TMDB ID` or `Title + Year`).
+  - When Dispatcharr issues a new internal ID for previously indexed content, `dp2strm` transfers user activation/watch state, updates SQLite, immediately purges the old obsolete directory on disk (`os.RemoveAll`), and bypasses the 7-day retention grace period.
+- **Immediate Obsolete Folder Pruning on Metadata Upgrade**:
+  - Distinguishes between true content deletions (safely buffered by `RETENTION_GRACE_DAYS=7`) vs in-place metadata/folder upgrades (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=12345]`).
+  - When writing or reconciling upgraded folders with rich ID metadata, old un-tagged legacy folders are pruned from disk immediately and unregistered from `soft_deleted_items`, eliminating duplicate entries in Emby.
 - **Self-Healing Legacy Playback & Dual-Key Caching**:
   - If a legacy numeric ID (e.g. `1168810`) returns a 404 upstream from Dispatcharr, `dp2strm` automatically locates the active stream using the stored TMDB ID or Title + Year fingerprint.
   - Caches the resolved stream in SQLite under both IDs for sub-millisecond future hits and enqueues a background reconciliation to correct the file on disk.
@@ -30,8 +34,8 @@
   - Folder structure renames (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=...]`) are handled exclusively by the scheduled worker reconciliation pass, where each rename is tracked as a structural update (`STRMCreated = true`), notified to Emby (`NotifyMediaUpdated`), and paced through `EMBY_BATCH_SIZE`.
 - **On-Demand TV Series Activation Lifecycle (`Season 01/S01E01`)**:
   - **Pass 1 (Lightweight Sync)**: Generates posters and `Season 01/Show Name - S01E01.strm` accompanied by an explicit instructions NFO (`⚡ Play to Activate Series` with `<watched>false</watched>`, `<playcount>0</playcount>`, `<runtime>1</runtime>`). Series cleanly displays as **Unplayed** in Emby and renders in the **Next Up** rail on the home screen!
-  - **Pass 2 (On Play)**: Clicking Play on Episode 1 immediately resolves the stream and issues an instant **HTTP 302 Found** redirect directly to the real episode video (zero bumper delay!). For shows starting at Season 2+, an embedded 5-second video bumper (`activated.mp4`) is streamed to prevent watch history mismatches.
-  - **Session-Aware Metadata Sync**: An async background worker populates all remaining episodes on disk, deletes `S01E01.nfo`, verifies the active playback session in Emby (`GET /Sessions`, configurable timeout `ACTIVATION_REFRESH_DELAY=10s`), and triggers a targeted Emby metadata refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) that safely replaces `"⚡ Play to Activate Series"` with `"Pilot"` without interrupting active playback!
+  - **Pass 2 (Instant Playback Handshake)**: Clicking Play on Episode 1 writes all series episodes and issues an instant **HTTP 302 Found** redirect in `<1 second` directly to the real episode video (zero bumper delay!). For shows starting at Season 2+, an embedded 5-second video bumper (`activated.mp4`) is streamed to prevent watch history mismatches.
+  - **Asynchronous Session-Aware Metadata Sync**: A background worker holds the VIP lock, prunes all `*S01E01*.nfo` files, verifies the active playback session in Emby (`GET /Sessions`, configurable timeout `ACTIVATION_REFRESH_DELAY=10s`), and triggers a targeted Emby metadata refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) that cleanly fetches TMDB/TVDB episode titles without interrupting active playback!
 - **On-Demand Movie Quality Activation**:
   - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{identifier}` with artwork (and NFO metadata if enabled).
   - **On Play**: `handleMoviePlay` cancels any running background library scans, resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
