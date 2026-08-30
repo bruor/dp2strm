@@ -464,3 +464,102 @@ func TestVIPActivationPauseCoordination(t *testing.T) {
 	}
 }
 
+func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "reconcile_test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	cfg := &models.Config{
+		OutputDir: tempDir,
+		URL:       "http://localhost:9199",
+	}
+	s := NewSyncer(cfg, nil, database)
+
+	// 1. Setup Movie in DB with legacy folder name (no TMDB ID in FolderName)
+	movieID := 5001
+	_ = database.UpsertInitialMovieState(movieID, "27205", "", "Inception", 2010, "Inception (2010)")
+
+	// Create canonical directory and valid STRM on disk
+	canonicalMovieFolder := filepath.Join(tempDir, "Movies", "Inception (2010) [tmdbid=27205]")
+	if err := os.MkdirAll(canonicalMovieFolder, 0755); err != nil {
+		t.Fatalf("Failed to create movie dir: %v", err)
+	}
+	movieSTRM := filepath.Join(canonicalMovieFolder, "Inception (2010).strm")
+	movieURL := "http://localhost:9199/play/movie/tmdb:27205"
+	if err := os.WriteFile(movieSTRM, []byte(movieURL), 0644); err != nil {
+		t.Fatalf("Failed to write movie strm: %v", err)
+	}
+
+	// 2. Setup Series in DB with legacy folder name
+	seriesID := 9001
+	_ = database.UpsertInitialSeriesState(seriesID, "4607", "", "Lost", 2004, "Lost (2004)")
+
+	// Create canonical directory, Season 01, S01E01.strm, and S01E01.nfo on disk
+	canonicalSeriesFolder := filepath.Join(tempDir, "TV Shows", "Lost (2004) [tmdbid=4607]")
+	season1Dir := filepath.Join(canonicalSeriesFolder, "Season 01")
+	if err := os.MkdirAll(season1Dir, 0755); err != nil {
+		t.Fatalf("Failed to create series season1 dir: %v", err)
+	}
+	seriesSTRM := filepath.Join(season1Dir, "Lost - S01E01.strm")
+	seriesURL := "http://localhost:9199/play/series/tmdb:4607/1/1"
+	if err := os.WriteFile(seriesSTRM, []byte(seriesURL), 0644); err != nil {
+		t.Fatalf("Failed to write series strm: %v", err)
+	}
+	seriesNFO := filepath.Join(season1Dir, "Lost - S01E01.nfo")
+	nfoContent := `<episodedetails><title>⚡ Play to Activate Series</title><season>1</season><episode>1</episode><runtime>5</runtime><watched>false</watched></episodedetails>`
+	if err := os.WriteFile(seriesNFO, []byte(nfoContent), 0644); err != nil {
+		t.Fatalf("Failed to write series nfo: %v", err)
+	}
+
+	// 3. First Run of ReconcileDiskState:
+	// Should recognize that canonical files already exist, update SQLite folder names, and enqueue ZERO tasks!
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("ReconcileDiskState failed: %v", err)
+	}
+
+	stats, err := database.GetDetailedQueueStats()
+	if err != nil {
+		t.Fatalf("GetDetailedQueueStats failed: %v", err)
+	}
+	if stats.Pending != 0 {
+		t.Errorf("Expected 0 pending tasks for already valid items, got %d", stats.Pending)
+	}
+
+	// Verify database records were upgraded to canonical folder names
+	mst, _ := database.GetMovieState(movieID)
+	if mst.FolderName != "Inception (2010) [tmdbid=27205]" {
+		t.Errorf("Expected movie folder_name to be upgraded to canonical, got %q", mst.FolderName)
+	}
+	sst, _ := database.GetSeriesState(seriesID)
+	if sst.FolderName != "Lost (2004) [tmdbid=4607]" {
+		t.Errorf("Expected series folder_name to be upgraded to canonical, got %q", sst.FolderName)
+	}
+
+	// 4. Second Run of ReconcileDiskState:
+	// Should remain 0 tasks enqueued
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("Second ReconcileDiskState failed: %v", err)
+	}
+	stats, _ = database.GetDetailedQueueStats()
+	if stats.Pending != 0 {
+		t.Errorf("Expected 0 pending tasks on second run, got %d", stats.Pending)
+	}
+
+	// 5. Test genuine missing file detection: Delete movie STRM and verify exactly 1 task is enqueued
+	if err := os.Remove(movieSTRM); err != nil {
+		t.Fatalf("Failed to remove movie STRM: %v", err)
+	}
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("Third ReconcileDiskState failed: %v", err)
+	}
+	stats, _ = database.GetDetailedQueueStats()
+	if stats.Pending != 1 || stats.MovieReconciles != 1 {
+		t.Errorf("Expected 1 pending MovieReconcile task after deleting STRM, got %+v", stats)
+	}
+}
+
+
