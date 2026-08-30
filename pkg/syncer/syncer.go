@@ -731,12 +731,6 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
-	maxBatch := s.cfg.EmbyBatchSize
-	if maxBatch <= 0 {
-		maxBatch = 25
-	}
-	remainingUnwritten := 0
-
 	for _, ep := range episodes {
 		seasonDir := filepath.Join(seriesDir, fmt.Sprintf("Season %02d", ep.SeasonNumber))
 		filename := fmt.Sprintf("%s - S%02dE%02d.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
@@ -782,12 +776,6 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			})
 		}
 
-		// If file doesn't exist and we reached the batch quota for new items in this pass, track remainder and defer
-		if _, statErr := os.Stat(strmPath); os.IsNotExist(statErr) && created >= maxBatch {
-			remainingUnwritten++
-			continue
-		}
-
 		writeStatus, err := strm.WriteSTRMFileDetailed(strmPath, proxyURL)
 		if err != nil {
 			log.Printf("[Syncer] Error writing episode STRM %s: %v", strmPath, err)
@@ -819,18 +807,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			if _, statErr := os.Stat(nfoPath); statErr == nil {
 				_ = os.Remove(nfoPath)
 			}
-			if ep.SeasonNumber == 1 && ep.EpisodeNumber == 1 {
-				now := time.Now()
-				_ = os.Chtimes(strmPath, now, now)
-			}
 		}
-	}
-
-	// If more episodes remain to be written on disk, queue background batch task
-	if remainingUnwritten > 0 && s.database != nil {
-		log.Printf("[Syncer] Series %d (%s): Wrote batch of %d episodes (%d remaining). Enqueueing background batch...",
-			seriesID, cleanTitle, created, remainingUnwritten)
-		_ = s.database.EnqueueTask("series", seriesID, "update_episodes", models.PriorityAiring)
 	}
 
 	// Record series as activated in SQLite
