@@ -1223,21 +1223,11 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 	}
 
 	if embyItemID != "" {
-		// Trigger targeted item refresh directly on the specific series item with fresh provider metadata
-		refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", strings.TrimRight(s.cfg.EmbyURL, "/"), embyItemID)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, refreshURL, nil)
-		if err == nil {
-			req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
-			req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
-			req.Header.Set("Content-Type", "application/json")
-			resp, dErr := http.DefaultClient.Do(req)
-			if dErr == nil && resp != nil {
-				defer resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s)", title, embyItemID)
-					return
-				}
-			}
+		if s.embyClient != nil && s.embyClient.IsConfigured() {
+			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
+			_ = s.embyClient.RefreshSeriesEpisodes(ctx, embyItemID)
+			log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s)", title, embyItemID)
+			return
 		}
 	}
 

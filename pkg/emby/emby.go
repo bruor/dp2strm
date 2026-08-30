@@ -210,7 +210,7 @@ func (c *Client) queryItemID(ctx context.Context, queryParam string) string {
 	return ""
 }
 
-// RefreshItemByID sends a targeted metadata refresh directly to a specific series or movie item in Emby.
+// RefreshItemByID sends a targeted metadata refresh directly to a specific series, season, or movie item in Emby.
 func (c *Client) RefreshItemByID(ctx context.Context, itemID string) error {
 	if !c.IsConfigured() || itemID == "" {
 		return nil
@@ -233,6 +233,47 @@ func (c *Client) RefreshItemByID(ctx context.Context, itemID string) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("targeted item refresh returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// RefreshSeriesEpisodes queries Emby for child episodes under a series and explicitly triggers ReplaceAllMetadata on S01E01 (and any activation placeholder episodes).
+func (c *Client) RefreshSeriesEpisodes(ctx context.Context, seriesID string) error {
+	if !c.IsConfigured() || seriesID == "" {
+		return nil
+	}
+
+	epURL := fmt.Sprintf("%s/Shows/%s/Episodes", strings.TrimRight(c.cfg.EmbyURL, "/"), seriesID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, epURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+	req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil || resp == nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var epRes struct {
+		Items []struct {
+			ID                string `json:"Id"`
+			Name              string `json:"Name"`
+			IndexNumber       int    `json:"IndexNumber"`
+			ParentIndexNumber int    `json:"ParentIndexNumber"`
+		} `json:"Items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&epRes); err != nil {
+		return err
+	}
+
+	for _, ep := range epRes.Items {
+		// Refresh S01E01 and any episode that carries an activation placeholder name
+		if (ep.ParentIndexNumber == 1 && ep.IndexNumber == 1) || strings.Contains(ep.Name, "Activate") {
+			_ = c.RefreshItemByID(ctx, ep.ID)
+		}
 	}
 	return nil
 }
