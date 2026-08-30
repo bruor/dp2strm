@@ -79,18 +79,24 @@ func main() {
 	onActivation := func(seriesID int) {
 		log.Printf("[Activation] Async worker activated for Series ID %d...", seriesID)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
 
 		// Acquire VIP activation lock to halt any running global scan and pause background batch workers
 		unlock := syncEngine.BeginVIPActivation(ctx, seriesID)
-		defer unlock()
 
 		_, _, err := syncEngine.PopulateActivatedSeries(ctx, seriesID, "", "")
 		if err != nil {
 			log.Printf("[Activation] Error populating series ID %d: %v", seriesID, err)
+			unlock()
+			cancel()
 			return
 		}
-		syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
+
+		// Run session polling & targeted refresh in background so the HTTP proxy can send 302 redirect IMMEDIATELY without waiting for session polling
+		go func() {
+			defer cancel()
+			defer unlock()
+			syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
+		}()
 	}
 
 	// Movie Activation Callback Worker (auto-resolves canonical title & folder)
