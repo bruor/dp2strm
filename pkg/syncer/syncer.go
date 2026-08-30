@@ -1772,17 +1772,21 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 
 		// 1. Check if folder needs migration to canonical name (e.g. ID upgrade)
 		if currentDir != canonicalDir {
-			if _, statErr := os.Stat(currentDir); statErr == nil {
-				if _, canonicalErr := os.Stat(canonicalDir); os.IsNotExist(canonicalErr) {
-					if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
-						log.Printf("[Worker] Reconciled TV Show folder: %q -> %q", currentFolderName, canonicalFolderName)
-						summary.STRMCreated = true
-						if s.database != nil {
-							_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
-						}
-						currentDir = canonicalDir
-						st.FolderName = canonicalFolderName
+			if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
+				if s.database != nil {
+					_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
+				}
+				currentDir = canonicalDir
+				st.FolderName = canonicalFolderName
+			} else if _, statErr := os.Stat(currentDir); statErr == nil {
+				if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
+					log.Printf("[Worker] Reconciled TV Show folder: %q -> %q", currentFolderName, canonicalFolderName)
+					summary.STRMCreated = true
+					if s.database != nil {
+						_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
 					}
+					currentDir = canonicalDir
+					st.FolderName = canonicalFolderName
 				}
 			}
 		}
@@ -1844,17 +1848,21 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 
 		// 1. Check if folder needs migration to canonical name (e.g. ID upgrade)
 		if currentDir != canonicalDir {
-			if _, statErr := os.Stat(currentDir); statErr == nil {
-				if _, canonicalErr := os.Stat(canonicalDir); os.IsNotExist(canonicalErr) {
-					if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
-						log.Printf("[Worker] Reconciled Movie folder: %q -> %q", currentFolderName, canonicalFolderName)
-						summary.STRMCreated = true
-						if s.database != nil {
-							_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
-						}
-						currentDir = canonicalDir
-						mst.FolderName = canonicalFolderName
+			if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
+				if s.database != nil {
+					_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
+				}
+				currentDir = canonicalDir
+				mst.FolderName = canonicalFolderName
+			} else if _, statErr := os.Stat(currentDir); statErr == nil {
+				if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
+					log.Printf("[Worker] Reconciled Movie folder: %q -> %q", currentFolderName, canonicalFolderName)
+					summary.STRMCreated = true
+					if s.database != nil {
+						_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
 					}
+					currentDir = canonicalDir
+					mst.FolderName = canonicalFolderName
 				}
 			}
 		}
@@ -1996,7 +2004,11 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				needsReconcile := false
 				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
 				if seriesDirPath != canonicalDirPath {
-					if _, statErr := os.Stat(seriesDirPath); statErr == nil {
+					if _, canonicalErr := os.Stat(canonicalDirPath); canonicalErr == nil {
+						_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
+						seriesDirPath = canonicalDirPath
+						st.FolderName = canonicalFolderName
+					} else if _, statErr := os.Stat(seriesDirPath); statErr == nil {
 						needsReconcile = true
 					}
 				}
@@ -2054,22 +2066,45 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				}
 				movieDir := filepath.Join(moviesRoot, currentFolderName)
 				canonicalDir := filepath.Join(moviesRoot, canonicalFolderName)
-				strmPath := filepath.Join(movieDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(mst.Title)))
-
-				expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)
-				expectedURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, "base")
 
 				needsReconcile := false
 				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
 				if movieDir != canonicalDir {
-					if _, statErr := os.Stat(movieDir); statErr == nil {
+					if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
+						_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
+						movieDir = canonicalDir
+						mst.FolderName = canonicalFolderName
+					} else if _, statErr := os.Stat(movieDir); statErr == nil {
 						needsReconcile = true
 					}
 				}
-				if contentBytes, statErr := os.ReadFile(strmPath); statErr != nil {
-					needsReconcile = true
-				} else if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedURL) {
-					needsReconcile = true
+
+				expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)
+				expectedURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, "base")
+				strmPath := filepath.Join(movieDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(sanitizer.CleanTitle(mst.Title))))
+
+				if contentBytes, statErr := os.ReadFile(strmPath); statErr == nil {
+					if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedURL) {
+						needsReconcile = true
+					}
+				} else {
+					// Check if any valid base .strm exists in the directory
+					foundValid := false
+					if entries, rErr := os.ReadDir(movieDir); rErr == nil {
+						for _, entry := range entries {
+							if strings.HasSuffix(entry.Name(), ".strm") && !strings.Contains(entry.Name(), " - ") {
+								if b, rfErr := os.ReadFile(filepath.Join(movieDir, entry.Name())); rfErr == nil {
+									if strings.TrimSpace(string(b)) == strings.TrimSpace(expectedURL) {
+										foundValid = true
+										break
+									}
+								}
+							}
+						}
+					}
+					if !foundValid {
+						needsReconcile = true
+					}
 				}
 
 				if needsReconcile {
