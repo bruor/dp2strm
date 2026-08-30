@@ -1159,91 +1159,90 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
 	}
-	go func() {
-		// Stop any background global scan to ensure the targeted item refresh is processed with zero delay
-		if s.embyClient != nil && s.embyClient.IsConfigured() {
-			_ = s.embyClient.CancelRunningLibraryScan(context.Background())
+
+	// Stop any background global scan to ensure the targeted item refresh is processed with zero delay
+	if s.embyClient != nil && s.embyClient.IsConfigured() {
+		_ = s.embyClient.CancelRunningLibraryScan(ctx)
+	}
+
+	var tmdbID, imdbID, title string
+	if s.database != nil {
+		if st, _ := s.database.GetSeriesState(seriesID); st != nil {
+			tmdbID = st.TMDBID
+			imdbID = st.IMDBID
+			title = st.Title
 		}
+	}
 
-		var tmdbID, imdbID, title string
-		if s.database != nil {
-			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
-				tmdbID = st.TMDBID
-				imdbID = st.IMDBID
-				title = st.Title
-			}
-		}
+	// Wait for active playback session in Emby before firing refresh (up to ActivationRefreshDelay timeout)
+	if s.embyClient != nil && s.embyClient.IsConfigured() && s.cfg.ActivationRefreshDelay > 0 {
+		s.embyClient.WaitForPlaybackSession(ctx, tmdbID, imdbID, title, s.cfg.ActivationRefreshDelay)
+	}
 
-		// Wait for active playback session in Emby before firing refresh (up to ActivationRefreshDelay timeout)
-		if s.embyClient != nil && s.embyClient.IsConfigured() && s.cfg.ActivationRefreshDelay > 0 {
-			s.embyClient.WaitForPlaybackSession(context.Background(), tmdbID, imdbID, title, s.cfg.ActivationRefreshDelay)
-		}
-
-		// Helper to search Emby by query parameter and return internal Item ID
-		findEmbyItemID := func(param string) string {
-			searchURL := fmt.Sprintf("%s/Items?%s&IncludeItemTypes=Series&Recursive=true", strings.TrimRight(s.cfg.EmbyURL, "/"), param)
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, searchURL, nil)
-			if err != nil {
-				return ""
-			}
-			req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
-			req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
-
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil || resp == nil {
-				return ""
-			}
-			defer resp.Body.Close()
-
-			var searchResult struct {
-				Items []struct {
-					ID string `json:"Id"`
-				} `json:"Items"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&searchResult); err == nil && len(searchResult.Items) > 0 {
-				return searchResult.Items[0].ID
-			}
+	// Helper to search Emby by query parameter and return internal Item ID
+	findEmbyItemID := func(param string) string {
+		searchURL := fmt.Sprintf("%s/Items?%s&IncludeItemTypes=Series&Recursive=true", strings.TrimRight(s.cfg.EmbyURL, "/"), param)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+		if err != nil {
 			return ""
 		}
+		req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
+		req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
 
-		var embyItemID string
-		if tmdbID != "" {
-			embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=tmdb.%s", tmdbID))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp == nil {
+			return ""
 		}
-		if embyItemID == "" && imdbID != "" {
-			cleanIMDB := imdbID
-			if !strings.HasPrefix(strings.ToLower(cleanIMDB), "tt") {
-				cleanIMDB = "tt" + cleanIMDB
-			}
-			embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=imdb.%s", cleanIMDB))
-		}
-		if embyItemID == "" && title != "" {
-			escapedTitle := url.QueryEscape(title)
-			embyItemID = findEmbyItemID(fmt.Sprintf("searchTerm=%s", escapedTitle))
-		}
+		defer resp.Body.Close()
 
-		if embyItemID != "" {
-			// Trigger targeted item refresh directly on the specific series item with fresh provider metadata
-			refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", strings.TrimRight(s.cfg.EmbyURL, "/"), embyItemID)
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, refreshURL, nil)
-			if err == nil {
-				req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
-				req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
-				req.Header.Set("Content-Type", "application/json")
-				resp, dErr := http.DefaultClient.Do(req)
-				if dErr == nil && resp != nil {
-					defer resp.Body.Close()
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s)", title, embyItemID)
-						return
-					}
+		var searchResult struct {
+			Items []struct {
+				ID string `json:"Id"`
+			} `json:"Items"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&searchResult); err == nil && len(searchResult.Items) > 0 {
+			return searchResult.Items[0].ID
+		}
+		return ""
+	}
+
+	var embyItemID string
+	if tmdbID != "" {
+		embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=tmdb.%s", tmdbID))
+	}
+	if embyItemID == "" && imdbID != "" {
+		cleanIMDB := imdbID
+		if !strings.HasPrefix(strings.ToLower(cleanIMDB), "tt") {
+			cleanIMDB = "tt" + cleanIMDB
+		}
+		embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=imdb.%s", cleanIMDB))
+	}
+	if embyItemID == "" && title != "" {
+		escapedTitle := url.QueryEscape(title)
+		embyItemID = findEmbyItemID(fmt.Sprintf("searchTerm=%s", escapedTitle))
+	}
+
+	if embyItemID != "" {
+		// Trigger targeted item refresh directly on the specific series item with fresh provider metadata
+		refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", strings.TrimRight(s.cfg.EmbyURL, "/"), embyItemID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, refreshURL, nil)
+		if err == nil {
+			req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
+			req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
+			req.Header.Set("Content-Type", "application/json")
+			resp, dErr := http.DefaultClient.Do(req)
+			if dErr == nil && resp != nil {
+				defer resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s)", title, embyItemID)
+					return
 				}
 			}
 		}
+	}
 
-		// Fallback to global refresh if item was not found in Emby
-		s.triggerEmbyRefresh(context.Background())
-	}()
+	// Fallback to global refresh if item was not found in Emby
+	s.triggerEmbyRefresh(ctx)
 }
 
 // --- Background Worker Pipeline & Stager ---
