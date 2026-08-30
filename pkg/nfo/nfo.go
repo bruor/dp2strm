@@ -12,13 +12,16 @@ import (
 )
 
 type MovieNFO struct {
-	XMLName  xml.Name   `xml:"movie"`
-	Title    string     `xml:"title"`
-	Year     int        `xml:"year,omitempty"`
-	Plot     string     `xml:"plot,omitempty"`
-	Genre    string     `xml:"genre,omitempty"`
-	Rating   string     `xml:"rating,omitempty"`
-	UniqueID []UniqueID `xml:"uniqueid"`
+	XMLName   xml.Name   `xml:"movie"`
+	Title     string     `xml:"title"`
+	Year      int        `xml:"year,omitempty"`
+	Plot      string     `xml:"plot,omitempty"`
+	Genre     string     `xml:"genre,omitempty"`
+	Rating    string     `xml:"rating,omitempty"`
+	Watched   bool       `xml:"watched"`
+	PlayCount int        `xml:"playcount"`
+	Runtime   int        `xml:"runtime,omitempty"`
+	UniqueID  []UniqueID `xml:"uniqueid"`
 }
 
 type TVShowNFO struct {
@@ -33,12 +36,15 @@ type TVShowNFO struct {
 }
 
 type EpisodeNFO struct {
-	XMLName  xml.Name   `xml:"episodedetails"`
-	Title    string     `xml:"title"`
-	Season   int        `xml:"season"`
-	Episode  int        `xml:"episode"`
-	Plot     string     `xml:"plot,omitempty"`
-	UniqueID []UniqueID `xml:"uniqueid"`
+	XMLName   xml.Name   `xml:"episodedetails"`
+	Title     string     `xml:"title"`
+	Season    int        `xml:"season"`
+	Episode   int        `xml:"episode"`
+	Plot      string     `xml:"plot,omitempty"`
+	Watched   bool       `xml:"watched"`
+	PlayCount int        `xml:"playcount"`
+	Runtime   int        `xml:"runtime,omitempty"`
+	UniqueID  []UniqueID `xml:"uniqueid"`
 }
 
 type UniqueID struct {
@@ -57,13 +63,21 @@ func WriteMovieNFO(filePath string, movie models.Movie) (bool, error) {
 		uniqueIDs = append(uniqueIDs, UniqueID{Type: "imdb", Value: movie.IMDBID})
 	}
 
+	runtimeMins := 1
+	if movie.DurationSecs > 0 {
+		runtimeMins = (movie.DurationSecs + 59) / 60
+	}
+
 	nfoData := MovieNFO{
-		Title:    sanitizer.StripYearFromTitle(movie.Name, movie.Year),
-		Year:     movie.Year,
-		Plot:     movie.Description,
-		Genre:    movie.Genre,
-		Rating:   movie.Rating,
-		UniqueID: uniqueIDs,
+		Title:     sanitizer.StripYearFromTitle(movie.Name, movie.Year),
+		Year:      movie.Year,
+		Plot:      movie.Description,
+		Genre:     movie.Genre,
+		Rating:    movie.Rating,
+		Watched:   false,
+		PlayCount: 0,
+		Runtime:   runtimeMins,
+		UniqueID:  uniqueIDs,
 	}
 
 	return writeNFOData(filePath, nfoData)
@@ -94,18 +108,26 @@ func WriteTVShowNFO(filePath string, series models.Series) (bool, error) {
 }
 
 // WriteEpisodeNFO generates a Kodi/Emby compatible episode .nfo file.
-func WriteEpisodeNFO(filePath string, title string, season, ep int, plot string, tmdbID string) (bool, error) {
+func WriteEpisodeNFO(filePath string, title string, season, ep int, plot string, tmdbID string, durationSecs int) (bool, error) {
 	uniqueIDs := []UniqueID{}
 	if tmdbID != "" {
 		uniqueIDs = append(uniqueIDs, UniqueID{Type: "tmdb", Default: "true", Value: tmdbID})
 	}
 
+	runtimeMins := 1
+	if durationSecs > 0 {
+		runtimeMins = (durationSecs + 59) / 60
+	}
+
 	nfoData := EpisodeNFO{
-		Title:    title,
-		Season:   season,
-		Episode:  ep,
-		Plot:     plot,
-		UniqueID: uniqueIDs,
+		Title:     title,
+		Season:    season,
+		Episode:   ep,
+		Plot:      plot,
+		Watched:   false,
+		PlayCount: 0,
+		Runtime:   runtimeMins,
+		UniqueID:  uniqueIDs,
 	}
 
 	return writeNFOData(filePath, nfoData)
@@ -114,10 +136,13 @@ func WriteEpisodeNFO(filePath string, title string, season, ep int, plot string,
 // WriteActivationEpisodeNFO generates an explicit activation special episode NFO.
 func WriteActivationEpisodeNFO(filePath, cleanTitle string) (bool, error) {
 	nfoData := EpisodeNFO{
-		Title:   "⚡ Play to Activate Series",
-		Season:  models.ActivationSeasonNumber,
-		Episode: models.ActivationEpisodeNumber,
-		Plot:    fmt.Sprintf("Play this activation item to populate all available seasons and episodes for '%s' into your library.", cleanTitle),
+		Title:     "⚡ Play to Activate Series",
+		Season:    models.ActivationSeasonNumber,
+		Episode:   models.ActivationEpisodeNumber,
+		Plot:      fmt.Sprintf("Play this activation item to populate all available seasons and episodes for '%s' into your library.", cleanTitle),
+		Watched:   false,
+		PlayCount: 0,
+		Runtime:   1,
 	}
 	return writeNFOData(filePath, nfoData)
 }

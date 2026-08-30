@@ -792,7 +792,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 			} else {
 				epTitle = sanitizer.CleanEpisodeTitle(ep.Name, cleanTitle, ep.SeasonNumber, ep.EpisodeNumber)
 			}
-			nUpdated, nErr := nfo.WriteEpisodeNFO(nfoPath, epTitle, ep.SeasonNumber, ep.EpisodeNumber, epPlot, ep.TMDBID)
+			nUpdated, nErr := nfo.WriteEpisodeNFO(nfoPath, epTitle, ep.SeasonNumber, ep.EpisodeNumber, epPlot, ep.TMDBID, ep.DurationSecs)
 			if nErr == nil && nUpdated {
 				created++
 			}
@@ -2029,6 +2029,10 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 					}
 					if _, actNFOErr := os.Stat(actNFO); os.IsNotExist(actNFOErr) {
 						needsReconcile = true
+					} else if nfoBytes, readErr := os.ReadFile(actNFO); readErr == nil {
+						if !strings.Contains(string(nfoBytes), "<watched>false</watched>") || !strings.Contains(string(nfoBytes), "<runtime>") {
+							needsReconcile = true
+						}
 					}
 				}
 
