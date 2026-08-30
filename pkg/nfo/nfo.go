@@ -133,7 +133,7 @@ func WriteEpisodeNFO(filePath string, title string, season, ep int, plot string,
 	return writeNFOData(filePath, nfoData)
 }
 
-// WriteActivationEpisodeNFO generates an explicit activation special episode NFO.
+// WriteActivationEpisodeNFO generates an explicit activation episode NFO (Season 01 Episode 01).
 func WriteActivationEpisodeNFO(filePath, cleanTitle string) (bool, error) {
 	nfoData := EpisodeNFO{
 		Title:     "⚡ Play to Activate Series",

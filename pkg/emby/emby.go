@@ -216,7 +216,7 @@ func (c *Client) RefreshItemByID(ctx context.Context, itemID string) error {
 		return nil
 	}
 
-	refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default", strings.TrimRight(c.cfg.EmbyURL, "/"), itemID)
+	refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", strings.TrimRight(c.cfg.EmbyURL, "/"), itemID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, refreshURL, nil)
 	if err != nil {
 		return err
@@ -235,6 +235,111 @@ func (c *Client) RefreshItemByID(ctx context.Context, itemID string) error {
 		return fmt.Errorf("targeted item refresh returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// Session represents an Emby client playback session from GET /Sessions.
+type Session struct {
+	ID             string `json:"Id"`
+	Client         string `json:"Client"`
+	DeviceName     string `json:"DeviceName"`
+	NowPlayingItem *struct {
+		ID                string            `json:"Id"`
+		Name              string            `json:"Name"`
+		SeriesID          string            `json:"SeriesId"`
+		SeriesName        string            `json:"SeriesName"`
+		Type              string            `json:"Type"`
+		IndexNumber       int               `json:"IndexNumber"`
+		ParentIndexNumber int               `json:"ParentIndexNumber"`
+		ProviderIDs       map[string]string `json:"ProviderIds"`
+	} `json:"NowPlayingItem"`
+}
+
+// IsSeriesPlaying checks if a specific series is currently in an active playback session in Emby.
+func (c *Client) IsSeriesPlaying(ctx context.Context, tmdbID, imdbID, title string) bool {
+	if !c.IsConfigured() {
+		return false
+	}
+
+	sessionsURL := fmt.Sprintf("%s/Sessions", strings.TrimRight(c.cfg.EmbyURL, "/"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sessionsURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+	req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	var sessions []Session
+	if err := json.NewDecoder(resp.Body).Decode(&sessions); err != nil {
+		return false
+	}
+
+	cleanIMDb := imdbID
+	if cleanIMDb != "" && !strings.HasPrefix(strings.ToLower(cleanIMDb), "tt") {
+		cleanIMDb = "tt" + cleanIMDb
+	}
+	cleanTitle := strings.ToLower(strings.TrimSpace(title))
+
+	for _, s := range sessions {
+		if s.NowPlayingItem == nil {
+			continue
+		}
+		item := s.NowPlayingItem
+		if tmdbID != "" && item.ProviderIDs != nil {
+			if tmdbVal, ok := item.ProviderIDs["Tmdb"]; ok && tmdbVal == tmdbID {
+				return true
+			}
+			if tmdbVal, ok := item.ProviderIDs["tmdb"]; ok && tmdbVal == tmdbID {
+				return true
+			}
+		}
+		if cleanIMDb != "" && item.ProviderIDs != nil {
+			if imdbVal, ok := item.ProviderIDs["Imdb"]; ok && strings.EqualFold(imdbVal, cleanIMDb) {
+				return true
+			}
+			if imdbVal, ok := item.ProviderIDs["imdb"]; ok && strings.EqualFold(imdbVal, cleanIMDb) {
+				return true
+			}
+		}
+		if cleanTitle != "" && strings.EqualFold(strings.TrimSpace(item.SeriesName), cleanTitle) {
+			return true
+		}
+	}
+	return false
+}
+
+// WaitForPlaybackSession polls Emby's GET /Sessions until the specified series is verified to be actively playing, or until maxWait elapses.
+func (c *Client) WaitForPlaybackSession(ctx context.Context, tmdbID, imdbID, title string, maxWait time.Duration) bool {
+	if !c.IsConfigured() || maxWait <= 0 {
+		return false
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	timeout := time.After(maxWait)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timeout:
+			return false
+		case <-ticker.C:
+			if c.IsSeriesPlaying(ctx, tmdbID, imdbID, title) {
+				return true
+			}
+		}
+	}
 }
 
 // RefreshTVLibrary refreshes only the TV library folder in Emby.

@@ -579,29 +579,28 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		}
 	}
 
-	// 2. Write Pass 1 Specials S00E99 Activation placeholder
-	specialsDir := filepath.Join(seriesDir, "Specials")
+	// 2. Write Pass 1 Season 01 S01E01 Activation placeholder
+	season1Dir := filepath.Join(seriesDir, "Season 01")
 
-	// Auto-clean any legacy Season 01 placeholder from earlier builds
-	legacySeason1Dir := filepath.Join(seriesDir, "Season 01")
-	if entries, readErr := os.ReadDir(legacySeason1Dir); readErr == nil {
+	// Auto-clean any legacy Specials S00E99 placeholder from earlier builds
+	legacySpecialsDir := filepath.Join(seriesDir, "Specials")
+	if entries, readErr := os.ReadDir(legacySpecialsDir); readErr == nil {
 		for _, entry := range entries {
-			if strings.Contains(entry.Name(), "Play to Activate Series") || entry.Name() == fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle)) {
-				_ = os.Remove(filepath.Join(legacySeason1Dir, entry.Name()))
-				_ = os.Remove(filepath.Join(legacySeason1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle))))
+			if strings.Contains(entry.Name(), "Activate Series") || strings.Contains(entry.Name(), "S00E99") {
+				_ = os.Remove(filepath.Join(legacySpecialsDir, entry.Name()))
 			}
 		}
-		// If Season 01 is now empty, remove it
-		if remaining, _ := os.ReadDir(legacySeason1Dir); len(remaining) == 0 {
-			_ = os.Remove(legacySeason1Dir)
+		// If Specials is now empty, remove it
+		if remaining, _ := os.ReadDir(legacySpecialsDir); len(remaining) == 0 {
+			_ = os.Remove(legacySpecialsDir)
 		}
 	}
 
-	actStrmFilename := fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle))
-	actStrmPath := filepath.Join(specialsDir, actStrmFilename)
+	actStrmFilename := fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))
+	actStrmPath := filepath.Join(season1Dir, actStrmFilename)
 
-	actNFOFilename := fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle))
-	actNFOPath := filepath.Join(specialsDir, actNFOFilename)
+	actNFOFilename := fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle))
+	actNFOPath := filepath.Join(season1Dir, actNFOFilename)
 
 	seriesIdent := strm.FormatSeriesIdentifier(series.TMDBID, series.IMDBID, series.ID)
 	actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
@@ -680,12 +679,18 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
-	// Auto-clean Pass 1 Specials activation placeholder
+	// Auto-clean Pass 1 Season 01 S01E01 activation NFO if ENABLE_NFO is false
+	if !s.cfg.EnableNFO {
+		s01e01NFO := filepath.Join(seriesDir, "Season 01", fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle)))
+		_ = os.Remove(s01e01NFO)
+	}
+
+	// Auto-clean any legacy Specials S00E99 activation placeholder
 	specialsDir := filepath.Join(seriesDir, "Specials")
-	placeholderStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle)))
-	placeholderNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle)))
-	_ = os.Remove(placeholderStrm)
-	_ = os.Remove(placeholderNFO)
+	legacySpecialStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(cleanTitle)))
+	legacySpecialNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(cleanTitle)))
+	_ = os.Remove(legacySpecialStrm)
+	_ = os.Remove(legacySpecialNFO)
 
 	// Check if upstream Dispatcharr actually has real specials (Season 0)
 	hasRealSpecials := false
@@ -702,13 +707,13 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		_ = os.Remove(specialsDir)
 	}
 
-	// Clean up legacy Season 01 directory if show starts at Season 2+
+	// Clean up temporary Season 01 directory if show starts at Season 2+
 	if !hasS01E01 {
-		legacySeason1Dir := filepath.Join(seriesDir, "Season 01")
-		_ = os.Remove(filepath.Join(legacySeason1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))))
-		_ = os.Remove(filepath.Join(legacySeason1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle))))
-		if remaining, _ := os.ReadDir(legacySeason1Dir); len(remaining) == 0 {
-			_ = os.Remove(legacySeason1Dir)
+		season1Dir := filepath.Join(seriesDir, "Season 01")
+		_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))))
+		_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle))))
+		if remaining, _ := os.ReadDir(season1Dir); len(remaining) == 0 {
+			_ = os.Remove(season1Dir)
 		}
 	}
 
@@ -1169,6 +1174,11 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 			}
 		}
 
+		// Wait for active playback session in Emby before firing refresh (up to ActivationRefreshDelay timeout)
+		if s.embyClient != nil && s.embyClient.IsConfigured() && s.cfg.ActivationRefreshDelay > 0 {
+			s.embyClient.WaitForPlaybackSession(context.Background(), tmdbID, imdbID, title, s.cfg.ActivationRefreshDelay)
+		}
+
 		// Helper to search Emby by query parameter and return internal Item ID
 		findEmbyItemID := func(param string) string {
 			searchURL := fmt.Sprintf("%s/Items?%s&IncludeItemTypes=Series&Recursive=true", strings.TrimRight(s.cfg.EmbyURL, "/"), param)
@@ -1213,8 +1223,8 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		}
 
 		if embyItemID != "" {
-			// Trigger targeted item refresh directly on the specific series item
-			refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default", strings.TrimRight(s.cfg.EmbyURL, "/"), embyItemID)
+			// Trigger targeted item refresh directly on the specific series item with fresh provider metadata
+			refreshURL := fmt.Sprintf("%s/Items/%s/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", strings.TrimRight(s.cfg.EmbyURL, "/"), embyItemID)
 			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, refreshURL, nil)
 			if err == nil {
 				req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
@@ -1797,11 +1807,11 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			}
 		}
 
-		// 2. If unactivated, upgrade placeholder to Specials S00E99 standard
+		// 2. If unactivated, upgrade placeholder to Season 01 S01E01 standard and clean legacy Specials
 		if !st.IsActivated {
-			specialsDir := filepath.Join(currentDir, "Specials")
-			actStrmFilename := fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title))
-			actStrmPath := filepath.Join(specialsDir, actStrmFilename)
+			season1Dir := filepath.Join(currentDir, "Season 01")
+			actStrmFilename := fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(st.Title))
+			actStrmPath := filepath.Join(season1Dir, actStrmFilename)
 			seriesIdent := strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, st.SeriesID)
 			actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
 
@@ -1809,16 +1819,16 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			if writeStatus == strm.STRMCreated {
 				summary.STRMCreated = true
 			}
-			actNFOPath := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
+			actNFOPath := filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(st.Title)))
 			_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, st.Title)
 
-			// Clean up legacy Season 01 placeholder
-			season1Dir := filepath.Join(currentDir, "Season 01")
-			if s1Entries, s1Err := os.ReadDir(season1Dir); s1Err == nil && len(s1Entries) > 0 && len(s1Entries) <= 2 {
-				_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(st.Title))))
-				_ = os.Remove(filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(st.Title))))
-				if remaining, _ := os.ReadDir(season1Dir); len(remaining) == 0 {
-					_ = os.Remove(season1Dir)
+			// Clean up legacy Specials S00E99 placeholder
+			specialsDir := filepath.Join(currentDir, "Specials")
+			if spEntries, spErr := os.ReadDir(specialsDir); spErr == nil && len(spEntries) > 0 {
+				_ = os.Remove(filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title))))
+				_ = os.Remove(filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title))))
+				if remaining, _ := os.ReadDir(specialsDir); len(remaining) == 0 {
+					_ = os.Remove(specialsDir)
 				}
 			}
 		} else {
@@ -2011,17 +2021,17 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				if !st.IsActivated {
 					season1Dir := filepath.Join(seriesDirPath, "Season 01")
 					specialsDir := filepath.Join(seriesDirPath, "Specials")
-					actStrm := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.strm", sanitizer.SanitizeFileName(st.Title)))
-					actNFO := filepath.Join(specialsDir, fmt.Sprintf("%s - S00E99 - Activate Series.nfo", sanitizer.SanitizeFileName(st.Title)))
+					actStrm := filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(st.Title)))
+					actNFO := filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(st.Title)))
 
 					expectedIdent := strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, st.SeriesID)
 					expectedActURL := strm.GenerateSeriesProxyURL(s.cfg, expectedIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
 
-					// Check if on-disk legacy Season 01 exists
-					if _, s1Err := os.Stat(season1Dir); s1Err == nil {
+					// Check if on-disk legacy Specials exists
+					if _, spErr := os.Stat(specialsDir); spErr == nil {
 						needsReconcile = true
 					}
-					// Check if Specials activation placeholder STRM or NFO is missing or has outdated URL
+					// Check if Season 01 activation placeholder STRM or NFO is missing or has outdated URL
 					if contentBytes, actErr := os.ReadFile(actStrm); actErr != nil {
 						needsReconcile = true
 					} else if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedActURL) {
@@ -2037,7 +2047,11 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				}
 
 				if needsReconcile {
-					_ = s.database.EnqueueTask("series", st.SeriesID, "reconcile_series", models.PriorityReconcile)
+					priority := models.PriorityReconcile
+					if !st.IsActivated {
+						priority = models.PriorityMigration
+					}
+					_ = s.database.EnqueueTask("series", st.SeriesID, "reconcile_series", priority)
 					reconcileCount++
 				}
 			}

@@ -28,9 +28,10 @@
 - **Controlled Folder Migrations (Scheduled Reconciler Only)**:
   - When an unindexed title receives a TMDB ID later, folder paths remain strictly locked during real-time playback to prevent Emby from encountering 404s during probing.
   - Folder structure renames (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=...]`) are handled exclusively by the scheduled worker reconciliation pass, where each rename is tracked as a structural update (`STRMCreated = true`), notified to Emby (`NotifyMediaUpdated`), and paced through `EMBY_BATCH_SIZE`.
-- **Specials-Based TV Series Activation Lifecycle (`Specials/S00E99`)**:
-  - **Pass 1 (Lightweight Sync)**: Generates posters and a special placeholder `Specials/Show Name - S00E99 - Activate Series.strm` accompanied by an explicit instructions NFO (`⚡ Play to Activate Series`). The activation NFO is always generated regardless of `ENABLE_NFO` so users have clear instructions in Emby's UI.
-  - **Pass 2 (On Play)**: Clicking Play on the Special immediately streams an embedded **5-second FastStart video bumper (`activated.mp4`)**, while an async background worker halts any active background global library scans, writes Season 1 `.strm` files, and triggers a targeted Emby series refresh. **`S01E01` remains 100% unwatched** in the user's history!
+- **On-Demand TV Series Activation Lifecycle (`Season 01/S01E01`)**:
+  - **Pass 1 (Lightweight Sync)**: Generates posters and `Season 01/Show Name - S01E01.strm` accompanied by an explicit instructions NFO (`⚡ Play to Activate Series` with `<watched>false</watched>`, `<playcount>0</playcount>`, `<runtime>1</runtime>`). Series cleanly displays as **Unplayed** in Emby and renders in the **Next Up** rail on the home screen!
+  - **Pass 2 (On Play)**: Clicking Play on Episode 1 immediately resolves the stream and issues an instant **HTTP 302 Found** redirect directly to the real episode video (zero bumper delay!). For shows starting at Season 2+, an embedded 5-second video bumper (`activated.mp4`) is streamed to prevent watch history mismatches.
+  - **Session-Aware Metadata Sync**: An async background worker populates all remaining episodes on disk, deletes `S01E01.nfo`, verifies the active playback session in Emby (`GET /Sessions`, configurable timeout `ACTIVATION_REFRESH_DELAY=10s`), and triggers a targeted Emby metadata refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) that safely replaces `"⚡ Play to Activate Series"` with `"Pilot"` without interrupting active playback!
 - **On-Demand Movie Quality Activation**:
   - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{identifier}` with artwork (and NFO metadata if enabled).
   - **On Play**: `handleMoviePlay` cancels any running background library scans, resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
@@ -185,7 +186,8 @@ services:
 | `EMBY_PACE_DELAY` | `100ms` | Delay between items processed by Emby workers to keep CPU cool |
 | `PAGE_SIZE` | `100` | Number of items fetched per API page request |
 | `MAX_PROBE_CONCURRENCY` | `5` | Maximum parallel worker goroutines per page |
-| `ENABLE_NFO` | `false` | Enable local NFO metadata generation for actual content (`false` = disabled by default so Emby scrapes TMDB/TVDB directly; synthetic `S00E99` instructions NFO is always generated) |
+| `ENABLE_NFO` | `false` | Enable local NFO metadata generation for actual content (`false` = disabled by default so Emby scrapes TMDB/TVDB directly; synthetic `S01E01` instructions NFO is always generated for unactivated shows) |
+| `ACTIVATION_REFRESH_DELAY` | `10s` | Maximum wait duration for active Emby playback session verification before triggering targeted metadata refresh (Default: `10s`) |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |

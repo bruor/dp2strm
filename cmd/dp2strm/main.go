@@ -91,7 +91,6 @@ func main() {
 			return
 		}
 		syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
-		time.Sleep(2 * time.Second) // Brief settle window for Emby to index series
 	}
 
 	// Movie Activation Callback Worker (auto-resolves canonical title & folder)

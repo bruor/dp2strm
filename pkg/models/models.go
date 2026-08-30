@@ -38,23 +38,24 @@ type Config struct {
 	EmbyMediaPath         string        `json:"emby_media_path"`
 	EmbyTVLibrary         string        `json:"emby_tv_library"`
 	EmbyMoviesLibrary     string        `json:"emby_movies_library"`
-	Ordering              string        `json:"ordering"`
-	EnableNFO             bool          `json:"enable_nfo"`
-	EnableActivationBumper bool         `json:"enable_activation_bumper"`
+	Ordering               string        `json:"ordering"`
+	EnableNFO              bool          `json:"enable_nfo"`
+	ActivationRefreshDelay time.Duration `json:"activation_refresh_delay"`
 }
 
-// Special activation placeholder identifiers (Season 00 Special)
+// Special activation placeholder identifiers (Season 01 Episode 01)
 const (
-	ActivationSeasonNumber  = 0
-	ActivationEpisodeNumber = 99
+	ActivationSeasonNumber  = 1
+	ActivationEpisodeNumber = 1
 )
 
-// Queue priorities (Strict Priority Ordering: VIP > Reconcile > Airing > Batch)
+// Queue priorities (Strict Priority Ordering: VIP > Reconcile > Airing > Batch > Migration)
 const (
 	PriorityVIP       = 100 // On-demand user playback / manual activation
-	PriorityReconcile = 50  // Daily reconciliation & legacy folder/placeholder migrations
+	PriorityReconcile = 50  // Daily reconciliation & maintenance
 	PriorityAiring    = 30  // Airing show episode updates
 	PriorityBatch     = 10  // Batch catalog intake
+	PriorityMigration = 5   // Background legacy placeholder migrations (Specials -> Season 01)
 )
 
 // QueueItem represents a task in the SQLite persistent sync_queue.

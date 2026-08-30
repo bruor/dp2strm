@@ -38,7 +38,8 @@ services:
       - EMBY_WORKERS=1 # Number of concurrent workers processing queue & Emby updates (Default: 1)
       - EMBY_PACE_DELAY=100ms # Delay between items processed by Emby worker (Default: 100ms)
       - MAX_PROBE_CONCURRENCY=5 # Number of parallel worker goroutines for direct movie sync (Default: 5)
-      - ENABLE_NFO=false # Disabled by default. Unactivated S01E01 NFO is still created, then purged & touched on activation
+      - ENABLE_NFO=false # Disabled by default. Unactivated S01E01 NFO is still created, then purged on activation
+      - ACTIVATION_REFRESH_DELAY=10s # Max wait for Emby playback session before metadata refresh (Default: 10s)
 
       # --- Streamcache Integration Options (Optional) ---
       - STREAMCACHE_URL= # e.g. http://streamcache:8080

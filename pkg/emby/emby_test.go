@@ -70,6 +70,27 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 					{"IndexNumber": 99, "ParentIndexNumber": 0},
 				},
 			})
+		case "/Sessions":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id":         "sess-1",
+					"Client":     "Emby Web",
+					"DeviceName": "Chrome",
+					"NowPlayingItem": map[string]any{
+						"Id":                "100",
+						"Name":              "⚡ Play to Activate Series",
+						"SeriesId":          "49",
+						"SeriesName":        "The Hawk",
+						"Type":              "Episode",
+						"IndexNumber":       1,
+						"ParentIndexNumber": 1,
+						"ProviderIds": map[string]string{
+							"Tmdb": "254528",
+						},
+					},
+				},
+			})
 		case "/ScheduledTasks":
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]map[string]any{
@@ -148,5 +169,16 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 	// 7. Test CancelRunningLibraryScan
 	if err := client.CancelRunningLibraryScan(ctx); err != nil {
 		t.Errorf("CancelRunningLibraryScan failed: %v", err)
+	}
+
+	// 8. Test IsSeriesPlaying and WaitForPlaybackSession
+	if !client.IsSeriesPlaying(ctx, "254528", "", "The Hawk") {
+		t.Errorf("Expected IsSeriesPlaying to return true for TMDB 254528")
+	}
+	if !client.WaitForPlaybackSession(ctx, "254528", "", "The Hawk", 1*time.Second) {
+		t.Errorf("Expected WaitForPlaybackSession to return true for TMDB 254528")
+	}
+	if client.IsSeriesPlaying(ctx, "999999", "", "Nonexistent") {
+		t.Errorf("Expected IsSeriesPlaying to return false for nonexistent show")
 	}
 }

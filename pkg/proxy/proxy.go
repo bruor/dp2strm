@@ -334,49 +334,6 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 0. Handle Special Activation Bumper (S00E99 / Season 00 Special)
-	if s.cfg.EnableActivationBumper && ((seasonNum == models.ActivationSeasonNumber && epNum == models.ActivationEpisodeNumber) || (seasonNum == 0 && epNum == 99)) {
-		rangeHeader := r.Header.Get("Range")
-		// Fast single-shot probe handling for ffprobe / HEAD
-		isSmallProbe := (r.Method == http.MethodHead) || (rangeHeader != "" && strings.HasPrefix(rangeHeader, "bytes=0-") && !strings.Contains(rangeHeader, "bytes=0-80"))
-		if isSmallProbe {
-			w.Header().Set("Content-Type", "video/mp4")
-			http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
-			return
-		}
-
-		// Check if already activated in DB
-		isActivated := false
-		if s.database != nil {
-			if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.IsActivated {
-				isActivated = true
-			}
-		}
-
-		// Trigger background activation immediately
-		if !isActivated && s.onActivation != nil {
-			if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
-				go func(sid int) {
-					defer s.activeSeries.Delete(sid)
-					s.onActivation(sid)
-				}(seriesID)
-			}
-		}
-
-		log.Printf("[Proxy] Series %s (ID: %d): Streaming 5s Activation Bumper to client...", rawSeriesID, seriesID)
-		w.Header().Set("Content-Type", "video/mp4")
-		http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
-
-		// AFTER PLAYBACK FINISHES: Wait 1s grace period for player pipeline to close, then ensure activation completion
-		go func(sid int) {
-			time.Sleep(1 * time.Second)
-			if s.onActivation != nil {
-				s.onActivation(sid)
-			}
-		}(seriesID)
-		return
-	}
-
 	// 1. Query SQLite database for 302 target URL
 	targetURL := ""
 	if s.database != nil {
@@ -391,7 +348,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If unactivated, run activation (with deduplication to prevent looping on multiple Emby probes)
+	// If unactivated, run activation (with deduplication)
 	if !isActivated && s.onActivation != nil {
 		if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
 			if targetURL == "" {
@@ -408,7 +365,6 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 							s.onActivation(healedID)
 							targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
 							if targetURL != "" {
-								// 1. Alias in stream_variants for stale ID so subsequent requests before disk reconciliation resolve in <1ms
 								_ = s.database.SaveStreamVariant(&db.StreamVariant{
 									ItemID:             staleSeriesID,
 									ItemType:           "series",
@@ -419,7 +375,6 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 									Quality:            "1080p",
 									ContainerExtension: "mkv",
 								})
-								// 2. Enqueue reconcile task so disk .strm file gets corrected during next maintenance run
 								_ = s.database.EnqueueTask("series", healedID, "reconcile_series", models.PriorityReconcile)
 							}
 						}
@@ -434,41 +389,39 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. If targetURL is still empty for the requested season/episode (e.g. show only has Season 2+),
-	// query the earliest available episode target URL for this series
-	if targetURL == "" && s.database != nil {
-		targetURL, _ = s.database.GetFirstAvailableSeriesTargetURL(seriesID, variantKey)
-	}
+	// 2. If targetURL is available for the requested season/episode, redirect immediately!
+	if targetURL != "" {
+		finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+		log.Printf("[Proxy] Series %s (Resolved ID: %d) S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", rawSeriesID, seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
 
-	// 3. Fallback to direct Dispatcharr XC stream URL if still not found
-	if targetURL == "" {
-		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
-	}
-
-	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
-	log.Printf("[Proxy] Series %s (Resolved ID: %d) S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", rawSeriesID, seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
-
-	// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
-	if s.cfg.FetchAheadCount > 0 && s.cfg.StreamcacheURL != "" {
-		go func(rawSid string, sNum, eNum, count int) {
-			for i := 1; i <= count; i++ {
-				nextEp := eNum + i
-				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				prefetchURL := fmt.Sprintf("%s/play/series/%s/%d/%d", strings.TrimRight(s.cfg.URL, "/"), rawSid, sNum, nextEp)
-				req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
-				if err == nil {
-					resp, pErr := http.DefaultClient.Do(req)
-					if pErr == nil && resp != nil {
-						resp.Body.Close()
+		// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
+		if s.cfg.FetchAheadCount > 0 && s.cfg.StreamcacheURL != "" {
+			go func(rawSid string, sNum, eNum, count int) {
+				for i := 1; i <= count; i++ {
+					nextEp := eNum + i
+					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					prefetchURL := fmt.Sprintf("%s/play/series/%s/%d/%d", strings.TrimRight(s.cfg.URL, "/"), rawSid, sNum, nextEp)
+					req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
+					if err == nil {
+						resp, pErr := http.DefaultClient.Do(req)
+						if pErr == nil && resp != nil {
+							_ = resp.Body.Close()
+						}
 					}
+					cancel()
 				}
-				cancel()
-			}
-		}(rawSeriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+			}(rawSeriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+		}
+
+		http.Redirect(w, r, finalRedirectURL, http.StatusFound)
+		return
 	}
 
-	// Sub-50ms Immediate 302 Redirect!
-	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
+	// 3. If targetURL is still empty for the requested season/episode (e.g. show only has Season 2+ and user played the S01E01 placeholder),
+	// stream the 5-second Activation Bumper MP4 directly. (Never redirect to a different episode to prevent watch history mismatch in Emby).
+	log.Printf("[Proxy] Series %s (ID: %d) S%02dE%02d: Target episode not present upstream. Streaming 5s Activation Bumper to client...", rawSeriesID, seriesID, seasonNum, epNum)
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
 }
 
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {

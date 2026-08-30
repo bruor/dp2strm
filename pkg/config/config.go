@@ -45,9 +45,9 @@ func DefaultConfig() *models.Config {
 		EmbyMediaPath:         "",
 		EmbyTVLibrary:         "",
 		EmbyMoviesLibrary:     "",
-		Ordering:              "-created_at",
-		EnableNFO:             false,
-		EnableActivationBumper: true,
+		Ordering:               "-created_at",
+		EnableNFO:              false,
+		ActivationRefreshDelay: 10 * time.Second,
 	}
 }
 
@@ -200,8 +200,12 @@ func LoadConfig() *models.Config {
 	} else if v := os.Getenv("GENERATE_NFO"); v != "" {
 		cfg.EnableNFO = (v == "true" || v == "1")
 	}
-	if v := os.Getenv("ENABLE_ACTIVATION_BUMPER"); v != "" {
-		cfg.EnableActivationBumper = (v == "true" || v == "1")
+	if v := os.Getenv("ACTIVATION_REFRESH_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ActivationRefreshDelay = d
+		} else if sec, err := strconv.Atoi(v); err == nil && sec >= 0 {
+			cfg.ActivationRefreshDelay = time.Duration(sec) * time.Second
+		}
 	}
 
 	// Clean output directory path

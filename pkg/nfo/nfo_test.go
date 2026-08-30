@@ -134,8 +134,8 @@ func TestActivationEpisodeNFOContent(t *testing.T) {
 
 	expectedTags := []string{
 		"<title>⚡ Play to Activate Series</title>",
-		"<season>0</season>",
-		"<episode>99</episode>",
+		"<season>1</season>",
+		"<episode>1</episode>",
 		"<watched>false</watched>",
 		"<playcount>0</playcount>",
 		"<runtime>1</runtime>",
