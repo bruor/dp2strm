@@ -494,6 +494,13 @@ func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
 		t.Fatalf("Failed to write movie strm: %v", err)
 	}
 
+	// Create legacy duplicate movie folder without ID on disk and mark in soft delete
+	legacyMovieFolder := filepath.Join(tempDir, "Movies", "Inception (2010)")
+	if err := os.MkdirAll(legacyMovieFolder, 0755); err != nil {
+		t.Fatalf("Failed to create legacy movie dir: %v", err)
+	}
+	_ = database.SoftDeleteItem(legacyMovieFolder, "movie")
+
 	// 2. Setup Series in DB with legacy folder name
 	seriesID := 9001
 	_ = database.UpsertInitialSeriesState(seriesID, "4607", "", "Lost", 2004, "Lost (2004)")
@@ -515,8 +522,15 @@ func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
 		t.Fatalf("Failed to write series nfo: %v", err)
 	}
 
+	// Create legacy duplicate series folder without ID on disk
+	legacySeriesFolder := filepath.Join(tempDir, "TV Shows", "Lost (2004)")
+	if err := os.MkdirAll(legacySeriesFolder, 0755); err != nil {
+		t.Fatalf("Failed to create legacy series dir: %v", err)
+	}
+
 	// 3. First Run of ReconcileDiskState:
-	// Should recognize that canonical files already exist, update SQLite folder names, and enqueue ZERO tasks!
+	// Should recognize that canonical files already exist, update SQLite folder names,
+	// prune legacy duplicate directories immediately from disk, and enqueue ZERO tasks!
 	if err := s.ReconcileDiskState(context.Background()); err != nil {
 		t.Fatalf("ReconcileDiskState failed: %v", err)
 	}
@@ -537,6 +551,20 @@ func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
 	sst, _ := database.GetSeriesState(seriesID)
 	if sst.FolderName != "Lost (2004) [tmdbid=4607]" {
 		t.Errorf("Expected series folder_name to be upgraded to canonical, got %q", sst.FolderName)
+	}
+
+	// Verify legacy duplicate folders were purged from disk immediately
+	if _, err := os.Stat(legacyMovieFolder); !os.IsNotExist(err) {
+		t.Errorf("Expected legacy movie folder %q to be purged from disk", legacyMovieFolder)
+	}
+	if _, err := os.Stat(legacySeriesFolder); !os.IsNotExist(err) {
+		t.Errorf("Expected legacy series folder %q to be purged from disk", legacySeriesFolder)
+	}
+
+	// Verify soft deleted items count is 0
+	pendingSoftDeletes, _ := database.GetPendingSoftDeletedCount()
+	if pendingSoftDeletes != 0 {
+		t.Errorf("Expected 0 pending soft deleted items, got %d", pendingSoftDeletes)
 	}
 
 	// 4. Second Run of ReconcileDiskState:
