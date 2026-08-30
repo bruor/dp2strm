@@ -12,6 +12,7 @@ import (
 )
 
 func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
+	scanState := "Running"
 	// Setup mock Emby server
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-Emby-Token")
@@ -97,12 +98,13 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 				{
 					"Id":                        "task-12345",
 					"Key":                       "RefreshLibrary",
-					"State":                     "Running",
+					"State":                     scanState,
 					"CurrentProgressPercentage": 45.0,
 				},
 			})
 		case "/ScheduledTasks/Running/task-12345":
 			if r.Method == http.MethodDelete {
+				scanState = "Idle"
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
