@@ -98,6 +98,11 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Deduplicate any historical ghost records from past Dispatcharr ID re-assignment cycles
+	if _, err := d.DeduplicateSupersededStates(); err != nil {
+		log.Printf("[DB] Warning during deduplication: %v", err)
+	}
+
 	return d, nil
 }
 
@@ -193,9 +198,11 @@ func (d *DB) initSchema() error {
 		"ALTER TABLE series_state ADD COLUMN year INTEGER DEFAULT 0;",
 		"ALTER TABLE series_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE series_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE series_state ADD COLUMN last_checked_at DATETIME;",
 		"ALTER TABLE movie_state ADD COLUMN year INTEGER DEFAULT 0;",
 		"ALTER TABLE movie_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE movie_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE movie_state ADD COLUMN last_checked_at DATETIME;",
 	}
 	for _, m := range migrations {
 		_, _ = d.conn.Exec(m) // Ignore error if column already exists
@@ -714,6 +721,133 @@ func (d *DB) FindSeriesSupersededState(seriesID int, tmdbID string, title string
 		}
 	}
 	return nil, sql.ErrNoRows
+}
+
+// DeduplicateSupersededStates cleans up historical duplicate records from movie_state and series_state,
+// keeping only the latest ID for each unique TMDB ID or (Title + Year) combination.
+// It also cleans up orphaned stream_variants and obsolete entries in soft_deleted_items.
+func (d *DB) DeduplicateSupersededStates() (int64, error) {
+	// 1. Before deleting, transfer any activated status from older duplicates to the newest row for movies
+	_, _ = d.conn.Exec(`
+		UPDATE movie_state
+		SET is_activated = 1
+		WHERE movie_id IN (
+			SELECT MAX(movie_id)
+			FROM movie_state
+			WHERE tmdb_id != '' AND tmdb_id != '0'
+			GROUP BY tmdb_id
+			HAVING COUNT(*) > 1 AND SUM(is_activated) > 0
+		);
+	`)
+
+	// 2. Prune duplicate movies by tmdb_id (keeping highest movie_id)
+	resMvTMDB, err := d.conn.Exec(`
+		DELETE FROM movie_state
+		WHERE tmdb_id != '' AND tmdb_id != '0'
+		  AND movie_id NOT IN (
+			  SELECT MAX(movie_id)
+			  FROM movie_state
+			  WHERE tmdb_id != '' AND tmdb_id != '0'
+			  GROUP BY tmdb_id
+		  );
+	`)
+	if err != nil {
+		return 0, err
+	}
+	delMvTMDB, _ := resMvTMDB.RowsAffected()
+
+	// 3. Prune duplicate movies without TMDB ID by (title, year)
+	resMvTitle, err := d.conn.Exec(`
+		DELETE FROM movie_state
+		WHERE (tmdb_id = '' OR tmdb_id = '0')
+		  AND title != '' AND year > 0
+		  AND movie_id NOT IN (
+			  SELECT MAX(movie_id)
+			  FROM movie_state
+			  WHERE (tmdb_id = '' OR tmdb_id = '0')
+			    AND title != '' AND year > 0
+			  GROUP BY title, year
+		  );
+	`)
+	if err != nil {
+		return delMvTMDB, err
+	}
+	delMvTitle, _ := resMvTitle.RowsAffected()
+
+	// 4. Transfer activated status for series duplicates
+	_, _ = d.conn.Exec(`
+		UPDATE series_state
+		SET is_activated = 1
+		WHERE series_id IN (
+			SELECT MAX(series_id)
+			FROM series_state
+			WHERE tmdb_id != '' AND tmdb_id != '0'
+			GROUP BY tmdb_id
+			HAVING COUNT(*) > 1 AND SUM(is_activated) > 0
+		);
+	`)
+
+	// 5. Prune duplicate series by tmdb_id
+	resSrsTMDB, err := d.conn.Exec(`
+		DELETE FROM series_state
+		WHERE tmdb_id != '' AND tmdb_id != '0'
+		  AND series_id NOT IN (
+			  SELECT MAX(series_id)
+			  FROM series_state
+			  WHERE tmdb_id != '' AND tmdb_id != '0'
+			  GROUP BY tmdb_id
+		  );
+	`)
+	if err != nil {
+		return delMvTMDB + delMvTitle, err
+	}
+	delSrsTMDB, _ := resSrsTMDB.RowsAffected()
+
+	// 6. Prune duplicate series without TMDB ID by (title, year)
+	resSrsTitle, err := d.conn.Exec(`
+		DELETE FROM series_state
+		WHERE (tmdb_id = '' OR tmdb_id = '0')
+		  AND title != '' AND year > 0
+		  AND series_id NOT IN (
+			  SELECT MAX(series_id)
+			  FROM series_state
+			  WHERE (tmdb_id = '' OR tmdb_id = '0')
+			    AND title != '' AND year > 0
+			  GROUP BY title, year
+		  );
+	`)
+	if err != nil {
+		return delMvTMDB + delMvTitle + delSrsTMDB, err
+	}
+	delSrsTitle, _ := resSrsTitle.RowsAffected()
+
+	// 7. Clean up orphaned stream_variants
+	_, _ = d.conn.Exec(`DELETE FROM stream_variants WHERE item_type = 'movie' AND item_id NOT IN (SELECT movie_id FROM movie_state);`)
+	_, _ = d.conn.Exec(`DELETE FROM stream_variants WHERE item_type = 'series' AND item_id NOT IN (SELECT series_id FROM series_state);`)
+
+	// 8. Clean up soft_deleted_items that match active folder names or (Title + Year) in movie_state or series_state
+	_, _ = d.conn.Exec(`
+		DELETE FROM soft_deleted_items
+		WHERE EXISTS (
+			SELECT 1 FROM movie_state ms 
+			WHERE soft_deleted_items.item_path = ms.folder_name 
+			   OR soft_deleted_items.item_path LIKE '%/' || ms.folder_name
+			   OR (ms.title != '' AND ms.year > 0 AND soft_deleted_items.item_path LIKE '%/' || ms.title || ' (' || ms.year || ')%')
+		) OR EXISTS (
+			SELECT 1 FROM series_state ss 
+			WHERE soft_deleted_items.item_path = ss.folder_name 
+			   OR soft_deleted_items.item_path LIKE '%/' || ss.folder_name
+			   OR (ss.title != '' AND ss.year > 0 AND soft_deleted_items.item_path LIKE '%/' || ss.title || ' (' || ss.year || ')%')
+		);
+	`)
+
+	totalPruned := delMvTMDB + delMvTitle + delSrsTMDB + delSrsTitle
+	if totalPruned > 0 {
+		log.Printf("[DB] Deduplicated database: pruned %d obsolete ghost records (%d movies by TMDB, %d movies by Title, %d series by TMDB, %d series by Title).",
+			totalPruned, delMvTMDB, delMvTitle, delSrsTMDB, delSrsTitle)
+	}
+
+	return totalPruned, nil
 }
 
 // UpsertInitialMovieState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
@@ -1300,7 +1434,12 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 	queueStmt, err := tx.Prepare(`
 	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
 	SELECT 'movie', ?, 'pass1', 10, 'pending', 0, ?, ?
-	WHERE NOT EXISTS (SELECT 1 FROM movie_state WHERE movie_id = ?);
+	WHERE NOT EXISTS (
+		SELECT 1 FROM movie_state 
+		WHERE movie_id = ? 
+		   OR (? != '' AND ? != '0' AND tmdb_id = ?)
+		   OR (? != '' AND ? > 0 AND title = ? AND year = ?)
+	);
 	`)
 	if err != nil {
 		return err
@@ -1308,20 +1447,48 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 	defer queueStmt.Close()
 
 	stateStmt, err := tx.Prepare(`
-	INSERT INTO movie_state (movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
-	VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+	INSERT INTO movie_state (movie_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at)
+	VALUES (?, ?, ?, ?, ?, ?, 
+		COALESCE((SELECT is_activated FROM movie_state WHERE tmdb_id = ? AND ? != '' AND ? != '0' ORDER BY is_activated DESC LIMIT 1), 0),
+		(SELECT activated_at FROM movie_state WHERE tmdb_id = ? AND ? != '' AND ? != '0' AND is_activated = 1 ORDER BY activated_at ASC LIMIT 1),
+		?
+	)
 	ON CONFLICT(movie_id) DO UPDATE SET
 		tmdb_id = CASE WHEN EXCLUDED.tmdb_id != '' THEN EXCLUDED.tmdb_id ELSE movie_state.tmdb_id END,
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
 		folder_name = CASE WHEN movie_state.folder_name != '' THEN movie_state.folder_name ELSE EXCLUDED.folder_name END,
+		is_activated = CASE WHEN EXCLUDED.is_activated = 1 THEN 1 ELSE movie_state.is_activated END,
+		activated_at = CASE WHEN EXCLUDED.activated_at IS NOT NULL THEN EXCLUDED.activated_at ELSE movie_state.activated_at END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`)
 	if err != nil {
 		return err
 	}
 	defer stateStmt.Close()
+
+	supersedeMvStmt, err := tx.Prepare(`
+	DELETE FROM movie_state
+	WHERE movie_id != ? AND (
+		(? != '' AND ? != '0' AND tmdb_id = ?)
+		OR ((? = '' OR ? = '0') AND ? != '' AND ? > 0 AND title = ? AND year = ?)
+	);
+	`)
+	if err != nil {
+		return err
+	}
+	defer supersedeMvStmt.Close()
+
+	transferMvVariantsStmt, err := tx.Prepare(`
+	UPDATE OR IGNORE stream_variants
+	SET item_id = ?
+	WHERE item_type = 'movie' AND item_id = ?;
+	`)
+	if err != nil {
+		return err
+	}
+	defer transferMvVariantsStmt.Close()
 
 	delSoftStmt, err := tx.Prepare(`
 	DELETE FROM soft_deleted_items WHERE item_path = ? OR item_path LIKE '%/' || ?;
@@ -1334,12 +1501,15 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 	for _, mv := range items {
 		cleanTitle := sanitizer.CleanTitle(mv.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
-		if _, err := queueStmt.Exec(mv.ID, now, now, mv.ID); err != nil {
+
+		if _, err := queueStmt.Exec(mv.ID, now, now, mv.ID, mv.TMDBID, mv.TMDBID, mv.TMDBID, cleanTitle, mv.Year, cleanTitle, mv.Year); err != nil {
 			return err
 		}
-		if _, err := stateStmt.Exec(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName, now); err != nil {
+		if _, err := stateStmt.Exec(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName, mv.TMDBID, mv.TMDBID, mv.TMDBID, mv.TMDBID, mv.TMDBID, mv.TMDBID, now); err != nil {
 			return err
 		}
+		// Prune older superseded movie_state rows for this exact same movie
+		_, _ = supersedeMvStmt.Exec(mv.ID, mv.TMDBID, mv.TMDBID, mv.TMDBID, mv.TMDBID, mv.TMDBID, cleanTitle, mv.Year, cleanTitle, mv.Year)
 		_, _ = delSoftStmt.Exec(folderName, folderName)
 	}
 
@@ -1362,7 +1532,12 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	queueStmt, err := tx.Prepare(`
 	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
 	SELECT 'series', ?, 'pass1', 10, 'pending', 0, ?, ?
-	WHERE NOT EXISTS (SELECT 1 FROM series_state WHERE series_id = ?);
+	WHERE NOT EXISTS (
+		SELECT 1 FROM series_state 
+		WHERE series_id = ? 
+		   OR (? != '' AND ? != '0' AND tmdb_id = ?)
+		   OR (? != '' AND ? > 0 AND title = ? AND year = ?)
+	);
 	`)
 	if err != nil {
 		return err
@@ -1370,20 +1545,38 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	defer queueStmt.Close()
 
 	stateStmt, err := tx.Prepare(`
-	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, last_checked_at)
-	VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at)
+	VALUES (?, ?, ?, ?, ?, ?, 
+		COALESCE((SELECT is_activated FROM series_state WHERE tmdb_id = ? AND ? != '' AND ? != '0' ORDER BY is_activated DESC LIMIT 1), 0),
+		(SELECT activated_at FROM series_state WHERE tmdb_id = ? AND ? != '' AND ? != '0' AND is_activated = 1 ORDER BY activated_at ASC LIMIT 1),
+		?
+	)
 	ON CONFLICT(series_id) DO UPDATE SET
 		tmdb_id = CASE WHEN EXCLUDED.tmdb_id != '' THEN EXCLUDED.tmdb_id ELSE series_state.tmdb_id END,
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
 		folder_name = CASE WHEN series_state.folder_name != '' THEN series_state.folder_name ELSE EXCLUDED.folder_name END,
+		is_activated = CASE WHEN EXCLUDED.is_activated = 1 THEN 1 ELSE series_state.is_activated END,
+		activated_at = CASE WHEN EXCLUDED.activated_at IS NOT NULL THEN EXCLUDED.activated_at ELSE series_state.activated_at END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`)
 	if err != nil {
 		return err
 	}
 	defer stateStmt.Close()
+
+	supersedeSrsStmt, err := tx.Prepare(`
+	DELETE FROM series_state
+	WHERE series_id != ? AND (
+		(? != '' AND ? != '0' AND tmdb_id = ?)
+		OR ((? = '' OR ? = '0') AND ? != '' AND ? > 0 AND title = ? AND year = ?)
+	);
+	`)
+	if err != nil {
+		return err
+	}
+	defer supersedeSrsStmt.Close()
 
 	delSoftStmt, err := tx.Prepare(`
 	DELETE FROM soft_deleted_items WHERE item_path = ? OR item_path LIKE '%/' || ?;
@@ -1396,12 +1589,15 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	for _, srs := range items {
 		cleanTitle := sanitizer.CleanTitle(srs.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
-		if _, err := queueStmt.Exec(srs.ID, now, now, srs.ID); err != nil {
+
+		if _, err := queueStmt.Exec(srs.ID, now, now, srs.ID, srs.TMDBID, srs.TMDBID, srs.TMDBID, cleanTitle, srs.Year, cleanTitle, srs.Year); err != nil {
 			return err
 		}
-		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, now); err != nil {
+		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, now); err != nil {
 			return err
 		}
+		// Prune older superseded series_state rows for this exact same series
+		_, _ = supersedeSrsStmt.Exec(srs.ID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, cleanTitle, srs.Year, cleanTitle, srs.Year)
 		_, _ = delSoftStmt.Exec(folderName, folderName)
 	}
 

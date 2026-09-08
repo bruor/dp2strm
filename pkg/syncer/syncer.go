@@ -1358,6 +1358,20 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 	}
 
 	// 1. Stage Movies
+	seenMovieTMDB := make(map[string]bool)
+	seenMovieFingerprint := make(map[string]bool)
+	trackMovieSeen := func(mvs []models.Movie) {
+		for _, m := range mvs {
+			if m.TMDBID != "" && m.TMDBID != "0" {
+				seenMovieTMDB[m.TMDBID] = true
+			}
+			ct := sanitizer.CleanTitle(m.Name)
+			if ct != "" && m.Year > 0 {
+				seenMovieFingerprint[fmt.Sprintf("%s_%d", strings.ToLower(ct), m.Year)] = true
+			}
+		}
+	}
+
 	movieFetchComplete := false
 	moviesCount := 0
 	page1Movies, err := s.client.FetchMoviePage(ctx, 1, pageSize)
@@ -1367,6 +1381,7 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 			s.tripCircuitBreaker()
 		}
 	} else if page1Movies != nil {
+		trackMovieSeen(page1Movies.Results)
 		_ = s.database.BatchStageMovies(page1Movies.Results)
 		moviesCount += len(page1Movies.Results)
 
@@ -1395,6 +1410,7 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 				moviePagesFailed = true
 				continue
 			}
+			trackMovieSeen(mvs.Results)
 			_ = s.database.BatchStageMovies(mvs.Results)
 			moviesCount += len(mvs.Results)
 		}
@@ -1404,6 +1420,20 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 	}
 
 	// 2. Stage Series
+	seenSeriesTMDB := make(map[string]bool)
+	seenSeriesFingerprint := make(map[string]bool)
+	trackSeriesSeen := func(srs []models.Series) {
+		for _, s := range srs {
+			if s.TMDBID != "" && s.TMDBID != "0" {
+				seenSeriesTMDB[s.TMDBID] = true
+			}
+			ct := sanitizer.CleanTitle(s.Name)
+			if ct != "" && s.Year > 0 {
+				seenSeriesFingerprint[fmt.Sprintf("%s_%d", strings.ToLower(ct), s.Year)] = true
+			}
+		}
+	}
+
 	seriesFetchComplete := false
 	seriesCount := 0
 	page1Series, sErr := s.client.FetchSeriesPage(ctx, 1, pageSize)
@@ -1413,6 +1443,7 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 			s.tripCircuitBreaker()
 		}
 	} else if page1Series != nil {
+		trackSeriesSeen(page1Series.Results)
 		_ = s.database.BatchStageSeries(page1Series.Results)
 		seriesCount += len(page1Series.Results)
 
@@ -1441,6 +1472,7 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 				seriesPagesFailed = true
 				continue
 			}
+			trackSeriesSeen(seriesList.Results)
 			_ = s.database.BatchStageSeries(seriesList.Results)
 			seriesCount += len(seriesList.Results)
 		}
@@ -1454,16 +1486,30 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 		if movieFetchComplete {
 			moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
 			if staleMovies, err := s.database.GetStaleMovieStates(start); err == nil && len(staleMovies) > 0 {
+				actualStaleMovies := make([]*db.MovieState, 0)
+				for _, sm := range staleMovies {
+					ct := sanitizer.CleanTitle(sm.Title)
+					fp := fmt.Sprintf("%s_%d", strings.ToLower(ct), sm.Year)
+					if (sm.TMDBID != "" && sm.TMDBID != "0" && seenMovieTMDB[sm.TMDBID]) ||
+						(ct != "" && sm.Year > 0 && seenMovieFingerprint[fp]) {
+						// Content is active in Dispatcharr under a different ID; prune the superseded ghost record
+						_ = s.database.DeleteMovieState(sm.MovieID)
+						_ = s.database.DeleteAllStreamVariantsForItem(sm.MovieID, "movie")
+						continue
+					}
+					actualStaleMovies = append(actualStaleMovies, sm)
+				}
+
 				allMovies, _ := s.database.GetAllMovieStates()
 				// Safety Anomaly Guardrail: If existing database has > 100 movies and more than 50% disappeared at once,
 				// abort stale marking to prevent catastrophic library wipe from an upstream outage.
-				if len(allMovies) > 100 && len(staleMovies) > len(allMovies)/2 {
+				if len(allMovies) > 100 && len(actualStaleMovies) > len(allMovies)/2 {
 					log.Printf("[Stager] ⚠️ Safety guardrail tripped: %d of %d movies (%.1f%%) missing from upstream catalog! Aborting mass soft-deletion.",
-						len(staleMovies), len(allMovies), float64(len(staleMovies))/float64(len(allMovies))*100.0)
+						len(actualStaleMovies), len(allMovies), float64(len(actualStaleMovies))/float64(len(allMovies))*100.0)
 				} else {
 					newlyMarked := 0
 					alreadyPending := 0
-					for _, sm := range staleMovies {
+					for _, sm := range actualStaleMovies {
 						folderName := sm.FolderName
 						if folderName == "" {
 							folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(sm.Title), sm.Year, sm.TMDBID, sm.IMDBID)
@@ -1496,16 +1542,30 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 		if seriesFetchComplete {
 			tvRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
 			if staleSeries, err := s.database.GetStaleSeriesStates(start); err == nil && len(staleSeries) > 0 {
+				actualStaleSeries := make([]*db.SeriesState, 0)
+				for _, ss := range staleSeries {
+					ct := sanitizer.CleanTitle(ss.Title)
+					fp := fmt.Sprintf("%s_%d", strings.ToLower(ct), ss.Year)
+					if (ss.TMDBID != "" && ss.TMDBID != "0" && seenSeriesTMDB[ss.TMDBID]) ||
+						(ct != "" && ss.Year > 0 && seenSeriesFingerprint[fp]) {
+						// Content is active in Dispatcharr under a different ID; prune the superseded ghost record
+						_ = s.database.DeleteSeriesState(ss.SeriesID)
+						_ = s.database.DeleteAllStreamVariantsForItem(ss.SeriesID, "series")
+						continue
+					}
+					actualStaleSeries = append(actualStaleSeries, ss)
+				}
+
 				allSeries, _ := s.database.GetAllSeriesStates()
 				// Safety Anomaly Guardrail: If existing database has > 100 series and more than 50% disappeared at once,
 				// abort stale marking to prevent catastrophic library wipe from an upstream outage.
-				if len(allSeries) > 100 && len(staleSeries) > len(allSeries)/2 {
+				if len(allSeries) > 100 && len(actualStaleSeries) > len(allSeries)/2 {
 					log.Printf("[Stager] ⚠️ Safety guardrail tripped: %d of %d series (%.1f%%) missing from upstream catalog! Aborting mass soft-deletion.",
-						len(staleSeries), len(allSeries), float64(len(staleSeries))/float64(len(allSeries))*100.0)
+						len(actualStaleSeries), len(allSeries), float64(len(actualStaleSeries))/float64(len(allSeries))*100.0)
 				} else {
 					newlyMarked := 0
 					alreadyPending := 0
-					for _, ss := range staleSeries {
+					for _, ss := range actualStaleSeries {
 						folderName := ss.FolderName
 						if folderName == "" {
 							folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(ss.Title), ss.Year, ss.TMDBID, ss.IMDBID)

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"dp2strm/pkg/models"
 )
@@ -370,5 +371,80 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 	if st, err := d.GetMovieState(7001); err != nil || st != nil {
 		t.Errorf("Expected movie 7001 to be deleted from database, got %+v (err: %v)", st, err)
+	}
+}
+
+func TestDeduplicateSupersededStatesAndBatchStageIDMigration(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_dedup.db")
+	d, err := Open(tempDB)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	// 1. Manually insert duplicate movie records simulating past ID re-assignment cycles
+	// Movie "Alone (2020)" with TMDB 509635 under IDs 1105078 and 1224326
+	now := time.Now()
+	_, _ = d.conn.Exec(`INSERT INTO movie_state (movie_id, tmdb_id, title, year, folder_name, is_activated, last_checked_at) VALUES (1105078, '509635', 'Alone', 2020, 'Alone (2020)', 1, ?)`, now)
+	_, _ = d.conn.Exec(`INSERT INTO movie_state (movie_id, tmdb_id, title, year, folder_name, is_activated, last_checked_at) VALUES (1224326, '509635', 'Alone', 2020, 'Alone (2020) [tmdb-509635]', 0, ?)`, now)
+
+	// Add a soft-deleted item matching the old folder name
+	_, _ = d.SoftDeleteItem("/data/movies/Alone (2020)", "movie")
+
+	// Verify before deduplication
+	mvsBefore, _ := d.GetAllMovieStates()
+	if len(mvsBefore) != 2 {
+		t.Fatalf("Expected 2 movies before dedup, got %d", len(mvsBefore))
+	}
+
+	// 2. Run DeduplicateSupersededStates
+	pruned, err := d.DeduplicateSupersededStates()
+	if err != nil {
+		t.Fatalf("DeduplicateSupersededStates failed: %v", err)
+	}
+	if pruned < 1 {
+		t.Errorf("Expected at least 1 record pruned, got %d", pruned)
+	}
+
+	// Verify after deduplication
+	mvsAfter, _ := d.GetAllMovieStates()
+	if len(mvsAfter) != 1 {
+		t.Fatalf("Expected exactly 1 movie after dedup, got %d", len(mvsAfter))
+	}
+	if mvsAfter[0].MovieID != 1224326 {
+		t.Errorf("Expected retained movie to have highest ID 1224326, got %d", mvsAfter[0].MovieID)
+	}
+	if !mvsAfter[0].IsActivated {
+		t.Errorf("Expected activation state (is_activated=1) to be transferred from old duplicate")
+	}
+
+	// Verify soft deleted items matching active movie was cleaned up
+	softCount, _ := d.GetPendingSoftDeletedCount()
+	if softCount != 0 {
+		t.Errorf("Expected soft_deleted_items matching active movie to be pruned, got %d", softCount)
+	}
+
+	// 3. Test BatchStageMovies ID Migration when Dispatcharr issues new ID 1300000
+	newBatch := []models.Movie{
+		{
+			ID:     1300000,
+			Name:   "Alone",
+			Year:   2020,
+			TMDBID: "509635",
+		},
+	}
+	if err := d.BatchStageMovies(newBatch); err != nil {
+		t.Fatalf("BatchStageMovies failed: %v", err)
+	}
+
+	mvsFinal, _ := d.GetAllMovieStates()
+	if len(mvsFinal) != 1 {
+		t.Fatalf("Expected exactly 1 movie after BatchStageMovies ID migration, got %d", len(mvsFinal))
+	}
+	if mvsFinal[0].MovieID != 1300000 {
+		t.Errorf("Expected movie_state to be migrated to new ID 1300000, got %d", mvsFinal[0].MovieID)
+	}
+	if !mvsFinal[0].IsActivated {
+		t.Errorf("Expected activation state to be preserved across BatchStageMovies ID migration")
 	}
 }
