@@ -121,6 +121,18 @@ func main() {
 	})
 	proxyServer.Start()
 
+	// Run startup database deduplication asynchronously so HTTP server is online immediately
+	go func() {
+		log.Println("[DB] Running background deduplication to prune superseded ghost records...")
+		if pruned, err := database.DeduplicateSupersededStates(); err != nil {
+			log.Printf("[DB] Warning during deduplication: %v", err)
+		} else if pruned > 0 {
+			log.Printf("[DB] Startup deduplication finished: pruned %d obsolete ghost records.", pruned)
+		} else {
+			log.Println("[DB] Startup deduplication complete: database is clean (no duplicate records found).")
+		}
+	}()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

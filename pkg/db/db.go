@@ -98,11 +98,6 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
-	// Deduplicate any historical ghost records from past Dispatcharr ID re-assignment cycles
-	if _, err := d.DeduplicateSupersededStates(); err != nil {
-		log.Printf("[DB] Warning during deduplication: %v", err)
-	}
-
 	return d, nil
 }
 
@@ -727,8 +722,14 @@ func (d *DB) FindSeriesSupersededState(seriesID int, tmdbID string, title string
 // keeping only the latest ID for each unique TMDB ID or (Title + Year) combination.
 // It also cleans up orphaned stream_variants and obsolete entries in soft_deleted_items.
 func (d *DB) DeduplicateSupersededStates() (int64, error) {
-	// 1. Before deleting, transfer any activated status from older duplicates to the newest row for movies
-	_, _ = d.conn.Exec(`
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin deduplication transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1a. Transfer any activated status from older duplicates to the newest row for movies (by TMDB ID)
+	_, _ = tx.Exec(`
 		UPDATE movie_state
 		SET is_activated = 1
 		WHERE movie_id IN (
@@ -740,8 +741,22 @@ func (d *DB) DeduplicateSupersededStates() (int64, error) {
 		);
 	`)
 
+	// 1b. Transfer any activated status from older duplicates to newest row for movies without TMDB ID (by Title + Year)
+	_, _ = tx.Exec(`
+		UPDATE movie_state
+		SET is_activated = 1
+		WHERE (tmdb_id = '' OR tmdb_id = '0')
+		  AND movie_id IN (
+			SELECT MAX(movie_id)
+			FROM movie_state
+			WHERE (tmdb_id = '' OR tmdb_id = '0') AND title != '' AND year > 0
+			GROUP BY title, year
+			HAVING COUNT(*) > 1 AND SUM(is_activated) > 0
+		);
+	`)
+
 	// 2. Prune duplicate movies by tmdb_id (keeping highest movie_id)
-	resMvTMDB, err := d.conn.Exec(`
+	resMvTMDB, err := tx.Exec(`
 		DELETE FROM movie_state
 		WHERE tmdb_id != '' AND tmdb_id != '0'
 		  AND movie_id NOT IN (
@@ -757,7 +772,7 @@ func (d *DB) DeduplicateSupersededStates() (int64, error) {
 	delMvTMDB, _ := resMvTMDB.RowsAffected()
 
 	// 3. Prune duplicate movies without TMDB ID by (title, year)
-	resMvTitle, err := d.conn.Exec(`
+	resMvTitle, err := tx.Exec(`
 		DELETE FROM movie_state
 		WHERE (tmdb_id = '' OR tmdb_id = '0')
 		  AND title != '' AND year > 0
@@ -774,8 +789,8 @@ func (d *DB) DeduplicateSupersededStates() (int64, error) {
 	}
 	delMvTitle, _ := resMvTitle.RowsAffected()
 
-	// 4. Transfer activated status for series duplicates
-	_, _ = d.conn.Exec(`
+	// 4a. Transfer activated status for series duplicates (by TMDB ID)
+	_, _ = tx.Exec(`
 		UPDATE series_state
 		SET is_activated = 1
 		WHERE series_id IN (
@@ -787,8 +802,22 @@ func (d *DB) DeduplicateSupersededStates() (int64, error) {
 		);
 	`)
 
+	// 4b. Transfer activated status for series without TMDB ID (by Title + Year)
+	_, _ = tx.Exec(`
+		UPDATE series_state
+		SET is_activated = 1
+		WHERE (tmdb_id = '' OR tmdb_id = '0')
+		  AND series_id IN (
+			SELECT MAX(series_id)
+			FROM series_state
+			WHERE (tmdb_id = '' OR tmdb_id = '0') AND title != '' AND year > 0
+			GROUP BY title, year
+			HAVING COUNT(*) > 1 AND SUM(is_activated) > 0
+		);
+	`)
+
 	// 5. Prune duplicate series by tmdb_id
-	resSrsTMDB, err := d.conn.Exec(`
+	resSrsTMDB, err := tx.Exec(`
 		DELETE FROM series_state
 		WHERE tmdb_id != '' AND tmdb_id != '0'
 		  AND series_id NOT IN (
@@ -804,7 +833,7 @@ func (d *DB) DeduplicateSupersededStates() (int64, error) {
 	delSrsTMDB, _ := resSrsTMDB.RowsAffected()
 
 	// 6. Prune duplicate series without TMDB ID by (title, year)
-	resSrsTitle, err := d.conn.Exec(`
+	resSrsTitle, err := tx.Exec(`
 		DELETE FROM series_state
 		WHERE (tmdb_id = '' OR tmdb_id = '0')
 		  AND title != '' AND year > 0
@@ -822,24 +851,17 @@ func (d *DB) DeduplicateSupersededStates() (int64, error) {
 	delSrsTitle, _ := resSrsTitle.RowsAffected()
 
 	// 7. Clean up orphaned stream_variants
-	_, _ = d.conn.Exec(`DELETE FROM stream_variants WHERE item_type = 'movie' AND item_id NOT IN (SELECT movie_id FROM movie_state);`)
-	_, _ = d.conn.Exec(`DELETE FROM stream_variants WHERE item_type = 'series' AND item_id NOT IN (SELECT series_id FROM series_state);`)
+	_, _ = tx.Exec(`DELETE FROM stream_variants WHERE item_type = 'movie' AND item_id NOT IN (SELECT movie_id FROM movie_state);`)
+	_, _ = tx.Exec(`DELETE FROM stream_variants WHERE item_type = 'series' AND item_id NOT IN (SELECT series_id FROM series_state);`)
 
-	// 8. Clean up soft_deleted_items that match active folder names or (Title + Year) in movie_state or series_state
-	_, _ = d.conn.Exec(`
-		DELETE FROM soft_deleted_items
-		WHERE EXISTS (
-			SELECT 1 FROM movie_state ms 
-			WHERE soft_deleted_items.item_path = ms.folder_name 
-			   OR soft_deleted_items.item_path LIKE '%/' || ms.folder_name
-			   OR (ms.title != '' AND ms.year > 0 AND soft_deleted_items.item_path LIKE '%/' || ms.title || ' (' || ms.year || ')%')
-		) OR EXISTS (
-			SELECT 1 FROM series_state ss 
-			WHERE soft_deleted_items.item_path = ss.folder_name 
-			   OR soft_deleted_items.item_path LIKE '%/' || ss.folder_name
-			   OR (ss.title != '' AND ss.year > 0 AND soft_deleted_items.item_path LIKE '%/' || ss.title || ' (' || ss.year || ')%')
-		);
-	`)
+	// 8. Clean up soft_deleted_items (which were populated due to past ID churn bugs).
+	// Wiping these prevents erroneous deletion of existing media when the 7-day retention period expires.
+	// Any genuinely deleted content will be naturally re-detected on subsequent staging passes.
+	_, _ = tx.Exec(`DELETE FROM soft_deleted_items;`)
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit deduplication transaction: %w", err)
+	}
 
 	totalPruned := delMvTMDB + delMvTitle + delSrsTMDB + delSrsTitle
 	if totalPruned > 0 {
