@@ -189,21 +189,40 @@ func TestSQLiteStateEngine(t *testing.T) {
 	}
 
 	// 3. Test Soft Delete Tracking
-	itemPath := "/data/strm/Movies/Avatar (2009) [tmdbid=19995]"
-	if err := d.SoftDeleteItem(itemPath, "movie"); err != nil {
-		t.Fatalf("Failed to soft delete item: %v", err)
+	dummyPath := "/data/strm/Movies/Dummy Expired (2020) [tmdbid=99999]"
+	inserted, err := d.SoftDeleteItem(dummyPath, "movie")
+	if err != nil || !inserted {
+		t.Fatalf("Failed to soft delete item (inserted=%v): %v", inserted, err)
+	}
+
+	// Re-inserting the same item path should NOT re-insert (ON CONFLICT DO NOTHING)
+	insertedAgain, err := d.SoftDeleteItem(dummyPath, "movie")
+	if err != nil || insertedAgain {
+		t.Fatalf("Expected insertedAgain=false for existing soft-deleted item, got %v (err: %v)", insertedAgain, err)
+	}
+
+	// Test GetSoftDeletedPathsMap
+	sdMap, err := d.GetSoftDeletedPathsMap()
+	if err != nil || !sdMap[dummyPath] || !sdMap["Dummy Expired (2020) [tmdbid=99999]"] {
+		t.Fatalf("GetSoftDeletedPathsMap missing path or folder, got: %v", sdMap)
 	}
 
 	expired, err := d.GetExpiredSoftDeletedItems(0) // 0 days retention cutoff
 	if err != nil {
 		t.Fatalf("Failed to query expired soft deleted items: %v", err)
 	}
-	if len(expired) != 1 || expired[0] != itemPath {
-		t.Errorf("Expected expired item path %s, got %v", itemPath, expired)
+	if len(expired) != 1 || expired[0] != dummyPath {
+		t.Errorf("Expected expired item path %s, got %v", dummyPath, expired)
 	}
 
-	if err := d.RemoveSoftDeletedItem(itemPath); err != nil {
-		t.Fatalf("Failed to remove soft deleted item: %v", err)
+	if err := d.PurgeExpiredSoftDeletedItem(dummyPath); err != nil {
+		t.Fatalf("Failed to purge expired soft deleted item: %v", err)
+	}
+
+	// Verify it was removed
+	sdMapAfter, _ := d.GetSoftDeletedPathsMap()
+	if sdMapAfter[dummyPath] {
+		t.Errorf("Expected dummyPath to be removed from soft delete map")
 	}
 
 	// 4. Test Sync Queue Operations

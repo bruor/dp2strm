@@ -840,15 +840,65 @@ func (d *DB) DeleteStreamVariant(itemID int, itemType, variantKey string) error 
 
 // --- Soft Delete Tracking Queries ---
 
-// SoftDeleteItem records an item path as soft deleted with the current timestamp.
-func (d *DB) SoftDeleteItem(itemPath, itemType string) error {
+// SoftDeleteItem records an item path as soft deleted with the current timestamp if not already tracked.
+// Returns true if newly inserted, false if already tracked in the soft delete grace period.
+func (d *DB) SoftDeleteItem(itemPath, itemType string) (bool, error) {
 	query := `
 	INSERT INTO soft_deleted_items (item_path, item_type, soft_deleted_at)
 	VALUES (?, ?, ?)
-	ON CONFLICT(item_path) DO UPDATE SET soft_deleted_at = EXCLUDED.soft_deleted_at;
+	ON CONFLICT(item_path) DO NOTHING;
 	`
-	_, err := d.conn.Exec(query, itemPath, itemType, time.Now())
-	return err
+	res, err := d.conn.Exec(query, itemPath, itemType, time.Now())
+	if err != nil {
+		return false, err
+	}
+	ra, _ := res.RowsAffected()
+	return ra > 0, nil
+}
+
+// GetSoftDeletedPathsMap returns a lookup set of all item paths and folder names currently held in soft deletion.
+func (d *DB) GetSoftDeletedPathsMap() (map[string]bool, error) {
+	query := `SELECT item_path FROM soft_deleted_items`
+	rows, err := d.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	res := make(map[string]bool)
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err == nil {
+			res[p] = true
+			res[filepath.Base(p)] = true
+		}
+	}
+	return res, nil
+}
+
+// PurgeExpiredSoftDeletedItem removes an expired item from soft deletion and cleans up its database records.
+func (d *DB) PurgeExpiredSoftDeletedItem(itemPath string) error {
+	folderName := filepath.Base(itemPath)
+
+	// Clean up movie record and stream variants if matches
+	var movieID int
+	if err := d.conn.QueryRow(`SELECT movie_id FROM movie_state WHERE folder_name = ?`, folderName).Scan(&movieID); err == nil && movieID > 0 {
+		_ = d.DeleteMovieState(movieID)
+		_ = d.DeleteAllStreamVariantsForItem(movieID, "movie")
+	} else {
+		_ = d.DeleteMovieStateByFolder(folderName)
+	}
+
+	// Clean up series record and stream variants if matches
+	var seriesID int
+	if err := d.conn.QueryRow(`SELECT series_id FROM series_state WHERE folder_name = ?`, folderName).Scan(&seriesID); err == nil && seriesID > 0 {
+		_ = d.DeleteSeriesState(seriesID)
+		_ = d.DeleteAllStreamVariantsForItem(seriesID, "series")
+	} else {
+		_ = d.DeleteSeriesStateByFolder(folderName)
+	}
+
+	return d.RemoveSoftDeletedItem(itemPath)
 }
 
 // GetExpiredSoftDeletedItems returns item paths that have exceeded retentionGraceDays.
@@ -943,9 +993,27 @@ func (d *DB) DeleteMovieState(movieID int) error {
 	return err
 }
 
+// DeleteMovieStateByFolder permanently deletes a movie record matching folder_name.
+func (d *DB) DeleteMovieStateByFolder(folderName string) error {
+	_, err := d.conn.Exec(`DELETE FROM movie_state WHERE folder_name = ?`, folderName)
+	return err
+}
+
 // DeleteSeriesState permanently deletes a series record from SQLite.
 func (d *DB) DeleteSeriesState(seriesID int) error {
 	_, err := d.conn.Exec(`DELETE FROM series_state WHERE series_id = ?`, seriesID)
+	return err
+}
+
+// DeleteSeriesStateByFolder permanently deletes a series record matching folder_name.
+func (d *DB) DeleteSeriesStateByFolder(folderName string) error {
+	_, err := d.conn.Exec(`DELETE FROM series_state WHERE folder_name = ?`, folderName)
+	return err
+}
+
+// DeleteAllStreamVariantsForItem removes all stream variants associated with an item.
+func (d *DB) DeleteAllStreamVariantsForItem(itemID int, itemType string) error {
+	_, err := d.conn.Exec(`DELETE FROM stream_variants WHERE item_id = ? AND item_type = ?`, itemID, itemType)
 	return err
 }
 
@@ -1255,6 +1323,14 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 	}
 	defer stateStmt.Close()
 
+	delSoftStmt, err := tx.Prepare(`
+	DELETE FROM soft_deleted_items WHERE item_path = ? OR item_path LIKE '%/' || ?;
+	`)
+	if err != nil {
+		return err
+	}
+	defer delSoftStmt.Close()
+
 	for _, mv := range items {
 		cleanTitle := sanitizer.CleanTitle(mv.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
@@ -1264,6 +1340,7 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 		if _, err := stateStmt.Exec(mv.ID, mv.TMDBID, mv.IMDBID, cleanTitle, mv.Year, folderName, now); err != nil {
 			return err
 		}
+		_, _ = delSoftStmt.Exec(folderName, folderName)
 	}
 
 	return tx.Commit()
@@ -1308,6 +1385,14 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	}
 	defer stateStmt.Close()
 
+	delSoftStmt, err := tx.Prepare(`
+	DELETE FROM soft_deleted_items WHERE item_path = ? OR item_path LIKE '%/' || ?;
+	`)
+	if err != nil {
+		return err
+	}
+	defer delSoftStmt.Close()
+
 	for _, srs := range items {
 		cleanTitle := sanitizer.CleanTitle(srs.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
@@ -1317,6 +1402,7 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, now); err != nil {
 			return err
 		}
+		_, _ = delSoftStmt.Exec(folderName, folderName)
 	}
 
 	return tx.Commit()

@@ -1076,7 +1076,7 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 						}
 						orphanPath := filepath.Join(movieDir, varFilename)
 						if s.cfg.RetentionGraceDays > 0 {
-							_ = s.database.SoftDeleteItem(orphanPath, "variant")
+							_, _ = s.database.SoftDeleteItem(orphanPath, "variant")
 							log.Printf("[Syncer] Disappeared variant %q for Movie %d (%s) marked for soft deletion (%d-day grace period).", ev.VariantKey, movieID, cleanTitle, s.cfg.RetentionGraceDays)
 						} else {
 							_ = os.Remove(orphanPath)
@@ -1358,86 +1358,180 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 	}
 
 	// 1. Stage Movies
+	movieFetchComplete := false
 	moviesCount := 0
 	page1Movies, err := s.client.FetchMoviePage(ctx, 1, pageSize)
-	if err == nil && page1Movies != nil {
+	if err != nil {
+		log.Printf("[Stager] Error fetching movie page 1: %v", err)
+		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+			s.tripCircuitBreaker()
+		}
+	} else if page1Movies != nil {
 		_ = s.database.BatchStageMovies(page1Movies.Results)
 		moviesCount += len(page1Movies.Results)
 
 		totalMoviePages := (page1Movies.Count + pageSize - 1) / pageSize
+		moviePagesFailed := false
 		for p := 2; p <= totalMoviePages; p++ {
 			if s.isCircuitTripped() {
+				moviePagesFailed = true
 				break
 			}
-			mvs, pErr := s.client.FetchMoviePage(ctx, p, pageSize)
+			var mvs *models.PaginatedResponse[models.Movie]
+			var pErr error
+			for attempt := 1; attempt <= 3; attempt++ {
+				mvs, pErr = s.client.FetchMoviePage(ctx, p, pageSize)
+				if pErr == nil && mvs != nil {
+					break
+				}
+				if pErr == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+					s.tripCircuitBreaker()
+					break
+				}
+				time.Sleep(time.Duration(attempt*500) * time.Millisecond)
+			}
 			if pErr != nil || mvs == nil {
+				log.Printf("[Stager] Failed to fetch movie page %d after retries: %v", p, pErr)
+				moviePagesFailed = true
 				continue
 			}
 			_ = s.database.BatchStageMovies(mvs.Results)
 			moviesCount += len(mvs.Results)
 		}
+		if !moviePagesFailed && !s.isCircuitTripped() {
+			movieFetchComplete = true
+		}
 	}
 
 	// 2. Stage Series
+	seriesFetchComplete := false
 	seriesCount := 0
 	page1Series, sErr := s.client.FetchSeriesPage(ctx, 1, pageSize)
-	if sErr == nil && page1Series != nil {
+	if sErr != nil {
+		log.Printf("[Stager] Error fetching series page 1: %v", sErr)
+		if sErr == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+			s.tripCircuitBreaker()
+		}
+	} else if page1Series != nil {
 		_ = s.database.BatchStageSeries(page1Series.Results)
 		seriesCount += len(page1Series.Results)
 
 		totalSeriesPages := (page1Series.Count + pageSize - 1) / pageSize
+		seriesPagesFailed := false
 		for p := 2; p <= totalSeriesPages; p++ {
 			if s.isCircuitTripped() {
+				seriesPagesFailed = true
 				break
 			}
-			seriesList, pErr := s.client.FetchSeriesPage(ctx, p, pageSize)
+			var seriesList *models.PaginatedResponse[models.Series]
+			var pErr error
+			for attempt := 1; attempt <= 3; attempt++ {
+				seriesList, pErr = s.client.FetchSeriesPage(ctx, p, pageSize)
+				if pErr == nil && seriesList != nil {
+					break
+				}
+				if pErr == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
+					s.tripCircuitBreaker()
+					break
+				}
+				time.Sleep(time.Duration(attempt*500) * time.Millisecond)
+			}
 			if pErr != nil || seriesList == nil {
+				log.Printf("[Stager] Failed to fetch series page %d after retries: %v", p, pErr)
+				seriesPagesFailed = true
 				continue
 			}
 			_ = s.database.BatchStageSeries(seriesList.Results)
 			seriesCount += len(seriesList.Results)
 		}
+		if !seriesPagesFailed && !s.isCircuitTripped() {
+			seriesFetchComplete = true
+		}
 	}
 
-	// 3. Detect disappeared Movies and Series (only if circuit breaker was not tripped and full sync completed)
+	// 3. Detect disappeared Movies and Series (only if full sync completed without errors and circuit breaker was not tripped)
 	if !s.isCircuitTripped() && s.database != nil {
-		moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
-		if staleMovies, err := s.database.GetStaleMovieStates(start); err == nil && len(staleMovies) > 0 {
-			for _, sm := range staleMovies {
-				folderName := sm.FolderName
-				if folderName == "" {
-					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(sm.Title), sm.Year, sm.TMDBID, sm.IMDBID)
-				}
-				moviePath := filepath.Join(moviesRoot, folderName)
-				if s.cfg.RetentionGraceDays > 0 {
-					_ = s.database.SoftDeleteItem(moviePath, "movie")
-					log.Printf("[Stager] Disappeared movie %q (ID %d) marked for soft deletion (%d-day grace period).", sm.Title, sm.MovieID, s.cfg.RetentionGraceDays)
+		if movieFetchComplete {
+			moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")
+			if staleMovies, err := s.database.GetStaleMovieStates(start); err == nil && len(staleMovies) > 0 {
+				allMovies, _ := s.database.GetAllMovieStates()
+				// Safety Anomaly Guardrail: If existing database has > 100 movies and more than 50% disappeared at once,
+				// abort stale marking to prevent catastrophic library wipe from an upstream outage.
+				if len(allMovies) > 100 && len(staleMovies) > len(allMovies)/2 {
+					log.Printf("[Stager] ⚠️ Safety guardrail tripped: %d of %d movies (%.1f%%) missing from upstream catalog! Aborting mass soft-deletion.",
+						len(staleMovies), len(allMovies), float64(len(staleMovies))/float64(len(allMovies))*100.0)
 				} else {
-					_ = os.RemoveAll(moviePath)
-					_ = s.database.DeleteMovieState(sm.MovieID)
-					_ = s.database.DeleteStreamVariant(sm.MovieID, "movie", "base")
-					log.Printf("[Stager] Pruned disappeared movie %q (ID %d) from disk and database.", sm.Title, sm.MovieID)
+					newlyMarked := 0
+					alreadyPending := 0
+					for _, sm := range staleMovies {
+						folderName := sm.FolderName
+						if folderName == "" {
+							folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(sm.Title), sm.Year, sm.TMDBID, sm.IMDBID)
+						}
+						moviePath := filepath.Join(moviesRoot, folderName)
+						if s.cfg.RetentionGraceDays > 0 {
+							inserted, _ := s.database.SoftDeleteItem(moviePath, "movie")
+							if inserted {
+								newlyMarked++
+								log.Printf("[Stager] Disappeared movie %q (ID %d) marked for soft deletion (%d-day grace period).", sm.Title, sm.MovieID, s.cfg.RetentionGraceDays)
+							} else {
+								alreadyPending++
+							}
+						} else {
+							_ = os.RemoveAll(moviePath)
+							_ = s.database.DeleteMovieState(sm.MovieID)
+							_ = s.database.DeleteStreamVariant(sm.MovieID, "movie", "base")
+							log.Printf("[Stager] Pruned disappeared movie %q (ID %d) from disk and database.", sm.Title, sm.MovieID)
+						}
+					}
+					if alreadyPending > 0 {
+						log.Printf("[Stager] %d newly disappeared movie(s) marked for soft deletion, %d existing movie(s) pending retention timer.", newlyMarked, alreadyPending)
+					}
 				}
 			}
+		} else {
+			log.Printf("[Stager] Movie staging pass was incomplete (skipped stale detection to prevent false deletions).")
 		}
 
-		tvRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
-		if staleSeries, err := s.database.GetStaleSeriesStates(start); err == nil && len(staleSeries) > 0 {
-			for _, ss := range staleSeries {
-				folderName := ss.FolderName
-				if folderName == "" {
-					folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(ss.Title), ss.Year, ss.TMDBID, ss.IMDBID)
-				}
-				seriesPath := filepath.Join(tvRoot, folderName)
-				if s.cfg.RetentionGraceDays > 0 {
-					_ = s.database.SoftDeleteItem(seriesPath, "series")
-					log.Printf("[Stager] Disappeared TV show %q (ID %d) marked for soft deletion (%d-day grace period).", ss.Title, ss.SeriesID, s.cfg.RetentionGraceDays)
+		if seriesFetchComplete {
+			tvRoot := filepath.Join(s.cfg.OutputDir, "TV Shows")
+			if staleSeries, err := s.database.GetStaleSeriesStates(start); err == nil && len(staleSeries) > 0 {
+				allSeries, _ := s.database.GetAllSeriesStates()
+				// Safety Anomaly Guardrail: If existing database has > 100 series and more than 50% disappeared at once,
+				// abort stale marking to prevent catastrophic library wipe from an upstream outage.
+				if len(allSeries) > 100 && len(staleSeries) > len(allSeries)/2 {
+					log.Printf("[Stager] ⚠️ Safety guardrail tripped: %d of %d series (%.1f%%) missing from upstream catalog! Aborting mass soft-deletion.",
+						len(staleSeries), len(allSeries), float64(len(staleSeries))/float64(len(allSeries))*100.0)
 				} else {
-					_ = os.RemoveAll(seriesPath)
-					_ = s.database.DeleteSeriesState(ss.SeriesID)
-					log.Printf("[Stager] Pruned disappeared TV show %q (ID %d) from disk and database.", ss.Title, ss.SeriesID)
+					newlyMarked := 0
+					alreadyPending := 0
+					for _, ss := range staleSeries {
+						folderName := ss.FolderName
+						if folderName == "" {
+							folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(ss.Title), ss.Year, ss.TMDBID, ss.IMDBID)
+						}
+						seriesPath := filepath.Join(tvRoot, folderName)
+						if s.cfg.RetentionGraceDays > 0 {
+							inserted, _ := s.database.SoftDeleteItem(seriesPath, "series")
+							if inserted {
+								newlyMarked++
+								log.Printf("[Stager] Disappeared TV show %q (ID %d) marked for soft deletion (%d-day grace period).", ss.Title, ss.SeriesID, s.cfg.RetentionGraceDays)
+							} else {
+								alreadyPending++
+							}
+						} else {
+							_ = os.RemoveAll(seriesPath)
+							_ = s.database.DeleteSeriesState(ss.SeriesID)
+							log.Printf("[Stager] Pruned disappeared TV show %q (ID %d) from disk and database.", ss.Title, ss.SeriesID)
+						}
+					}
+					if alreadyPending > 0 {
+						log.Printf("[Stager] %d newly disappeared TV show(s) marked for soft deletion, %d existing show(s) pending retention timer.", newlyMarked, alreadyPending)
+					}
 				}
 			}
+		} else {
+			log.Printf("[Stager] TV series staging pass was incomplete (skipped stale detection to prevent false deletions).")
 		}
 	}
 
@@ -2097,12 +2191,17 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 			log.Printf("[Retention] Purging %d expired soft-deleted items from disk (%d-day grace period exceeded)...", len(expiredPaths), s.cfg.RetentionGraceDays)
 			for _, p := range expiredPaths {
 				_ = os.RemoveAll(p)
-				_ = s.database.RemoveSoftDeletedItem(p)
+				_ = s.database.PurgeExpiredSoftDeletedItem(p)
 			}
 		}
 		if pendingCount, pErr := s.database.GetPendingSoftDeletedCount(); pErr == nil && pendingCount > 0 {
 			log.Printf("[Retention] %d item(s) currently held in grace period waiting for retention timer (%d-day grace period).", pendingCount, s.cfg.RetentionGraceDays)
 		}
+	}
+
+	var softDeletedMap map[string]bool
+	if s.database != nil {
+		softDeletedMap, _ = s.database.GetSoftDeletedPathsMap()
 	}
 
 	// 2. Scan and enqueue TV Shows needing ID upgrade, Specials S00E99 upgrade, or episode URL reconciliation
@@ -2128,6 +2227,10 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				legacyDir := filepath.Join(tvShowsRoot, legacyFolderName)
 
 				if _, canonicalErr := os.Stat(canonicalDirPath); canonicalErr == nil {
+					// Canonical directory exists on disk - only skip if canonical directory itself is soft-deleted
+					if softDeletedMap[canonicalDirPath] || softDeletedMap[canonicalFolderName] {
+						continue
+					}
 					_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
 					seriesDirPath = canonicalDirPath
 					st.FolderName = canonicalFolderName
@@ -2152,10 +2255,16 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 							}
 						}
 					}
-				} else if _, statErr := os.Stat(seriesDirPath); statErr == nil {
-					needsReconcile = true
-				} else if _, lStat := os.Stat(legacyDir); lStat == nil {
-					needsReconcile = true
+				} else {
+					// Canonical directory does not exist on disk - skip if this series is soft-deleted
+					if softDeletedMap[canonicalDirPath] || softDeletedMap[seriesDirPath] || softDeletedMap[canonicalFolderName] || softDeletedMap[currentFolderName] {
+						continue
+					}
+					if _, statErr := os.Stat(seriesDirPath); statErr == nil {
+						needsReconcile = true
+					} else if _, lStat := os.Stat(legacyDir); lStat == nil {
+						needsReconcile = true
+					}
 				}
 
 				if !st.IsActivated {
@@ -2221,6 +2330,10 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				legacyDir := filepath.Join(moviesRoot, legacyFolderName)
 
 				if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
+					// Canonical directory exists on disk - only skip if canonical directory itself is soft-deleted
+					if softDeletedMap[canonicalDir] || softDeletedMap[canonicalFolderName] {
+						continue
+					}
 					_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
 					movieDir = canonicalDir
 					mst.FolderName = canonicalFolderName
@@ -2245,10 +2358,16 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 							}
 						}
 					}
-				} else if _, statErr := os.Stat(movieDir); statErr == nil {
-					needsReconcile = true
-				} else if _, lStat := os.Stat(legacyDir); lStat == nil {
-					needsReconcile = true
+				} else {
+					// Canonical directory does not exist on disk - skip if this movie is soft-deleted
+					if softDeletedMap[canonicalDir] || softDeletedMap[movieDir] || softDeletedMap[canonicalFolderName] || softDeletedMap[currentFolderName] {
+						continue
+					}
+					if _, statErr := os.Stat(movieDir); statErr == nil {
+						needsReconcile = true
+					} else if _, lStat := os.Stat(legacyDir); lStat == nil {
+						needsReconcile = true
+					}
 				}
 
 				expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)

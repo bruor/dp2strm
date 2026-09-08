@@ -120,10 +120,12 @@ func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*model
 		}, nil
 	}
 
-	log.Printf("[Client] Warning: /api/vod/movies/ page %d returned %d bytes (Empty or Unparseable)", page, len(bodyBytes))
-	return &models.PaginatedResponse[models.Movie]{
-		Results: []models.Movie{},
-	}, nil
+	snippet := string(bodyBytes)
+	if len(snippet) > 200 {
+		snippet = snippet[:200] + "..."
+	}
+	log.Printf("[Client] Error: /api/vod/movies/ page %d returned invalid JSON (%d bytes): %s", page, len(bodyBytes), snippet)
+	return nil, fmt.Errorf("failed to parse /api/vod/movies/ page %d response (%d bytes): %s", page, len(bodyBytes), snippet)
 }
 
 // FetchSingleMovie retrieves a single movie by ID via GET /api/vod/movies/{id}/
@@ -232,10 +234,12 @@ func (c *Client) FetchSeriesPage(ctx context.Context, page, pageSize int) (*mode
 		}, nil
 	}
 
-	log.Printf("[Client] Warning: /api/vod/series/ page %d returned %d bytes (Empty or Unparseable)", page, len(bodyBytes))
-	return &models.PaginatedResponse[models.Series]{
-		Results: []models.Series{},
-	}, nil
+	snippet := string(bodyBytes)
+	if len(snippet) > 200 {
+		snippet = snippet[:200] + "..."
+	}
+	log.Printf("[Client] Error: /api/vod/series/ page %d returned invalid JSON (%d bytes): %s", page, len(bodyBytes), snippet)
+	return nil, fmt.Errorf("failed to parse /api/vod/series/ page %d response (%d bytes): %s", page, len(bodyBytes), snippet)
 }
 
 // FetchSingleSeries retrieves a single series by ID via GET /api/vod/series/{id}/

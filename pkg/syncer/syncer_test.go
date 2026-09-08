@@ -499,7 +499,7 @@ func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
 	if err := os.MkdirAll(legacyMovieFolder, 0755); err != nil {
 		t.Fatalf("Failed to create legacy movie dir: %v", err)
 	}
-	_ = database.SoftDeleteItem(legacyMovieFolder, "movie")
+	_, _ = database.SoftDeleteItem(legacyMovieFolder, "movie")
 
 	// 2. Setup Series in DB with legacy folder name
 	seriesID := 9001
@@ -587,6 +587,71 @@ func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
 	stats, _ = database.GetDetailedQueueStats()
 	if stats.Pending != 1 || stats.MovieReconciles != 1 {
 		t.Errorf("Expected 1 pending MovieReconcile task after deleting STRM, got %+v", stats)
+	}
+}
+
+func TestStageCatalogDeltaSafetyAndSoftDeleteLifecycle(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer database.Close()
+
+	// Seed 1 active movie in database
+	movieID := 8888
+	_ = database.UpsertInitialMovieState(movieID, "550", "", "Fight Club", 1999, "Fight Club (1999) [tmdbid=550]")
+
+	// Mock server returning 502 Bad Gateway error for movies
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`<html><body>502 Bad Gateway</body></html>`))
+	}))
+	defer ts.Close()
+
+	restClient := client.NewClient(ts.URL, "test-key")
+	cfg := &models.Config{
+		OutputDir:          tempDir,
+		RetentionGraceDays: 7,
+		URL:                "http://localhost:9199",
+	}
+	s := NewSyncer(cfg, restClient, database)
+
+	// 1. Run StageCatalogDelta when upstream returns 502 error
+	// Staging must fail safely: it must NOT mark existing movie 8888 as disappeared!
+	_ = s.StageCatalogDelta(context.Background())
+
+	softDeletedCount, _ := database.GetPendingSoftDeletedCount()
+	if softDeletedCount != 0 {
+		t.Fatalf("Expected 0 soft deleted items after failed fetch (safety guardrail), got %d", softDeletedCount)
+	}
+
+	// 2. Test Soft-Delete Lifecycle: Manually mark movie folder as soft deleted
+	movieFolder := filepath.Join(tempDir, "Movies", "Fight Club (1999) [tmdbid=550]")
+	inserted, err := database.SoftDeleteItem(movieFolder, "movie")
+	if err != nil || !inserted {
+		t.Fatalf("Expected movie to be newly soft-deleted: inserted=%v, err=%v", inserted, err)
+	}
+
+	// Verify ReconcileDiskState skips soft-deleted movie even if its folder/STRM does not exist on disk
+	_ = s.ReconcileDiskState(context.Background())
+	stats, _ := database.GetDetailedQueueStats()
+	if stats.MovieReconciles != 0 {
+		t.Errorf("Expected 0 MovieReconciles (soft-deleted movie must not be resurrected), got %d", stats.MovieReconciles)
+	}
+
+	// 3. Test Reappearance: When movie is re-staged by Dispatcharr, it must be removed from soft_deleted_items
+	restagedMovies := []models.Movie{
+		{ID: movieID, TMDBID: "550", Name: "Fight Club", Year: 1999},
+	}
+	if err := database.BatchStageMovies(restagedMovies); err != nil {
+		t.Fatalf("BatchStageMovies failed: %v", err)
+	}
+
+	softDeletedAfterReappearance, _ := database.GetPendingSoftDeletedCount()
+	if softDeletedAfterReappearance != 0 {
+		t.Errorf("Expected 0 soft deleted items after movie reappeared in Dispatcharr, got %d", softDeletedAfterReappearance)
 	}
 }
 

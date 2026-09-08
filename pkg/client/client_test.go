@@ -143,3 +143,22 @@ func TestClientOrdering(t *testing.T) {
 		t.Errorf("Expected series ordering '-created_at', got: '%s'", seriesOrdering)
 	}
 }
+
+func TestClientInvalidJSONError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html><body>502 Bad Gateway</body></html>`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "test-key")
+	_, errMv := c.FetchMoviePage(context.Background(), 1, 100)
+	if errMv == nil {
+		t.Errorf("Expected error for HTML/unparseable movie response, got nil")
+	}
+
+	_, errSrs := c.FetchSeriesPage(context.Background(), 1, 100)
+	if errSrs == nil {
+		t.Errorf("Expected error for HTML/unparseable series response, got nil")
+	}
+}
