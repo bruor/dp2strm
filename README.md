@@ -53,9 +53,9 @@
   - Configurable daily janitor (default: `24h` / `0 3 * * *`) that scans SQLite state (`WHERE is_activated = 0`), automatically converts legacy folder structures to the new `Specials/S00E99` architecture at `PriorityReconcile (50)`, and prunes orphaned files.
 - **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` using WAL mode (`series_state`, `movie_state`, `sync_queue`, `stream_variants`).
 - **Smart Series Update Scheduling Engine**:
-  - Unactivated & `Ended` series skip fetching episode lists on scheduled sync runs (0 API calls!).
-  - `Continuing` series skip checks until `current_date >= next_episode_air_date`.
-  - Millisecond `last_modified` checks prevent unnecessary disk writes (`os.Chtimes` preservation).
+  - Unactivated series skip fetching episode lists on scheduled sync runs (0 API calls!).
+  - Activated series automatically detect new episode drops during periodic catalog staging when Dispatcharr reports newer `updated_at` timestamps or increased `episode_count`.
+  - Airing episode drops are prioritized at `PriorityAiring` (`30`), jumping ahead of bulk catalog intake (`PriorityBatch` = `10`), with newly created `.strm` files naturally ingested into Emby via standard batch scans.
 - **Dynamic Shared-Pool Batching with Budget Rollover (`BATCH_SIZE`)**:
   - `BATCH_SIZE` limits the total number of **newly created media files** per sync run.
   - Automatically splits the budget 50/50 between Movies and Series.
@@ -71,7 +71,10 @@
 - **Emby Multi-Version Hierarchy Support**: Automatically classifies 1080p base default versions (`Movie.strm`) vs 4K secondary versions (`Movie - 4K.strm`) for Emby's version dropdown menu.
 - **Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preventing port 80 connection errors in FFmpeg/Emby.
 - **Single Unified Emby Refresh Trigger**: Emby receives a single refresh webhook at the end of each shared sync pass only when new `.strm` media files are created on disk.
-- **`streamcache` Base64 URL Rewriter**: Optional integration with `streamcache` transparent proxy using URL-safe Base64 encoded query paths (`<STREAMCACHE_URL>?url=<escaped_target>`).
+- **`streamcache` Integration & Boundary-Aware Predictive Pre-Caching**:
+  - Optional integration with `streamcache` transparent proxy (`<STREAMCACHE_URL>?url=<escaped_target>`).
+  - **Predictive Tap & Bail** (`FETCH_AHEAD_COUNT`, default `0` = disabled): When watching a series, fires lightweight 500ms background requests directly to `streamcache` with the upstream Dispatcharr target URL to warm/pre-buffer upcoming episodes.
+  - **Boundary & Variant Aware**: Discovers only valid sequential episodes in SQLite, seamlessly rolling over season boundaries (e.g. `S01E10` ➔ `S02E01`), matching the user's active playback variant (e.g. `4k` vs `base`) with per-episode base fallback, and stopping cleanly at season/series finales.
 - **Timezone-Aware Cron Scheduler**: Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).
 
 ---
@@ -112,7 +115,7 @@ services:
 
       # Streamcache Integration (Optional)
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
-      - FETCH_AHEAD_COUNT=2 # Only active when STREAMCACHE_URL is set
+      - FETCH_AHEAD_COUNT=0 # Default: 0 (disabled). Set to 1 or 2 when STREAMCACHE_URL is set
 
       # Retention & Emby Hooks
       - RETENTION_GRACE_DAYS=7
@@ -193,7 +196,7 @@ services:
 | `ENABLE_NFO` | `false` | Enable local NFO metadata generation for actual content (`false` = disabled by default so Emby scrapes TMDB/TVDB directly; synthetic `S01E01` instructions NFO is always generated for unactivated shows) |
 | `ACTIVATION_REFRESH_DELAY` | `10s` | Maximum wait duration for active Emby playback session verification before triggering targeted metadata refresh (Default: `10s`) |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
-| `FETCH_AHEAD_COUNT` | `2` | Number of upcoming TV episodes to pre-fetch for cache warming |
+| `FETCH_AHEAD_COUNT` | `0` | Number of upcoming TV episodes to pre-fetch for cache warming (default `0` = disabled) |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |
 | `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial staging pass on container startup |

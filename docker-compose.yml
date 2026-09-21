@@ -43,7 +43,7 @@ services:
 
       # --- Streamcache Integration Options (Optional) ---
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
-      - FETCH_AHEAD_COUNT=2 # Active only when STREAMCACHE_URL is set
+      - FETCH_AHEAD_COUNT=0 # Default: 0 (disabled). Set to 1 or 2 when STREAMCACHE_URL is set
       - RETENTION_GRACE_DAYS=7
 
       # --- Emby / Jellyfin Rescan Hooks (Zero-Config Auto-Discovered) ---

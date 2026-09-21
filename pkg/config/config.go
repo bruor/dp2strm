@@ -21,7 +21,7 @@ func DefaultConfig() *models.Config {
 		XCPassword:            "password",
 		OutputDir:             "/data/strm",
 		StreamcacheURL:        "",
-		FetchAheadCount:       2,
+		FetchAheadCount:       0,
 		RetentionGraceDays:    7,
 		Port:                  8080,
 		URL:                   "http://localhost:8080",

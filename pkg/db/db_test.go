@@ -448,3 +448,272 @@ func TestDeduplicateSupersededStatesAndBatchStageIDMigration(t *testing.T) {
 		t.Errorf("Expected activation state to be preserved across BatchStageMovies ID migration")
 	}
 }
+
+func TestBatchStageSeriesActiveAiringEpisodeDetection(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_airing.db")
+	d, err := Open(tempDB)
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer d.Close()
+
+	t1 := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+
+	// Setup initial series state:
+	// Series 1: Active, 10 episodes, updated at t1
+	_ = d.UpsertInitialSeriesState(1001, "tmdb-1", "", "Active Show Timestamp", 2024, "Active Show Timestamp (2024)")
+	_ = d.SetSeriesActivated(1001, "tmdb-1", "Active Show Timestamp")
+	_ = d.MarkSeriesRefreshed(1001, 10, t1)
+
+	// Series 2: Active, 5 episodes, updated at t1
+	_ = d.UpsertInitialSeriesState(1002, "tmdb-2", "", "Active Show EpisodeCount", 2024, "Active Show EpisodeCount (2024)")
+	_ = d.SetSeriesActivated(1002, "tmdb-2", "Active Show EpisodeCount")
+	_ = d.MarkSeriesRefreshed(1002, 5, t1)
+
+	// Series 3: Unactivated, 5 episodes, updated at t1
+	_ = d.UpsertInitialSeriesState(1003, "tmdb-3", "", "Unactivated Show", 2024, "Unactivated Show (2024)")
+
+	// Series 4: Active, 8 episodes, updated at t1 (will remain unchanged)
+	_ = d.UpsertInitialSeriesState(1004, "tmdb-4", "", "Active Show Unchanged", 2024, "Active Show Unchanged (2024)")
+	_ = d.SetSeriesActivated(1004, "tmdb-4", "Active Show Unchanged")
+	_ = d.MarkSeriesRefreshed(1004, 8, t1)
+
+	// Clear any residual queue items from setup
+	_, _ = d.conn.Exec("DELETE FROM sync_queue")
+
+	// Now stage a catalog batch:
+	batch := []models.Series{
+		{
+			ID:           1001,
+			Name:         "Active Show Timestamp",
+			Year:         2024,
+			TMDBID:       "tmdb-1",
+			EpisodeCount: 10,
+			UpdatedAt:    t2, // Newer timestamp
+		},
+		{
+			ID:           1002,
+			Name:         "Active Show EpisodeCount",
+			Year:         2024,
+			TMDBID:       "tmdb-2",
+			EpisodeCount: 6,  // Increased episode count (5 -> 6)
+			UpdatedAt:    t1, // Same timestamp
+		},
+		{
+			ID:           1003,
+			Name:         "Unactivated Show",
+			Year:         2024,
+			TMDBID:       "tmdb-3",
+			EpisodeCount: 10,
+			UpdatedAt:    t2, // Newer, but unactivated!
+		},
+		{
+			ID:           1004,
+			Name:         "Active Show Unchanged",
+			Year:         2024,
+			TMDBID:       "tmdb-4",
+			EpisodeCount: 8,
+			UpdatedAt:    t1, // Exactly the same
+		},
+	}
+
+	if err := d.BatchStageSeries(batch); err != nil {
+		t.Fatalf("BatchStageSeries failed: %v", err)
+	}
+
+	// Verify sync_queue:
+	// Should have exactly 2 tasks for update_episodes: 1001 and 1002, both priority 30
+	rows, err := d.conn.Query("SELECT item_id, action, priority FROM sync_queue WHERE action = 'update_episodes' ORDER BY item_id ASC")
+	if err != nil {
+		t.Fatalf("Failed to query sync_queue: %v", err)
+	}
+	defer rows.Close()
+
+	type queueRow struct {
+		id       int
+		action   string
+		priority int
+	}
+	var updateTasks []queueRow
+	for rows.Next() {
+		var r queueRow
+		if err := rows.Scan(&r.id, &r.action, &r.priority); err != nil {
+			t.Fatalf("Scan failed: %v", err)
+		}
+		updateTasks = append(updateTasks, r)
+	}
+
+	if len(updateTasks) != 2 {
+		t.Fatalf("Expected 2 update_episodes tasks, got %d: %+v", len(updateTasks), updateTasks)
+	}
+	if updateTasks[0].id != 1001 || updateTasks[0].priority != 30 {
+		t.Errorf("Expected task for 1001 with priority 30, got %+v", updateTasks[0])
+	}
+	if updateTasks[1].id != 1002 || updateTasks[1].priority != 30 {
+		t.Errorf("Expected task for 1002 with priority 30, got %+v", updateTasks[1])
+	}
+
+	// Verify unactivated show 1003 was NOT enqueued as update_episodes
+	var unactCount int
+	_ = d.conn.QueryRow("SELECT COUNT(*) FROM sync_queue WHERE item_id = 1003 AND action = 'update_episodes'").Scan(&unactCount)
+	if unactCount != 0 {
+		t.Errorf("Unactivated series 1003 should not have update_episodes task, got count %d", unactCount)
+	}
+
+	// Verify priority ordering in PopNextTask:
+	// Add a lower priority batch task
+	_ = d.EnqueueTask("series", 2000, "pass1", models.PriorityBatch) // Priority 10
+
+	// Next task popped should be Priority 30 (1001 or 1002), not 2000
+	nextTask, err := d.PopNextTask("series")
+	if err != nil || nextTask == nil {
+		t.Fatalf("PopNextTask failed: %v", err)
+	}
+	if nextTask.Priority != 30 {
+		t.Errorf("Expected popped task priority 30, got %d (task %+v)", nextTask.Priority, nextTask)
+	}
+}
+
+func TestGetNextSeriesEpisodes(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_db_nextep_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	d, err := Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer d.Close()
+
+	seriesID := 999
+	// Seed episodes:
+	// Season 1: Episodes 1, 2, 3
+	// Season 2: Episodes 1, 2
+	episodes := []struct {
+		sNum, eNum int
+		url        string
+	}{
+		{1, 1, "https://dp.example.com/s01e01.mkv"},
+		{1, 2, "https://dp.example.com/s01e02.mkv"},
+		{1, 3, "https://dp.example.com/s01e03.mkv"},
+		{2, 1, "https://dp.example.com/s02e01.mkv"},
+		{2, 2, "https://dp.example.com/s02e02.mkv"},
+	}
+
+	for _, ep := range episodes {
+		if err := d.SaveStreamVariant(&StreamVariant{
+			ItemID:     seriesID,
+			ItemType:   "series",
+			SeasonNum:  ep.sNum,
+			EpisodeNum: ep.eNum,
+			VariantKey: "base",
+			TargetURL:  ep.url,
+		}); err != nil {
+			t.Fatalf("SaveStreamVariant failed: %v", err)
+		}
+	}
+
+	// 1. Same season retrieval: from S01E01, count 2 -> S01E02, S01E03
+	res, err := d.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 2)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("Expected 2 episodes, got %d", len(res))
+	}
+	if res[0].SeasonNum != 1 || res[0].EpisodeNum != 2 || res[0].TargetURL != "https://dp.example.com/s01e02.mkv" {
+		t.Errorf("Unexpected ep 0: %+v", res[0])
+	}
+	if res[1].SeasonNum != 1 || res[1].EpisodeNum != 3 || res[1].TargetURL != "https://dp.example.com/s01e03.mkv" {
+		t.Errorf("Unexpected ep 1: %+v", res[1])
+	}
+
+	// 2. Season rollover: from S01E03, count 2 -> S02E01, S02E02
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 3, "base", 2)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("Expected 2 episodes on season rollover, got %d", len(res))
+	}
+	if res[0].SeasonNum != 2 || res[0].EpisodeNum != 1 || res[0].TargetURL != "https://dp.example.com/s02e01.mkv" {
+		t.Errorf("Unexpected rollover ep 0: %+v", res[0])
+	}
+	if res[1].SeasonNum != 2 || res[1].EpisodeNum != 2 || res[1].TargetURL != "https://dp.example.com/s02e02.mkv" {
+		t.Errorf("Unexpected rollover ep 1: %+v", res[1])
+	}
+
+	// 3. Boundary crossing: from S01E02, count 2 -> S01E03, S02E01
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 2, "base", 2)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("Expected 2 episodes crossing boundary, got %d", len(res))
+	}
+	if res[0].SeasonNum != 1 || res[0].EpisodeNum != 3 {
+		t.Errorf("Unexpected ep 0: %+v", res[0])
+	}
+	if res[1].SeasonNum != 2 || res[1].EpisodeNum != 1 {
+		t.Errorf("Unexpected ep 1: %+v", res[1])
+	}
+
+	// 4. Series finale / end of series: from S02E02, count 2 -> 0 episodes
+	res, err = d.GetNextSeriesEpisodes(seriesID, 2, 2, "base", 2)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if len(res) != 0 {
+		t.Errorf("Expected 0 episodes at end of series, got %d", len(res))
+	}
+
+	// 5. Count <= 0 returns nil
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 0)
+	if err != nil || len(res) != 0 {
+		t.Errorf("Expected nil/empty for count 0, got len %d, err %v", len(res), err)
+	}
+
+	// 6. Variant-aware retrieval with per-episode fallback:
+	// Add 4K variants for S01E02 and S02E01 (S01E03 only has base)
+	_ = d.SaveStreamVariant(&StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "4k",
+		TargetURL:  "https://dp.example.com/s01e02_4k.mkv",
+	})
+	_ = d.SaveStreamVariant(&StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  2,
+		EpisodeNum: 1,
+		VariantKey: "4k",
+		TargetURL:  "https://dp.example.com/s02e01_4k.mkv",
+	})
+
+	// From S01E01 with variant "4k", count 3:
+	// Ep 1 (S01E02): has 4k -> https://dp.example.com/s01e02_4k.mkv
+	// Ep 2 (S01E03): only base -> https://dp.example.com/s01e03.mkv (fallback)
+	// Ep 3 (S02E01): has 4k -> https://dp.example.com/s02e01_4k.mkv
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 1, "4k", 3)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes 4k failed: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("Expected 3 episodes, got %d", len(res))
+	}
+	if res[0].TargetURL != "https://dp.example.com/s01e02_4k.mkv" {
+		t.Errorf("Ep 0 want 4k URL, got %s", res[0].TargetURL)
+	}
+	if res[1].TargetURL != "https://dp.example.com/s01e03.mkv" {
+		t.Errorf("Ep 1 want base fallback URL, got %s", res[1].TargetURL)
+	}
+	if res[2].TargetURL != "https://dp.example.com/s02e01_4k.mkv" {
+		t.Errorf("Ep 2 want 4k URL, got %s", res[2].TargetURL)
+	}
+}
+

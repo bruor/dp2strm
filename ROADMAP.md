@@ -37,7 +37,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - SQLite `sync_queue` ordered by `priority DESC, id ASC`.
   - `PriorityVIP (100)`: On-demand series playback activations (reference-counted VIP lock, background worker pause guard, and Emby global scan cancellation).
   - `PriorityReconcile (50)`: Daily reconciler disk upgrades & maintenance.
-  - `PriorityAiring (30)`: Active series episode drops & background season chunks.
+  - `PriorityAiring (30)`: Active series episode drops & airing show updates (automatically enqueued during scheduled catalog delta passes when Dispatcharr reports newer `updated_at` timestamps or increased `episode_count`).
   - `PriorityBatch (10)`: Catalog ingestion backlog.
   - `PriorityMigration (5)`: Background legacy unactivated placeholder migrations (Specials ➔ Season 01).
 - [x] **Direct SQLite State Daily Reconciler (`pkg/db`, `pkg/syncer`)**:
@@ -57,6 +57,12 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - Configurable daily janitor (default: `24h` / `0 3 * * *`) that reconciles the on-disk `.strm` tree against SQLite state, safely pruning dead files, empty directories, and expired soft-deleted items.
 - [x] **Retention Grace Period & Cleanup Manager (`RETENTION_GRACE_DAYS`)**:
   - Soft-delete state tracker table in SQLite (`soft_deleted_items`) that buffers deleted streams for 7 days before removing `.strm` files from disk when content disappears from Dispatcharr.
+- [x] **Boundary-Aware Predictive Pre-Caching & `streamcache` Tap & Bail Engine (`pkg/proxy`, `pkg/db`)**:
+  - `FETCH_AHEAD_COUNT` defaults to `0` (disabled by default; explicit user opt-in required).
+  - When `STREAMCACHE_URL` and `FETCH_AHEAD_COUNT > 0` are configured, playing an episode triggers background pre-caching.
+  - **Boundary-Aware Sequential Rollover**: Queries SQLite via `GetNextSeriesEpisodes` to discover only existing sequential episodes (`stream_variants`), seamlessly rolling over season boundaries (e.g. `S01E10` ➔ `S02E01`) and stopping cleanly at season/series finales (0 out-of-bounds requests and 0 accidental bumper fallbacks).
+  - **Variant Awareness & Intelligent Fallback**: Tracks the user's active playback variant (e.g. `4k` vs `base`) and matches that exact variant for upcoming episodes, automatically falling back to `base` on an episode-by-episode basis if a subsequent episode lacks the variant stream.
+  - **Direct Streamcache Tap & Bail**: Sends lightweight 500ms HTTP GET requests directly to `<STREAMCACHE_URL>?url=<escaped_dispatcharr_url>`, allowing `streamcache` to hydrate and pre-buffer upcoming episodes ahead of playback without internal loopback hops.
 
 ---
 

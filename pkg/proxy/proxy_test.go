@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,3 +170,216 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 		t.Errorf("Expected 302 Location %s for tmdb:61381, got %s", expectedSeriesLoc, loc)
 	}
 }
+
+func TestPredictiveFetchAhead(t *testing.T) {
+	var mu sync.Mutex
+	var interceptedURLs []string
+
+	mockStreamcache := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("url")
+		mu.Lock()
+		interceptedURLs = append(interceptedURLs, target)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mock streamcache ok"))
+	}))
+	defer mockStreamcache.Close()
+
+	tempDir, err := os.MkdirTemp("", "dp2strm_fetch_ahead_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	database, err := db.Open(filepath.Join(tempDir, "proxy_test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 500
+	_ = database.UpsertInitialSeriesState(seriesID, "12345", "", "Test Show", 2024, "Test Show (2024)")
+	_ = database.SetSeriesActivated(seriesID, "12345", "Test Show")
+
+	// Seed episodes:
+	// S01E01, S01E02, S02E01
+	episodes := []struct {
+		sNum, eNum int
+		target     string
+	}{
+		{1, 1, "https://dp.example.com/s01e01.mkv"},
+		{1, 2, "https://dp.example.com/s01e02.mkv"},
+		{2, 1, "https://dp.example.com/s02e01.mkv"},
+	}
+	for _, ep := range episodes {
+		_ = database.SaveStreamVariant(&db.StreamVariant{
+			ItemID:     seriesID,
+			ItemType:   "series",
+			SeasonNum:  ep.sNum,
+			EpisodeNum: ep.eNum,
+			VariantKey: "base",
+			TargetURL:  ep.target,
+		})
+	}
+
+	cfg := &models.Config{
+		StreamcacheURL:  mockStreamcache.URL,
+		FetchAheadCount: 2,
+		Port:            8080,
+	}
+
+	srv := NewServer(cfg, database, nil)
+
+	// 1. Play S01E01 with FetchAheadCount=2 -> should tap S01E02 and S02E01 (season rollover)
+	req := httptest.NewRequest("GET", "/play/series/500/1/1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found, got %d", rec.Code)
+	}
+
+	// Wait up to 500ms for async fetch-ahead goroutine to tap mockStreamcache
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(interceptedURLs)
+		mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	captured := append([]string{}, interceptedURLs...)
+	interceptedURLs = nil
+	mu.Unlock()
+
+	if len(captured) != 2 {
+		t.Fatalf("Expected 2 fetch-ahead taps, got %d: %v", len(captured), captured)
+	}
+	if captured[0] != "https://dp.example.com/s01e02.mkv" {
+		t.Errorf("Tap 0 want https://dp.example.com/s01e02.mkv, got %s", captured[0])
+	}
+	if captured[1] != "https://dp.example.com/s02e01.mkv" {
+		t.Errorf("Tap 1 want https://dp.example.com/s02e01.mkv (season rollover), got %s", captured[1])
+	}
+
+	// 2. Play S02E01 (series finale / last episode) -> should make 0 fetch-ahead taps
+	req = httptest.NewRequest("GET", "/play/series/500/2/1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found, got %d", rec.Code)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	captured = append([]string{}, interceptedURLs...)
+	interceptedURLs = nil
+	mu.Unlock()
+
+	if len(captured) != 0 {
+		t.Errorf("Expected 0 fetch-ahead taps at end of series, got %d: %v", len(captured), captured)
+	}
+
+	// 3. Play S01E01 with StreamcacheURL empty -> 0 fetch-ahead taps
+	cfgNoSC := &models.Config{
+		StreamcacheURL:  "",
+		FetchAheadCount: 2,
+		Port:            8080,
+	}
+	srvNoSC := NewServer(cfgNoSC, database, nil)
+
+	req = httptest.NewRequest("GET", "/play/series/500/1/1", nil)
+	rec = httptest.NewRecorder()
+	srvNoSC.httpServer.Handler.ServeHTTP(rec, req)
+
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	captured = append([]string{}, interceptedURLs...)
+	interceptedURLs = nil
+	mu.Unlock()
+
+	if len(captured) != 0 {
+		t.Errorf("Expected 0 taps when StreamcacheURL is empty, got %d", len(captured))
+	}
+
+	// 4. Play S01E01 with FetchAheadCount = 0 -> 0 fetch-ahead taps
+	cfgZeroCount := &models.Config{
+		StreamcacheURL:  mockStreamcache.URL,
+		FetchAheadCount: 0,
+		Port:            8080,
+	}
+	srvZeroCount := NewServer(cfgZeroCount, database, nil)
+
+	req = httptest.NewRequest("GET", "/play/series/500/1/1", nil)
+	rec = httptest.NewRecorder()
+	srvZeroCount.httpServer.Handler.ServeHTTP(rec, req)
+
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	captured = append([]string{}, interceptedURLs...)
+	interceptedURLs = nil
+	mu.Unlock()
+
+	if len(captured) != 0 {
+		t.Errorf("Expected 0 taps when FetchAheadCount is 0, got %d", len(captured))
+	}
+
+	// 5. Play S01E01 with variant "4k" -> should tap 4K variant for S01E02 and fallback to base for S02E01
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+		VariantKey: "4k",
+		TargetURL:  "https://dp.example.com/s01e01_4k.mkv",
+	})
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "4k",
+		TargetURL:  "https://dp.example.com/s01e02_4k.mkv",
+	})
+
+	srv4k := NewServer(cfg, database, nil)
+	req = httptest.NewRequest("GET", "/play/series/500/1/1/4k", nil)
+	rec = httptest.NewRecorder()
+	srv4k.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for 4k play, got %d", rec.Code)
+	}
+
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(interceptedURLs)
+		mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	captured = append([]string{}, interceptedURLs...)
+	interceptedURLs = nil
+	mu.Unlock()
+
+	if len(captured) != 2 {
+		t.Fatalf("Expected 2 variant fetch-ahead taps, got %d: %v", len(captured), captured)
+	}
+	if captured[0] != "https://dp.example.com/s01e02_4k.mkv" {
+		t.Errorf("Tap 0 want 4k URL https://dp.example.com/s01e02_4k.mkv, got %s", captured[0])
+	}
+	if captured[1] != "https://dp.example.com/s02e01.mkv" {
+		t.Errorf("Tap 1 want base fallback URL https://dp.example.com/s02e01.mkv, got %s", captured[1])
+	}
+}
+

@@ -835,9 +835,10 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
-	// Record series as activated in SQLite
+	// Record series as activated in SQLite and record refresh state
 	if s.database != nil {
 		s.database.SetSeriesActivated(seriesID, "", cleanTitle)
+		_ = s.database.MarkSeriesRefreshed(seriesID, len(episodes), time.Time{})
 	}
 
 	return created, preserved, nil
@@ -2196,14 +2197,21 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 
 	case "update_episodes":
 		if task.ItemType == "series" {
+			if s.database != nil {
+				if st, _ := s.database.GetSeriesState(task.ItemID); st != nil {
+					summary.Title = st.Title
+					summary.TMDBID = st.TMDBID
+					summary.IMDBID = st.IMDBID
+				}
+			}
 			created, _, err := s.PopulateActivatedSeries(ctx, task.ItemID, "", "")
 			if err != nil {
 				return err, nil
 			}
 			if created > 0 {
 				summary.STRMCreated = true
+				log.Printf("[Worker] Active Series %q (ID %d) updated: %d new episode STRMs created on disk.", summary.Title, task.ItemID, created)
 			}
-			s.TriggerTargetedEmbySeriesRefresh(ctx, task.ItemID)
 		}
 		return nil, summary
 

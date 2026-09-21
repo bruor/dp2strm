@@ -22,19 +22,21 @@ type DB struct {
 
 // SeriesState represents the database record for a TV series activation and schedule state.
 type SeriesState struct {
-	SeriesID           int
-	TMDBID             string
-	IMDBID             string
-	Title              string
-	Year               int
-	FolderName         string
-	Status             string // "Continuing", "Ended", etc.
-	IsActivated        bool
-	ActivatedAt        *time.Time
-	LastEpisodeCount   int
-	NextEpisodeAirDate string
-	LastModified       int64
-	LastCheckedAt      *time.Time
+	SeriesID             int
+	TMDBID               string
+	IMDBID               string
+	Title                string
+	Year                 int
+	FolderName           string
+	Status               string // "Continuing", "Ended", etc.
+	IsActivated          bool
+	ActivatedAt          *time.Time
+	LastEpisodeCount     int
+	NextEpisodeAirDate   string
+	LastModified         int64
+	LastCheckedAt        *time.Time
+	LastRefreshedAt      *time.Time
+	DispatcharrUpdatedAt *time.Time
 }
 
 // MovieState represents the database record for a Movie activation and variant state.
@@ -63,6 +65,13 @@ type StreamVariant struct {
 	StreamID           string
 	ContainerExtension string
 	UpdatedAt          time.Time
+}
+
+// EpisodeTarget represents an available episode and its Dispatcharr target URL.
+type EpisodeTarget struct {
+	SeasonNum  int
+	EpisodeNum int
+	TargetURL  string
 }
 
 // Open initializes the SQLite database at dbPath, enabling WAL mode and applying schema migrations.
@@ -121,7 +130,9 @@ func (d *DB) initSchema() error {
 		last_episode_count INTEGER DEFAULT 0,
 		next_episode_air_date TEXT DEFAULT '',
 		last_modified INTEGER DEFAULT 0,
-		last_checked_at DATETIME
+		last_checked_at DATETIME,
+		last_refreshed_at DATETIME,
+		dispatcharr_updated_at DATETIME
 	);
 
 	CREATE TABLE IF NOT EXISTS movie_state (
@@ -194,6 +205,8 @@ func (d *DB) initSchema() error {
 		"ALTER TABLE series_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE series_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE series_state ADD COLUMN last_checked_at DATETIME;",
+		"ALTER TABLE series_state ADD COLUMN last_refreshed_at DATETIME;",
+		"ALTER TABLE series_state ADD COLUMN dispatcharr_updated_at DATETIME;",
 		"ALTER TABLE movie_state ADD COLUMN year INTEGER DEFAULT 0;",
 		"ALTER TABLE movie_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE movie_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
@@ -208,14 +221,17 @@ func (d *DB) initSchema() error {
 
 // --- Series State Queries ---
 
-// GetSeriesState retrieves the series state by series ID.
-func (d *DB) GetSeriesState(seriesID int) (*SeriesState, error) {
-	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE series_id = ?`
-	row := d.conn.QueryRow(query, seriesID)
+const seriesSelectColumns = `series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at, last_refreshed_at, dispatcharr_updated_at`
 
+func (d *DB) scanSeriesRow(scanner interface{ Scan(...any) error }) (*SeriesState, error) {
 	var s SeriesState
-	var actAt, chkAt sql.NullTime
-	err := row.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt)
+	var actAt, chkAt, refAt, dispUpAt sql.NullTime
+	err := scanner.Scan(
+		&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName,
+		&s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount,
+		&s.NextEpisodeAirDate, &s.LastModified, &chkAt,
+		&refAt, &dispUpAt,
+	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -228,7 +244,19 @@ func (d *DB) GetSeriesState(seriesID int) (*SeriesState, error) {
 	if chkAt.Valid {
 		s.LastCheckedAt = &chkAt.Time
 	}
+	if refAt.Valid {
+		s.LastRefreshedAt = &refAt.Time
+	}
+	if dispUpAt.Valid {
+		s.DispatcharrUpdatedAt = &dispUpAt.Time
+	}
 	return &s, nil
+}
+
+// GetSeriesState retrieves the series state by series ID.
+func (d *DB) GetSeriesState(seriesID int) (*SeriesState, error) {
+	query := `SELECT ` + seriesSelectColumns + ` FROM series_state WHERE series_id = ?`
+	return d.scanSeriesRow(d.conn.QueryRow(query, seriesID))
 }
 
 // UpsertInitialSeriesState records title, tmdbID, imdbID, year, folderName during Pass 1 without altering activation state.
@@ -271,33 +299,18 @@ func (d *DB) FindSeriesByTitleAndYear(title string, year int) (*SeriesState, err
 	var query string
 	var row *sql.Row
 	if year > 0 {
-		query = `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE title = ? AND year = ? LIMIT 1`
+		query = `SELECT ` + seriesSelectColumns + ` FROM series_state WHERE title = ? AND year = ? LIMIT 1`
 		row = d.conn.QueryRow(query, title, year)
 	} else {
-		query = `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE title = ? LIMIT 1`
+		query = `SELECT ` + seriesSelectColumns + ` FROM series_state WHERE title = ? LIMIT 1`
 		row = d.conn.QueryRow(query, title)
 	}
-	var s SeriesState
-	var actAt, chkAt sql.NullTime
-	err := row.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if actAt.Valid {
-		s.ActivatedAt = &actAt.Time
-	}
-	if chkAt.Valid {
-		s.LastCheckedAt = &chkAt.Time
-	}
-	return &s, nil
+	return d.scanSeriesRow(row)
 }
 
 // GetUnactivatedSeries returns all unactivated series records from SQLite.
 func (d *DB) GetUnactivatedSeries() ([]*SeriesState, error) {
-	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE is_activated = 0`
+	query := `SELECT ` + seriesSelectColumns + ` FROM series_state WHERE is_activated = 0`
 	rows, err := d.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -306,25 +319,18 @@ func (d *DB) GetUnactivatedSeries() ([]*SeriesState, error) {
 
 	var results []*SeriesState
 	for rows.Next() {
-		var s SeriesState
-		var actAt, chkAt sql.NullTime
-		if err := rows.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt); err != nil {
+		s, err := d.scanSeriesRow(rows)
+		if err != nil {
 			continue
 		}
-		if actAt.Valid {
-			s.ActivatedAt = &actAt.Time
-		}
-		if chkAt.Valid {
-			s.LastCheckedAt = &chkAt.Time
-		}
-		results = append(results, &s)
+		results = append(results, s)
 	}
 	return results, nil
 }
 
 // GetAllSeriesStates returns all series records from SQLite.
 func (d *DB) GetAllSeriesStates() ([]*SeriesState, error) {
-	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state`
+	query := `SELECT ` + seriesSelectColumns + ` FROM series_state`
 	rows, err := d.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -333,18 +339,11 @@ func (d *DB) GetAllSeriesStates() ([]*SeriesState, error) {
 
 	var results []*SeriesState
 	for rows.Next() {
-		var s SeriesState
-		var actAt, chkAt sql.NullTime
-		if err := rows.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt); err != nil {
+		s, err := d.scanSeriesRow(rows)
+		if err != nil {
 			continue
 		}
-		if actAt.Valid {
-			s.ActivatedAt = &actAt.Time
-		}
-		if chkAt.Valid {
-			s.LastCheckedAt = &chkAt.Time
-		}
-		results = append(results, &s)
+		results = append(results, s)
 	}
 	return results, nil
 }
@@ -362,6 +361,24 @@ func (d *DB) UpdateSeriesMetadata(seriesID int, status string, epCount int, next
 	WHERE series_id = ?;
 	`
 	_, err := d.conn.Exec(query, status, epCount, nextAirDate, lastModified, now, seriesID)
+	return err
+}
+
+// MarkSeriesRefreshed updates the scan/refresh timestamps and episode count for an activated series.
+func (d *DB) MarkSeriesRefreshed(seriesID int, epCount int, dispatcharrUpdatedAt time.Time) error {
+	now := time.Now()
+	var dispUpdated any = nil
+	if !dispatcharrUpdatedAt.IsZero() {
+		dispUpdated = dispatcharrUpdatedAt
+	}
+	query := `
+	UPDATE series_state SET
+		last_refreshed_at = ?,
+		last_episode_count = CASE WHEN ? > 0 THEN ? ELSE last_episode_count END,
+		dispatcharr_updated_at = CASE WHEN ? IS NOT NULL THEN ? ELSE dispatcharr_updated_at END
+	WHERE series_id = ?;
+	`
+	_, err := d.conn.Exec(query, now, epCount, epCount, dispUpdated, dispUpdated, seriesID)
 	return err
 }
 
@@ -967,6 +984,55 @@ func (d *DB) GetFirstAvailableSeriesTargetURL(seriesID int, variantKey string) (
 	return targetURL, err
 }
 
+// GetNextSeriesEpisodes retrieves up to `count` sequential episodes for a series starting after seasonNum and episodeNum.
+// If variantKey is specified (e.g. "4k"), it prefers that variant for each upcoming episode, falling back to "base" if absent.
+func (d *DB) GetNextSeriesEpisodes(seriesID, seasonNum, episodeNum int, variantKey string, count int) ([]EpisodeTarget, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	if variantKey == "" {
+		variantKey = "base"
+	}
+
+	query := `WITH next_eps AS (
+	              SELECT DISTINCT season_num, episode_num 
+	              FROM stream_variants 
+	              WHERE item_id = ? AND item_type = 'series'
+	                AND (season_num > ? OR (season_num = ? AND episode_num > ?))
+	              ORDER BY season_num ASC, episode_num ASC 
+	              LIMIT ?
+	          )
+	          SELECT ne.season_num, ne.episode_num, sv.target_url
+	          FROM next_eps ne
+	          JOIN stream_variants sv ON sv.item_id = ? AND sv.item_type = 'series'
+	            AND sv.season_num = ne.season_num AND sv.episode_num = ne.episode_num
+	            AND sv.variant_key = (
+	                CASE WHEN EXISTS (
+	                    SELECT 1 FROM stream_variants sv2 
+	                    WHERE sv2.item_id = sv.item_id AND sv2.item_type = 'series'
+	                      AND sv2.season_num = ne.season_num AND sv2.episode_num = ne.episode_num 
+	                      AND sv2.variant_key = ?
+	                ) THEN ? ELSE 'base' END
+	            )
+	          ORDER BY ne.season_num ASC, ne.episode_num ASC`
+
+	rows, err := d.conn.Query(query, seriesID, seasonNum, seasonNum, episodeNum, count, seriesID, variantKey, variantKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var targets []EpisodeTarget
+	for rows.Next() {
+		var t EpisodeTarget
+		if err := rows.Scan(&t.SeasonNum, &t.EpisodeNum, &t.TargetURL); err != nil {
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+	return targets, rows.Err()
+}
+
 // GetMovieStreamVariants retrieves all stream variant mappings for a movie.
 func (d *DB) GetMovieStreamVariants(movieID int) ([]*StreamVariant, error) {
 	query := `SELECT item_id, item_type, season_num, episode_num, variant_key, target_url, quality, stream_id, container_extension FROM stream_variants WHERE item_id = ? AND item_type = 'movie'`
@@ -1118,7 +1184,7 @@ func (d *DB) GetStaleMovieStates(cutoffTime time.Time) ([]*MovieState, error) {
 
 // GetStaleSeriesStates returns series that were not updated since cutoffTime (i.e. disappeared from upstream catalog).
 func (d *DB) GetStaleSeriesStates(cutoffTime time.Time) ([]*SeriesState, error) {
-	query := `SELECT series_id, tmdb_id, imdb_id, title, year, folder_name, status, is_activated, activated_at, last_episode_count, next_episode_air_date, last_modified, last_checked_at FROM series_state WHERE last_checked_at < ?`
+	query := `SELECT ` + seriesSelectColumns + ` FROM series_state WHERE last_checked_at < ?`
 	rows, err := d.conn.Query(query, cutoffTime)
 	if err != nil {
 		return nil, err
@@ -1127,18 +1193,11 @@ func (d *DB) GetStaleSeriesStates(cutoffTime time.Time) ([]*SeriesState, error) 
 
 	var results []*SeriesState
 	for rows.Next() {
-		var s SeriesState
-		var actAt, chkAt sql.NullTime
-		if err := rows.Scan(&s.SeriesID, &s.TMDBID, &s.IMDBID, &s.Title, &s.Year, &s.FolderName, &s.Status, &s.IsActivated, &actAt, &s.LastEpisodeCount, &s.NextEpisodeAirDate, &s.LastModified, &chkAt); err != nil {
+		s, err := d.scanSeriesRow(rows)
+		if err != nil {
 			continue
 		}
-		if actAt.Valid {
-			s.ActivatedAt = &actAt.Time
-		}
-		if chkAt.Valid {
-			s.LastCheckedAt = &chkAt.Time
-		}
-		results = append(results, &s)
+		results = append(results, s)
 	}
 	return results, nil
 }
@@ -1539,7 +1598,8 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 }
 
 // BatchStageSeries stages an entire page of TV series in a single atomic SQLite transaction.
-// It updates series metadata in series_state and only enqueues new Pass 1 creation tasks for items not yet in series_state.
+// It updates series metadata in series_state, enqueues update_episodes tasks for activated series with new content,
+// and only enqueues new Pass 1 creation tasks for items not yet in series_state.
 func (d *DB) BatchStageSeries(items []models.Series) error {
 	if len(items) == 0 {
 		return nil
@@ -1550,6 +1610,32 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		return err
 	}
 	defer tx.Rollback()
+
+	checkActiveStmt, err := tx.Prepare(`
+	SELECT is_activated, last_episode_count, last_refreshed_at, dispatcharr_updated_at, title
+	FROM series_state
+	WHERE series_id = ? 
+	   OR (? != '' AND ? != '0' AND tmdb_id = ?)
+	   OR (? != '' AND ? > 0 AND title = ? AND year = ?)
+	LIMIT 1
+	`)
+	if err != nil {
+		return err
+	}
+	defer checkActiveStmt.Close()
+
+	updateQueueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	VALUES ('series', ?, 'update_episodes', 30, 'pending', 0, ?, ?)
+	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
+		priority = CASE WHEN EXCLUDED.priority > sync_queue.priority THEN EXCLUDED.priority ELSE sync_queue.priority END,
+		status = CASE WHEN sync_queue.status = 'completed' THEN 'pending' ELSE sync_queue.status END,
+		updated_at = EXCLUDED.updated_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer updateQueueStmt.Close()
 
 	queueStmt, err := tx.Prepare(`
 	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
@@ -1567,10 +1653,12 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	defer queueStmt.Close()
 
 	stateStmt, err := tx.Prepare(`
-	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at)
+	INSERT INTO series_state (series_id, tmdb_id, imdb_id, title, year, folder_name, is_activated, activated_at, last_checked_at, last_episode_count, dispatcharr_updated_at)
 	VALUES (?, ?, ?, ?, ?, ?, 
 		COALESCE((SELECT is_activated FROM series_state WHERE tmdb_id = ? AND ? != '' AND ? != '0' ORDER BY is_activated DESC LIMIT 1), 0),
 		(SELECT activated_at FROM series_state WHERE tmdb_id = ? AND ? != '' AND ? != '0' AND is_activated = 1 ORDER BY activated_at ASC LIMIT 1),
+		?,
+		?,
 		?
 	)
 	ON CONFLICT(series_id) DO UPDATE SET
@@ -1581,7 +1669,9 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		folder_name = CASE WHEN series_state.folder_name != '' THEN series_state.folder_name ELSE EXCLUDED.folder_name END,
 		is_activated = CASE WHEN EXCLUDED.is_activated = 1 THEN 1 ELSE series_state.is_activated END,
 		activated_at = CASE WHEN EXCLUDED.activated_at IS NOT NULL THEN EXCLUDED.activated_at ELSE series_state.activated_at END,
-		last_checked_at = EXCLUDED.last_checked_at;
+		last_checked_at = EXCLUDED.last_checked_at,
+		last_episode_count = CASE WHEN EXCLUDED.last_episode_count > series_state.last_episode_count THEN EXCLUDED.last_episode_count ELSE series_state.last_episode_count END,
+		dispatcharr_updated_at = CASE WHEN EXCLUDED.dispatcharr_updated_at IS NOT NULL THEN EXCLUDED.dispatcharr_updated_at ELSE series_state.dispatcharr_updated_at END;
 	`)
 	if err != nil {
 		return err
@@ -1612,10 +1702,62 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		cleanTitle := sanitizer.CleanTitle(srs.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
 
+		// 1. Check if this series is already tracked and activated
+		var isActivated bool
+		var storedEpCount int
+		var storedLastRefreshed, storedDispUpdated sql.NullTime
+		var storedTitle string
+		checkErr := checkActiveStmt.QueryRow(
+			srs.ID,
+			srs.TMDBID, srs.TMDBID, srs.TMDBID,
+			cleanTitle, srs.Year, cleanTitle, srs.Year,
+		).Scan(&isActivated, &storedEpCount, &storedLastRefreshed, &storedDispUpdated, &storedTitle)
+
+		if checkErr == nil && isActivated {
+			hasNewerTimestamp := !srs.UpdatedAt.IsZero() && (!storedDispUpdated.Valid || srs.UpdatedAt.After(storedDispUpdated.Time))
+			hasMoreEpisodes := srs.EpisodeCount > 0 && srs.EpisodeCount > storedEpCount
+
+			if hasNewerTimestamp || hasMoreEpisodes {
+				var reason string
+				if hasNewerTimestamp && hasMoreEpisodes {
+					reason = "both"
+				} else if hasNewerTimestamp {
+					reason = "updated_at_newer"
+				} else {
+					reason = "episode_count_increased"
+				}
+
+				dispUpStr := "n/a"
+				if !srs.UpdatedAt.IsZero() {
+					dispUpStr = srs.UpdatedAt.Format(time.RFC3339)
+				}
+				storedDispUpStr := "none"
+				if storedDispUpdated.Valid {
+					storedDispUpStr = storedDispUpdated.Time.Format(time.RFC3339)
+				}
+
+				log.Printf("[Stager] Active Series %q (ID %d) triggered episode update: reason=%s (episodes: %d -> %d, dispatcharr_updated_at: %s vs %s)",
+					cleanTitle, srs.ID, reason, storedEpCount, srs.EpisodeCount, dispUpStr, storedDispUpStr)
+
+				if _, qErr := updateQueueStmt.Exec(srs.ID, now, now); qErr != nil {
+					return qErr
+				}
+			}
+		}
+
 		if _, err := queueStmt.Exec(srs.ID, now, now, srs.ID, srs.TMDBID, srs.TMDBID, srs.TMDBID, cleanTitle, srs.Year, cleanTitle, srs.Year); err != nil {
 			return err
 		}
-		if _, err := stateStmt.Exec(srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, now); err != nil {
+
+		var dispUpdatedParam any = nil
+		if !srs.UpdatedAt.IsZero() {
+			dispUpdatedParam = srs.UpdatedAt
+		}
+		if _, err := stateStmt.Exec(
+			srs.ID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName,
+			srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID, srs.TMDBID,
+			now, srs.EpisodeCount, dispUpdatedParam,
+		); err != nil {
 			return err
 		}
 		// Prune older superseded series_state rows for this exact same series

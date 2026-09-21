@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 )
 
@@ -114,6 +115,31 @@ type Series struct {
 	CreatedAt        time.Time          `json:"created_at"`
 	UpdatedAt        time.Time          `json:"updated_at"`
 	Providers        []ProviderRelation `json:"providers,omitempty"`
+}
+
+// UnmarshalJSON handles both numeric and string representations of episode_count in Dispatcharr.
+func (s *Series) UnmarshalJSON(data []byte) error {
+	type Alias Series
+	aux := struct {
+		*Alias
+		RawEpisodeCount any `json:"episode_count"`
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	switch v := aux.RawEpisodeCount.(type) {
+	case float64:
+		s.EpisodeCount = int(v)
+	case int:
+		s.EpisodeCount = v
+	case string:
+		if num, err := strconv.Atoi(v); err == nil {
+			s.EpisodeCount = num
+		}
+	}
+	return nil
 }
 
 // Episode represents an episode of a TV series.

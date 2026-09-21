@@ -395,22 +395,8 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[Proxy] Series %s (Resolved ID: %d) S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", rawSeriesID, seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
 
 		// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
-		if s.cfg.FetchAheadCount > 0 && s.cfg.StreamcacheURL != "" {
-			go func(rawSid string, sNum, eNum, count int) {
-				for i := 1; i <= count; i++ {
-					nextEp := eNum + i
-					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-					prefetchURL := fmt.Sprintf("%s/play/series/%s/%d/%d", strings.TrimRight(s.cfg.URL, "/"), rawSid, sNum, nextEp)
-					req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefetchURL, nil)
-					if err == nil {
-						resp, pErr := http.DefaultClient.Do(req)
-						if pErr == nil && resp != nil {
-							_ = resp.Body.Close()
-						}
-					}
-					cancel()
-				}
-			}(rawSeriesID, seasonNum, epNum, s.cfg.FetchAheadCount)
+		if s.cfg.StreamcacheURL != "" && s.cfg.FetchAheadCount > 0 && s.database != nil {
+			go s.triggerFetchAhead(seriesID, seasonNum, epNum, variantKey, s.cfg.FetchAheadCount)
 		}
 
 		http.Redirect(w, r, finalRedirectURL, http.StatusFound)
@@ -422,6 +408,31 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[Proxy] Series %s (ID: %d) S%02dE%02d: Target episode not present upstream. Streaming 5s Activation Bumper to client...", rawSeriesID, seriesID, seasonNum, epNum)
 	w.Header().Set("Content-Type", "video/mp4")
 	http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
+}
+
+func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey string, count int) {
+	nextEps, err := s.database.GetNextSeriesEpisodes(seriesID, seasonNum, epNum, variantKey, count)
+	if err != nil || len(nextEps) == 0 {
+		return
+	}
+
+	for _, ep := range nextEps {
+		if ep.TargetURL == "" {
+			continue
+		}
+		tapURL := format302Target(ep.TargetURL, s.cfg.StreamcacheURL)
+		log.Printf("[Proxy] Fetch-ahead tap (500ms): Series %d S%02dE%02d -> %s", seriesID, ep.SeasonNum, ep.EpisodeNum, tapURL)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, tapURL, nil)
+		if err == nil {
+			resp, pErr := http.DefaultClient.Do(req)
+			if pErr == nil && resp != nil {
+				_ = resp.Body.Close()
+			}
+		}
+		cancel()
+	}
 }
 
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {

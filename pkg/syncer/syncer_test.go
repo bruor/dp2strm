@@ -655,4 +655,82 @@ func TestStageCatalogDeltaSafetyAndSoftDeleteLifecycle(t *testing.T) {
 	}
 }
 
+func TestWorkerProcessUpdateEpisodesTask(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_update_ep.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 5555
+	// Seed active series state
+	_ = database.UpsertInitialSeriesState(seriesID, "1396", "", "Breaking Bad", 2008, "Breaking Bad (2008) [tmdbid=1396]")
+	_ = database.SetSeriesActivated(seriesID, "1396", "Breaking Bad")
+
+	// Mock server returning multiple episodes for series 5555
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "/episodes/") {
+			_, _ = w.Write([]byte(`[
+				{"id": 1001, "name": "Pilot", "season_number": 1, "episode_number": 1, "container_extension": "mkv"},
+				{"id": 1002, "name": "Cat's in the Bag...", "season_number": 1, "episode_number": 2, "container_extension": "mkv"}
+			]`))
+		} else {
+			_, _ = w.Write([]byte(`{"id": 5555, "name": "Breaking Bad (2008)", "year": 2008, "tmdb_id": "1396"}`))
+		}
+	}))
+	defer ts.Close()
+
+	restClient := client.NewClient(ts.URL, "test-key")
+	cfg := &models.Config{
+		OutputDir: tempDir,
+		URL:       "http://localhost:8080",
+		XCUser:    "user",
+		XCPassword: "pass",
+	}
+	s := NewSyncer(cfg, restClient, database)
+
+	task := &models.QueueItem{
+		ID:       1,
+		ItemType: "series",
+		ItemID:   seriesID,
+		Action:   "update_episodes",
+		Priority: models.PriorityAiring,
+		Status:   "pending",
+	}
+
+	pErr, summary := s.processQueueTask(context.Background(), task)
+	if pErr != nil {
+		t.Fatalf("processQueueTask returned error: %v", pErr)
+	}
+	if summary == nil || !summary.STRMCreated {
+		t.Errorf("Expected summary.STRMCreated=true for newly written episodes")
+	}
+
+	// Verify episodes exist on disk
+	ep1Path := filepath.Join(tempDir, "TV Shows", "Breaking Bad (2008) [tmdbid=1396]", "Season 01", "Breaking Bad - S01E01.strm")
+	ep2Path := filepath.Join(tempDir, "TV Shows", "Breaking Bad (2008) [tmdbid=1396]", "Season 01", "Breaking Bad - S01E02.strm")
+
+	if _, err := os.Stat(ep1Path); err != nil {
+		t.Errorf("Expected S01E01.strm to exist, stat err: %v", err)
+	}
+	if _, err := os.Stat(ep2Path); err != nil {
+		t.Errorf("Expected S01E02.strm to exist, stat err: %v", err)
+	}
+
+	// Verify database was updated with refresh timestamp and count
+	st, err := database.GetSeriesState(seriesID)
+	if err != nil || st == nil {
+		t.Fatalf("GetSeriesState failed: %v", err)
+	}
+	if st.LastEpisodeCount != 2 {
+		t.Errorf("Expected LastEpisodeCount=2, got %d", st.LastEpisodeCount)
+	}
+	if st.LastRefreshedAt == nil {
+		t.Errorf("Expected LastRefreshedAt to be set after update_episodes execution")
+	}
+}
+
 
