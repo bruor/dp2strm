@@ -51,8 +51,9 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	}
 
 	activatedSeries := make(chan int, 1)
-	onActivation := func(sid int) {
+	onActivation := func(sid int) error {
 		activatedSeries <- sid
+		return nil
 	}
 
 	srv := NewServer(cfg, database, onActivation)
@@ -492,7 +493,7 @@ func TestConcurrentSeriesActivationWaits(t *testing.T) {
 	targetStream := "https://dp.example.com/episodes/real_stream.mkv"
 
 	// Mock onActivation that takes 50ms and saves stream variant
-	onActivation := func(sid int) {
+	onActivation := func(sid int) error {
 		time.Sleep(50 * time.Millisecond)
 		_ = database.SaveStreamVariant(&db.StreamVariant{
 			ItemID:     sid,
@@ -502,6 +503,7 @@ func TestConcurrentSeriesActivationWaits(t *testing.T) {
 			VariantKey: "base",
 			TargetURL:  targetStream,
 		})
+		return nil
 	}
 
 	cfg := &models.Config{
@@ -539,5 +541,84 @@ func TestConcurrentSeriesActivationWaits(t *testing.T) {
 		}
 	}
 }
+
+func TestProxyActivationErrorFailsPlaybackNoBumper(t *testing.T) {
+	tempDir := t.TempDir()
+	database, err := db.Open(filepath.Join(tempDir, "proxy_error_test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 88888
+	cfg := &models.Config{
+		DispatcharrURL: "http://dispatcharr:9191",
+		Port:           8080,
+	}
+
+	// Mock onActivation that fails
+	onActivation := func(sid int) error {
+		return fmt.Errorf("series %d has 0 episodes in Dispatcharr", sid)
+	}
+
+	srv := NewServer(cfg, database, onActivation)
+
+	req := httptest.NewRequest("GET", fmt.Sprintf("/play/series/%d/1/1", seriesID), nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	// Must fail with 502 Bad Gateway and NOT return MP4 bumper
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("Expected 502 Bad Gateway on activation error, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Type") == "video/mp4" {
+		t.Errorf("Expected NO video/mp4 bumper when activation fails!")
+	}
+}
+
+func TestProxyActivationSuccessNoS01E01StreamsBumper(t *testing.T) {
+	tempDir := t.TempDir()
+	database, err := db.Open(filepath.Join(tempDir, "proxy_bumper_test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 99999
+	cfg := &models.Config{
+		DispatcharrURL: "http://dispatcharr:9191",
+		Port:           8080,
+	}
+
+	// Mock onActivation that activates series but only has Season 2+
+	onActivation := func(sid int) error {
+		_ = database.SetSeriesActivated(sid, "99999", "Season 2 Only Show")
+		_ = database.SaveStreamVariant(&db.StreamVariant{
+			ItemID:     sid,
+			ItemType:   "series",
+			SeasonNum:  2,
+			EpisodeNum: 1,
+			VariantKey: "base",
+			TargetURL:  "https://dp.example.com/s02e01.mkv",
+		})
+		return nil
+	}
+
+	srv := NewServer(cfg, database, onActivation)
+
+	// User played S01E01 placeholder
+	req := httptest.NewRequest("GET", fmt.Sprintf("/play/series/%d/1/1", seriesID), nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	// Because series IS activated but S01E01 does not exist, serve 5-second bumper MP4
+	if rec.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK for bumper video, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Type") != "video/mp4" {
+		t.Errorf("Expected video/mp4 Content-Type for bumper, got %s", rec.Header().Get("Content-Type"))
+	}
+}
+
 
 

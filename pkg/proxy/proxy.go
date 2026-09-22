@@ -21,7 +21,7 @@ import (
 )
 
 // ActivationCallback is a function signature for background series activation processing.
-type ActivationCallback func(seriesID int)
+type ActivationCallback func(seriesID int) error
 
 // MovieActivationCallback is a function signature for background movie activation and provider resolution.
 type MovieActivationCallback func(movieID int) (baseTargetURL string, err error)
@@ -377,7 +377,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 			s.activeSeriesMu.Unlock()
 
 			if targetURL == "" {
-				s.onActivation(seriesID)
+				actErr := s.onActivation(seriesID)
 				s.activeSeriesMu.Lock()
 				delete(s.activeSeries, seriesID)
 				close(waitCh)
@@ -391,7 +391,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[Proxy] Self-Healing: Stale series ID %d healed to active Dispatcharr ID %d. Retrying activation...", seriesID, healedID)
 							staleSeriesID := seriesID
 							seriesID = healedID
-							s.onActivation(healedID)
+							actErr = s.onActivation(healedID)
 							targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
 							if targetURL != "" {
 								_ = s.database.SaveStreamVariant(&db.StreamVariant{
@@ -409,6 +409,12 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+
+				if actErr != nil && targetURL == "" {
+					log.Printf("[Proxy] Series %s (ID: %d): Activation failed: %v. Rejecting playback to let Emby fail.", rawSeriesID, seriesID, actErr)
+					http.Error(w, fmt.Sprintf("Failed to activate series: %v", actErr), http.StatusBadGateway)
+					return
+				}
 			} else {
 				go func(sid int, ch chan struct{}) {
 					defer func() {
@@ -417,7 +423,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 						close(ch)
 						s.activeSeriesMu.Unlock()
 					}()
-					s.onActivation(sid)
+					_ = s.onActivation(sid)
 				}(seriesID, waitCh)
 			}
 		} else {
@@ -452,11 +458,26 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. If targetURL is still empty for the requested season/episode (e.g. show only has Season 2+ and user played the S01E01 placeholder),
-	// stream the 5-second Activation Bumper MP4 directly. (Never redirect to a different episode to prevent watch history mismatch in Emby).
-	log.Printf("[Proxy] Series %s (ID: %d) S%02dE%02d: Target episode not present upstream. Streaming 5s Activation Bumper to client...", rawSeriesID, seriesID, seasonNum, epNum)
-	w.Header().Set("Content-Type", "video/mp4")
-	http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
+	// 3. Only show the activation bumper video if activation was successful!
+	// (e.g. show only has Season 2+ upstream and user played the S01E01 placeholder).
+	// If the series was not activated or there is an error, fail playback cleanly so Emby reports the error.
+	seriesActivated := false
+	if s.database != nil {
+		if st, _ := s.database.GetSeriesState(seriesID); st != nil && st.IsActivated {
+			seriesActivated = true
+		}
+	}
+
+	if seriesActivated {
+		log.Printf("[Proxy] Series %s (ID: %d) S%02dE%02d: Series activated, but target episode not present upstream. Streaming 5s Activation Bumper to client...", rawSeriesID, seriesID, seasonNum, epNum)
+		w.Header().Set("Content-Type", "video/mp4")
+		http.ServeContent(w, r, "activated.mp4", time.Unix(1700000000, 0), bytes.NewReader(assets.ActivationBumperMP4))
+		return
+	}
+
+	// 4. Series is not activated and no target URL exists -> fail playback cleanly
+	log.Printf("[Proxy] Series %s (ID: %d) S%02dE%02d: Target episode not available and series unactivated. Rejecting playback to let Emby fail.", rawSeriesID, seriesID, seasonNum, epNum)
+	http.Error(w, "Target episode not available and series unactivated", http.StatusBadGateway)
 }
 
 func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey string, count int) {
@@ -528,11 +549,17 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 			s.activeSeriesMu.Unlock()
 
 			if targetURL == "" {
-				s.onActivation(seriesID)
+				actErr := s.onActivation(seriesID)
 				s.activeSeriesMu.Lock()
 				delete(s.activeSeries, seriesID)
 				close(waitCh)
 				s.activeSeriesMu.Unlock()
+
+				if actErr != nil {
+					log.Printf("[Proxy] Series %d activation failed: %v", seriesID, actErr)
+					http.Error(w, fmt.Sprintf("Failed to activate series: %v", actErr), http.StatusBadGateway)
+					return
+				}
 
 				if s.database != nil {
 					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
@@ -545,7 +572,7 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 						close(ch)
 						s.activeSeriesMu.Unlock()
 					}()
-					s.onActivation(sid)
+					_ = s.onActivation(sid)
 				}(seriesID, waitCh)
 			}
 		} else {
@@ -563,7 +590,8 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if targetURL == "" {
-		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
+		http.Error(w, "Target episode not available and series unactivated", http.StatusBadGateway)
+		return
 	}
 	finalRedirectURL := s.formatRedirect(targetURL)
 

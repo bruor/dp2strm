@@ -76,7 +76,7 @@ func main() {
 	syncEngine := syncer.NewSyncer(cfg, restClient, database)
 
 	// Series Activation Callback Worker (auto-resolves canonical title & folder)
-	onActivation := func(seriesID int) {
+	onActivation := func(seriesID int) error {
 		log.Printf("[Activation] Fast stream resolution activated for Series ID %d...", seriesID)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 
@@ -88,7 +88,7 @@ func main() {
 			log.Printf("[Activation] Error resolving streams for series ID %d: %v", seriesID, err)
 			unlock()
 			cancel()
-			return
+			return err
 		}
 
 		// Stream variants are now in SQLite!
@@ -104,6 +104,7 @@ func main() {
 			}
 			syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
 		}()
+		return nil
 	}
 
 	// Movie Activation Callback Worker (auto-resolves canonical title & folder)

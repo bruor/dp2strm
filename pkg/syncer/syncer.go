@@ -696,8 +696,28 @@ func (s *Syncer) ResolveSeriesStreamVariants(ctx context.Context, seriesID int) 
 		return nil, cleanTitle, seriesDir, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
 	}
 
+	// Lazy Upstream Sync: Dispatcharr lazily fetches episodes on first access via provider-info.
+	// If 0 episodes were returned, trigger provider-info to prompt Dispatcharr to sync from upstream, then retry.
+	if len(episodes) == 0 && s.client != nil {
+		log.Printf("[Activation] Series %q (ID %d) has 0 episodes in Dispatcharr. Triggering provider-info lazy fetch...", cleanTitle, seriesID)
+		relations, pErr := s.client.FetchSeriesProviders(ctx, seriesID)
+		if pErr == nil && len(relations) > 0 {
+			for _, rel := range relations {
+				_, _ = s.client.TriggerSeriesProviderInfo(ctx, seriesID, rel.ID)
+			}
+		} else {
+			_, _ = s.client.TriggerSeriesProviderInfo(ctx, seriesID, 0)
+		}
+
+		retryEps, rErr := s.client.FetchSeriesEpisodes(ctx, seriesID)
+		if rErr == nil && len(retryEps) > 0 {
+			log.Printf("[Activation] Successfully retrieved %d episode(s) for Series %q (ID %d) after provider-info lazy fetch!", len(retryEps), cleanTitle, seriesID)
+			episodes = retryEps
+		}
+	}
+
 	if len(episodes) == 0 {
-		log.Printf("[Activation] ⚠️ Series %q (ID %d) has 0 episodes in Dispatcharr. Cannot activate. Preserving placeholder until episodes are added upstream.", cleanTitle, seriesID)
+		log.Printf("[Activation] ⚠️ Series %q (ID %d) has 0 episodes in Dispatcharr even after provider-info fetch. Cannot activate. Preserving placeholder until episodes are added upstream.", cleanTitle, seriesID)
 		// Ensure Season 01 placeholder is present on disk so the show does not disappear from Emby!
 		season1Dir := filepath.Join(seriesDir, "Season 01")
 		actStrmFilename := fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))

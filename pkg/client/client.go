@@ -326,6 +326,60 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 	return nil, fmt.Errorf("failed to parse series episodes response for series ID %d: %s", seriesID, string(bodyBytes))
 }
 
+// FetchSeriesProviders retrieves provider relations for a series via GET /api/vod/series/{id}/providers/
+func (c *Client) FetchSeriesProviders(ctx context.Context, seriesID int) ([]models.ProviderRelation, error) {
+	path := fmt.Sprintf("/api/vod/series/%d/providers/", seriesID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read series providers body: %w", err)
+	}
+
+	// 1. Try decoding as direct JSON array [...]
+	var relations []models.ProviderRelation
+	if err := json.Unmarshal(bodyBytes, &relations); err == nil {
+		return relations, nil
+	}
+
+	// 2. Try decoding as paginated object {"results": [...]}
+	var paginated struct {
+		Results []models.ProviderRelation `json:"results"`
+	}
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil {
+		return paginated.Results, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse series providers response for series ID %d", seriesID)
+}
+
+// TriggerSeriesProviderInfo fetches detailed provider info via GET /api/vod/series/{id}/provider-info/
+// This prompts Dispatcharr to lazily pull the episode list from the upstream XC provider if not yet cached.
+func (c *Client) TriggerSeriesProviderInfo(ctx context.Context, seriesID, relationID int) (map[string]any, error) {
+	path := fmt.Sprintf("/api/vod/series/%d/provider-info/", seriesID)
+	query := url.Values{}
+	if relationID > 0 {
+		query.Set("relation_id", fmt.Sprintf("%d", relationID))
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, path, query)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode series provider info JSON: %w", err)
+	}
+
+	return result, nil
+}
+
 // FetchMyProfile retrieves the authenticated user's profile and XC streaming credentials from GET /api/accounts/users/me/
 func (c *Client) FetchMyProfile(ctx context.Context) (username, xcPassword string, err error) {
 	resp, err := c.doRequest(ctx, http.MethodGet, "/api/accounts/users/me/", nil)

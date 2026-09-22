@@ -1005,6 +1005,93 @@ func TestReconcileDiskStateSkipsAlreadyQueuedItems(t *testing.T) {
 	}
 }
 
+func TestResolveSeriesStreamVariantsLazyUpstreamTrigger(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_lazy.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 12345
+	cleanTitle := "Helix"
+	folderName := "Helix (2014) [tmdbid=58811]"
+	_ = database.UpsertInitialSeriesState(seriesID, "58811", "", cleanTitle, 2014, folderName)
+
+	providerInfoCalled := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case strings.Contains(r.URL.Path, "/providers/"):
+			_, _ = w.Write([]byte(`[{"id": 55}]`))
+		case strings.Contains(r.URL.Path, "/provider-info/"):
+			providerInfoCalled = true
+			_, _ = w.Write([]byte(`{"status": "ok"}`))
+		case strings.Contains(r.URL.Path, "/episodes/"):
+			if !providerInfoCalled {
+				// Before provider-info is called, Dispatcharr has 0 episodes in local DB
+				_, _ = w.Write([]byte(`[]`))
+			} else {
+				// After provider-info is called, Dispatcharr has synced episodes from upstream!
+				_, _ = w.Write([]byte(`[
+					{"id": 901, "name": "Pilot", "season_number": 1, "episode_number": 1, "container_extension": "mkv"},
+					{"id": 902, "name": "Vector", "season_number": 1, "episode_number": 2, "container_extension": "mkv"}
+				]`))
+			}
+		default:
+			_, _ = w.Write([]byte(`{"id": 12345, "name": "Helix", "year": 2014, "tmdb_id": "58811"}`))
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL: ts.URL,
+		APIKey:         "test-key",
+		OutputDir:      tempDir,
+		URL:            "http://localhost:8080",
+		XCUser:         "testuser",
+		XCPassword:     "testpass",
+	}
+	c := client.NewClient(ts.URL, "test-key")
+	s := NewSyncer(cfg, c, database)
+
+	episodes, title, dir, err := s.ResolveSeriesStreamVariants(context.Background(), seriesID)
+	if err != nil {
+		t.Fatalf("ResolveSeriesStreamVariants failed: %v", err)
+	}
+
+	if !providerInfoCalled {
+		t.Errorf("Expected provider-info to be triggered when initial episodes list was empty!")
+	}
+	if len(episodes) != 2 {
+		t.Fatalf("Expected 2 episodes after lazy fetch, got %d", len(episodes))
+	}
+	if title != cleanTitle {
+		t.Errorf("Expected title %q, got %q", cleanTitle, title)
+	}
+	if dir != filepath.Join(tempDir, "TV Shows", folderName) {
+		t.Errorf("Unexpected dir: %s", dir)
+	}
+
+	// Verify stream variants are saved in DB
+	target1, _ := database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+	if target1 == "" {
+		t.Errorf("Expected S01E01 stream target to be saved in DB!")
+	}
+	target2, _ := database.GetSeriesTargetURL(seriesID, 1, 2, "base")
+	if target2 == "" {
+		t.Errorf("Expected S01E02 stream target to be saved in DB!")
+	}
+
+	// Verify series is marked activated
+	st, _ := database.GetSeriesState(seriesID)
+	if st == nil || !st.IsActivated {
+		t.Errorf("Expected series to be marked as activated in DB!")
+	}
+}
+
+
 
 
 
