@@ -1332,6 +1332,10 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		if s.embyClient != nil && s.embyClient.IsConfigured() {
 			startTime := time.Now()
 
+			// 1. Immediately trigger targeted recursive refresh so Emby scans the directory & indexes child episodes
+			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
+			log.Printf("[Emby] Triggered targeted series refresh for %q (Emby Item ID: %s, Folder: %q)", title, embyItemID, folderName)
+
 			// 2. Wait for evidence that Emby has scanned the folder and indexed the new episodes
 			epCount, confirmed := s.embyClient.WaitForSeriesEpisodesIndexed(ctx, embyItemID, 2, 25*time.Second)
 			elapsed := time.Since(startTime).Round(100 * time.Millisecond)
@@ -1341,10 +1345,9 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 				log.Printf("[Emby] ⚠️ Timed out waiting for Emby to index episodes for %q after %s (%d episodes visible).", title, elapsed, epCount)
 			}
 
-			// 3. Trigger targeted metadata refresh on activation episode (S01E01 / placeholders) and series
-			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
+			// 3. Trigger targeted metadata refresh on activation episode (S01E01 / placeholders)
 			_ = s.embyClient.RefreshSeriesEpisodes(ctx, embyItemID)
-			log.Printf("[Emby] Refreshed metadata for %q and activation episodes (Emby Item ID: %s, Folder: %q). Ready to release VIP lock.", title, embyItemID, folderName)
+			log.Printf("[Emby] Refreshed activation episodes for %q (Emby Item ID: %s, Folder: %q). Ready to release VIP lock.", title, embyItemID, folderName)
 			return
 		}
 	}
