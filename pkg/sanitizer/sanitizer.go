@@ -96,6 +96,48 @@ func BuildMovieFolderName(cleanTitle string, year int, tmdbID string, imdbIDs ..
 	return fmt.Sprintf("%s%s%s", safeTitle, yearStr, idStr)
 }
 
+// GetLegacyFolderCandidates returns all plausible non-ID legacy folder names on disk for an item:
+// e.g. for ("Girl from the North Country (2024)", 2024):
+// returns ["Girl from the North Country (2024)", "Girl from the North Country"]
+func GetLegacyFolderCandidates(rawTitle string, year int) []string {
+	clean := CleanTitle(rawTitle)
+	bare := StripYearFromTitle(clean, year)
+	safeBare := SanitizeFileName(bare)
+	safeClean := SanitizeFileName(clean)
+
+	seen := make(map[string]bool)
+	var candidates []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name != "" && !seen[name] {
+			seen[name] = true
+			candidates = append(candidates, name)
+		}
+	}
+
+	if year > 0 && safeBare != "" {
+		add(fmt.Sprintf("%s (%d)", safeBare, year))
+	}
+	add(safeClean)
+	add(safeBare)
+
+	return candidates
+}
+
+// BuildMovieFilename returns the canonical base .strm filename for a movie:
+// e.g. "Avatar (2009).strm" or "Dark Beauty.strm" (if year is 0).
+func BuildMovieFilename(cleanTitle string, year int) string {
+	bare := StripYearFromTitle(cleanTitle, year)
+	safeBare := SanitizeFileName(bare)
+	if safeBare == "" {
+		safeBare = SanitizeFileName(cleanTitle)
+	}
+	if year > 0 {
+		return fmt.Sprintf("%s (%d).strm", safeBare, year)
+	}
+	return fmt.Sprintf("%s.strm", safeBare)
+}
+
 // CleanEpisodeTitle strips duplicate series title and season/episode tags from episode names.
 func CleanEpisodeTitle(epName, seriesName string, season, episode int) string {
 	cleaned := SanitizeFileName(epName)

@@ -462,20 +462,20 @@ func TestBatchStageSeriesActiveAiringEpisodeDetection(t *testing.T) {
 
 	// Setup initial series state:
 	// Series 1: Active, 10 episodes, updated at t1
-	_ = d.UpsertInitialSeriesState(1001, "tmdb-1", "", "Active Show Timestamp", 2024, "Active Show Timestamp (2024)")
+	_ = d.UpsertInitialSeriesState(1001, "tmdb-1", "", "Active Show Timestamp", 2024, "Active Show Timestamp (2024) [tmdbid=tmdb-1]")
 	_ = d.SetSeriesActivated(1001, "tmdb-1", "Active Show Timestamp")
 	_ = d.MarkSeriesRefreshed(1001, 10, t1)
 
 	// Series 2: Active, 5 episodes, updated at t1
-	_ = d.UpsertInitialSeriesState(1002, "tmdb-2", "", "Active Show EpisodeCount", 2024, "Active Show EpisodeCount (2024)")
+	_ = d.UpsertInitialSeriesState(1002, "tmdb-2", "", "Active Show EpisodeCount", 2024, "Active Show EpisodeCount (2024) [tmdbid=tmdb-2]")
 	_ = d.SetSeriesActivated(1002, "tmdb-2", "Active Show EpisodeCount")
 	_ = d.MarkSeriesRefreshed(1002, 5, t1)
 
 	// Series 3: Unactivated, 5 episodes, updated at t1
-	_ = d.UpsertInitialSeriesState(1003, "tmdb-3", "", "Unactivated Show", 2024, "Unactivated Show (2024)")
+	_ = d.UpsertInitialSeriesState(1003, "tmdb-3", "", "Unactivated Show", 2024, "Unactivated Show (2024) [tmdbid=tmdb-3]")
 
 	// Series 4: Active, 8 episodes, updated at t1 (will remain unchanged)
-	_ = d.UpsertInitialSeriesState(1004, "tmdb-4", "", "Active Show Unchanged", 2024, "Active Show Unchanged (2024)")
+	_ = d.UpsertInitialSeriesState(1004, "tmdb-4", "", "Active Show Unchanged", 2024, "Active Show Unchanged (2024) [tmdbid=tmdb-4]")
 	_ = d.SetSeriesActivated(1004, "tmdb-4", "Active Show Unchanged")
 	_ = d.MarkSeriesRefreshed(1004, 8, t1)
 
@@ -716,4 +716,73 @@ func TestGetNextSeriesEpisodes(t *testing.T) {
 		t.Errorf("Ep 2 want 4k URL, got %s", res[2].TargetURL)
 	}
 }
+
+func TestBatchStageMetadataUpgrade(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_db_meta_upgrade_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	d, err := Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer d.Close()
+
+	// 1. Initial movie without TMDB ID (legacy folder)
+	_ = d.UpsertInitialMovieState(5001, "", "", "Girl from the North Country", 2024, "Girl from the North Country (2024)")
+	_, _ = d.conn.Exec("DELETE FROM sync_queue")
+
+	// 2. Batch stage movie with TMDB ID upgrade
+	upgradedBatch := []models.Movie{
+		{
+			ID:     5001,
+			Name:   "Girl from the North Country (2024)",
+			Year:   2024,
+			TMDBID: "1083417",
+		},
+	}
+	if err := d.BatchStageMovies(upgradedBatch); err != nil {
+		t.Fatalf("BatchStageMovies failed: %v", err)
+	}
+
+	// Verify movie_state folder_name upgraded
+	st, err := d.GetMovieState(5001)
+	if err != nil || st == nil {
+		t.Fatalf("GetMovieState failed: %v", err)
+	}
+	expectedFolder := "Girl from the North Country (2024) [tmdbid=1083417]"
+	if st.FolderName != expectedFolder {
+		t.Errorf("Expected upgraded folder_name %q, got %q", expectedFolder, st.FolderName)
+	}
+	if st.TMDBID != "1083417" {
+		t.Errorf("Expected TMDB ID 1083417, got %q", st.TMDBID)
+	}
+
+	// Verify reconcile_movie task was enqueued
+	var reconCount int
+	_ = d.conn.QueryRow("SELECT COUNT(*) FROM sync_queue WHERE item_id = 5001 AND action = 'reconcile_movie'").Scan(&reconCount)
+	if reconCount != 1 {
+		t.Errorf("Expected 1 reconcile_movie task, got %d", reconCount)
+	}
+
+	// 3. Test downgrade protection: incoming batch with missing TMDB ID must NOT overwrite canonical folder
+	downgradeBatch := []models.Movie{
+		{
+			ID:     5001,
+			Name:   "Girl from the North Country",
+			Year:   2024,
+			TMDBID: "",
+		},
+	}
+	if err := d.BatchStageMovies(downgradeBatch); err != nil {
+		t.Fatalf("BatchStageMovies downgrade failed: %v", err)
+	}
+	stDowngrade, _ := d.GetMovieState(5001)
+	if stDowngrade.FolderName != expectedFolder {
+		t.Errorf("Downgrade protection failed! Expected folder %q, got %q", expectedFolder, stDowngrade.FolderName)
+	}
+}
+
 

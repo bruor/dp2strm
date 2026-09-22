@@ -230,7 +230,7 @@ func TestSyncSharedPassRollover(t *testing.T) {
 	}
 
 	// Verify Movie 1 was created
-	movie1STRM := filepath.Join(tempDir, "Movies", "Movie 1 (2024) [tmdbid=1001]", "Movie 1.strm")
+	movie1STRM := filepath.Join(tempDir, "Movies", "Movie 1 (2024) [tmdbid=1001]", "Movie 1 (2024).strm")
 	if _, err := os.Stat(movie1STRM); os.IsNotExist(err) {
 		t.Errorf("Expected Movie 1 to exist at %s", movie1STRM)
 	}

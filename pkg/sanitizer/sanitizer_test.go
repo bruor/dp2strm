@@ -109,3 +109,51 @@ func TestStripYearFromTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestGetLegacyFolderCandidates(t *testing.T) {
+	// 1. Title that already has (2024)
+	cands1 := GetLegacyFolderCandidates("Girl from the North Country (2024)", 2024)
+	cands1Map := make(map[string]bool)
+	for _, c := range cands1 {
+		cands1Map[c] = true
+	}
+	if !cands1Map["Girl from the North Country (2024)"] {
+		t.Errorf("Expected 'Girl from the North Country (2024)' in candidates, got %v", cands1)
+	}
+	if !cands1Map["Girl from the North Country"] {
+		t.Errorf("Expected 'Girl from the North Country' in candidates, got %v", cands1)
+	}
+	// Verify no double year like (2024) (2024)
+	if cands1Map["Girl from the North Country (2024) (2024)"] {
+		t.Errorf("Unexpected double-year candidate in %v", cands1)
+	}
+
+	// 2. Title without year, but year is 2024
+	cands2 := GetLegacyFolderCandidates("Girl from the North Country", 2024)
+	cands2Map := make(map[string]bool)
+	for _, c := range cands2 {
+		cands2Map[c] = true
+	}
+	if !cands2Map["Girl from the North Country (2024)"] || !cands2Map["Girl from the North Country"] {
+		t.Errorf("Expected both year and bare candidates, got %v", cands2)
+	}
+
+	// 3. Title with year 0
+	cands3 := GetLegacyFolderCandidates("Dark Beauty", 0)
+	if len(cands3) != 1 || cands3[0] != "Dark Beauty" {
+		t.Errorf("Expected ['Dark Beauty'], got %v", cands3)
+	}
+}
+
+func TestBuildMovieFilename(t *testing.T) {
+	if got := BuildMovieFilename("Girl from the North Country (2024)", 2024); got != "Girl from the North Country (2024).strm" {
+		t.Errorf("BuildMovieFilename with year got %q, want %q", got, "Girl from the North Country (2024).strm")
+	}
+	if got := BuildMovieFilename("Girl from the North Country", 2024); got != "Girl from the North Country (2024).strm" {
+		t.Errorf("BuildMovieFilename without year got %q, want %q", got, "Girl from the North Country (2024).strm")
+	}
+	if got := BuildMovieFilename("Dark Beauty", 0); got != "Dark Beauty.strm" {
+		t.Errorf("BuildMovieFilename year 0 got %q, want %q", got, "Dark Beauty.strm")
+	}
+}
+

@@ -270,7 +270,13 @@ func (d *DB) UpsertInitialSeriesState(seriesID int, tmdbID, imdbID, title string
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
-		folder_name = CASE WHEN series_state.folder_name != '' THEN series_state.folder_name ELSE EXCLUDED.folder_name END,
+		folder_name = CASE 
+			WHEN (EXCLUDED.folder_name LIKE '%[tmdbid=%' OR EXCLUDED.folder_name LIKE '%[imdbid=%') THEN EXCLUDED.folder_name
+			WHEN (series_state.folder_name LIKE '%[tmdbid=%' OR series_state.folder_name LIKE '%[imdbid=%') THEN series_state.folder_name
+			WHEN EXCLUDED.year > 0 AND (series_state.year = 0 OR series_state.folder_name NOT LIKE '%(____)%') THEN EXCLUDED.folder_name
+			WHEN series_state.folder_name != '' THEN series_state.folder_name
+			ELSE EXCLUDED.folder_name 
+		END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`
 	_, err := d.conn.Exec(query, seriesID, tmdbID, imdbID, title, year, folderName, now)
@@ -900,7 +906,13 @@ func (d *DB) UpsertInitialMovieState(movieID int, tmdbID, imdbID, title string, 
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
-		folder_name = CASE WHEN movie_state.folder_name != '' THEN movie_state.folder_name ELSE EXCLUDED.folder_name END,
+		folder_name = CASE 
+			WHEN (EXCLUDED.folder_name LIKE '%[tmdbid=%' OR EXCLUDED.folder_name LIKE '%[imdbid=%') THEN EXCLUDED.folder_name
+			WHEN (movie_state.folder_name LIKE '%[tmdbid=%' OR movie_state.folder_name LIKE '%[imdbid=%') THEN movie_state.folder_name
+			WHEN EXCLUDED.year > 0 AND (movie_state.year = 0 OR movie_state.folder_name NOT LIKE '%(____)%') THEN EXCLUDED.folder_name
+			WHEN movie_state.folder_name != '' THEN movie_state.folder_name
+			ELSE EXCLUDED.folder_name 
+		END,
 		last_checked_at = EXCLUDED.last_checked_at;
 	`
 	_, err := d.conn.Exec(query, movieID, tmdbID, imdbID, title, year, folderName, now)
@@ -1539,7 +1551,13 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE movie_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE movie_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE movie_state.year END,
-		folder_name = CASE WHEN movie_state.folder_name != '' THEN movie_state.folder_name ELSE EXCLUDED.folder_name END,
+		folder_name = CASE 
+			WHEN (EXCLUDED.folder_name LIKE '%[tmdbid=%' OR EXCLUDED.folder_name LIKE '%[imdbid=%') THEN EXCLUDED.folder_name
+			WHEN (movie_state.folder_name LIKE '%[tmdbid=%' OR movie_state.folder_name LIKE '%[imdbid=%') THEN movie_state.folder_name
+			WHEN EXCLUDED.year > 0 AND (movie_state.year = 0 OR movie_state.folder_name NOT LIKE '%(____)%') THEN EXCLUDED.folder_name
+			WHEN movie_state.folder_name != '' THEN movie_state.folder_name
+			ELSE EXCLUDED.folder_name 
+		END,
 		is_activated = CASE WHEN EXCLUDED.is_activated = 1 THEN 1 ELSE movie_state.is_activated END,
 		activated_at = CASE WHEN EXCLUDED.activated_at IS NOT NULL THEN EXCLUDED.activated_at ELSE movie_state.activated_at END,
 		last_checked_at = EXCLUDED.last_checked_at;
@@ -1548,6 +1566,31 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 		return err
 	}
 	defer stateStmt.Close()
+
+	checkMovieUpgradeStmt, err := tx.Prepare(`
+	SELECT folder_name FROM movie_state
+	WHERE movie_id = ? 
+	   OR (? != '' AND ? != '0' AND tmdb_id = ?)
+	   OR (? != '' AND ? > 0 AND title = ? AND year = ?)
+	LIMIT 1
+	`)
+	if err != nil {
+		return err
+	}
+	defer checkMovieUpgradeStmt.Close()
+
+	reconcileQueueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	VALUES ('movie', ?, 'reconcile_movie', 50, 'pending', 0, ?, ?)
+	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
+		priority = CASE WHEN EXCLUDED.priority > sync_queue.priority THEN EXCLUDED.priority ELSE sync_queue.priority END,
+		status = CASE WHEN sync_queue.status = 'completed' THEN 'pending' ELSE sync_queue.status END,
+		updated_at = EXCLUDED.updated_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer reconcileQueueStmt.Close()
 
 	supersedeMvStmt, err := tx.Prepare(`
 	DELETE FROM movie_state
@@ -1583,6 +1626,20 @@ func (d *DB) BatchStageMovies(items []models.Movie) error {
 		cleanTitle := sanitizer.CleanTitle(mv.Name)
 		folderName := sanitizer.BuildMovieFolderName(cleanTitle, mv.Year, mv.TMDBID, mv.IMDBID)
 
+		var existingFolder string
+		if err := checkMovieUpgradeStmt.QueryRow(mv.ID, mv.TMDBID, mv.TMDBID, mv.TMDBID, cleanTitle, mv.Year, cleanTitle, mv.Year).Scan(&existingFolder); err == nil {
+			if existingFolder != "" && existingFolder != folderName {
+				isUpgrade := (strings.Contains(folderName, "[tmdbid=") || strings.Contains(folderName, "[imdbid=")) &&
+					(!strings.Contains(existingFolder, "[tmdbid=") && !strings.Contains(existingFolder, "[imdbid="))
+				if !isUpgrade && mv.Year > 0 && !strings.Contains(existingFolder, fmt.Sprintf("(%d)", mv.Year)) {
+					isUpgrade = true
+				}
+				if isUpgrade {
+					_, _ = reconcileQueueStmt.Exec(mv.ID, now, now)
+				}
+			}
+		}
+
 		if _, err := queueStmt.Exec(mv.ID, now, now, mv.ID, mv.TMDBID, mv.TMDBID, mv.TMDBID, cleanTitle, mv.Year, cleanTitle, mv.Year); err != nil {
 			return err
 		}
@@ -1612,7 +1669,7 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 	defer tx.Rollback()
 
 	checkActiveStmt, err := tx.Prepare(`
-	SELECT is_activated, last_episode_count, last_refreshed_at, dispatcharr_updated_at, title
+	SELECT is_activated, last_episode_count, last_refreshed_at, dispatcharr_updated_at, title, folder_name
 	FROM series_state
 	WHERE series_id = ? 
 	   OR (? != '' AND ? != '0' AND tmdb_id = ?)
@@ -1636,6 +1693,19 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		return err
 	}
 	defer updateQueueStmt.Close()
+
+	reconcileSeriesQueueStmt, err := tx.Prepare(`
+	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
+	VALUES ('series', ?, 'reconcile_series', 50, 'pending', 0, ?, ?)
+	ON CONFLICT(item_type, item_id, action) DO UPDATE SET
+		priority = CASE WHEN EXCLUDED.priority > sync_queue.priority THEN EXCLUDED.priority ELSE sync_queue.priority END,
+		status = CASE WHEN sync_queue.status = 'completed' THEN 'pending' ELSE sync_queue.status END,
+		updated_at = EXCLUDED.updated_at;
+	`)
+	if err != nil {
+		return err
+	}
+	defer reconcileSeriesQueueStmt.Close()
 
 	queueStmt, err := tx.Prepare(`
 	INSERT INTO sync_queue (item_type, item_id, action, priority, status, attempts, created_at, updated_at)
@@ -1666,7 +1736,13 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		imdb_id = CASE WHEN EXCLUDED.imdb_id != '' THEN EXCLUDED.imdb_id ELSE series_state.imdb_id END,
 		title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE series_state.title END,
 		year = CASE WHEN EXCLUDED.year > 0 THEN EXCLUDED.year ELSE series_state.year END,
-		folder_name = CASE WHEN series_state.folder_name != '' THEN series_state.folder_name ELSE EXCLUDED.folder_name END,
+		folder_name = CASE 
+			WHEN (EXCLUDED.folder_name LIKE '%[tmdbid=%' OR EXCLUDED.folder_name LIKE '%[imdbid=%') THEN EXCLUDED.folder_name
+			WHEN (series_state.folder_name LIKE '%[tmdbid=%' OR series_state.folder_name LIKE '%[imdbid=%') THEN series_state.folder_name
+			WHEN EXCLUDED.year > 0 AND (series_state.year = 0 OR series_state.folder_name NOT LIKE '%(____)%') THEN EXCLUDED.folder_name
+			WHEN series_state.folder_name != '' THEN series_state.folder_name
+			ELSE EXCLUDED.folder_name 
+		END,
 		is_activated = CASE WHEN EXCLUDED.is_activated = 1 THEN 1 ELSE series_state.is_activated END,
 		activated_at = CASE WHEN EXCLUDED.activated_at IS NOT NULL THEN EXCLUDED.activated_at ELSE series_state.activated_at END,
 		last_checked_at = EXCLUDED.last_checked_at,
@@ -1706,12 +1782,23 @@ func (d *DB) BatchStageSeries(items []models.Series) error {
 		var isActivated bool
 		var storedEpCount int
 		var storedLastRefreshed, storedDispUpdated sql.NullTime
-		var storedTitle string
+		var storedTitle, storedFolderName string
 		checkErr := checkActiveStmt.QueryRow(
 			srs.ID,
 			srs.TMDBID, srs.TMDBID, srs.TMDBID,
 			cleanTitle, srs.Year, cleanTitle, srs.Year,
-		).Scan(&isActivated, &storedEpCount, &storedLastRefreshed, &storedDispUpdated, &storedTitle)
+		).Scan(&isActivated, &storedEpCount, &storedLastRefreshed, &storedDispUpdated, &storedTitle, &storedFolderName)
+
+		if checkErr == nil && storedFolderName != "" && storedFolderName != folderName {
+			isUpgrade := (strings.Contains(folderName, "[tmdbid=") || strings.Contains(folderName, "[imdbid=")) &&
+				(!strings.Contains(storedFolderName, "[tmdbid=") && !strings.Contains(storedFolderName, "[imdbid="))
+			if !isUpgrade && srs.Year > 0 && !strings.Contains(storedFolderName, fmt.Sprintf("(%d)", srs.Year)) {
+				isUpgrade = true
+			}
+			if isUpgrade {
+				_, _ = reconcileSeriesQueueStmt.Exec(srs.ID, now, now)
+			}
+		}
 
 		if checkErr == nil && isActivated {
 			hasNewerTimestamp := !srs.UpdatedAt.IsZero() && (!storedDispUpdated.Valid || srs.UpdatedAt.After(storedDispUpdated.Time))

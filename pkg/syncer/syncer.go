@@ -546,22 +546,22 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 		}
 	}
 
-	// Automatically migrate legacy folder without ID if it exists on disk (e.g. "TV Shows/Title (Year)")
-	if series.Year > 0 {
-		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(cleanTitle), series.Year)
-		legacyDir := filepath.Join(s.cfg.OutputDir, "TV Shows", legacyFolderName)
-		if legacyDir != seriesDir {
-			if _, statErr := os.Stat(legacyDir); statErr == nil {
+	// Automatically migrate legacy folder without ID if it exists on disk
+	candidates := sanitizer.GetLegacyFolderCandidates(series.Name, series.Year)
+	for _, cand := range candidates {
+		candDir := filepath.Join(s.cfg.OutputDir, "TV Shows", cand)
+		if candDir != seriesDir {
+			if _, statErr := os.Stat(candDir); statErr == nil {
 				if _, canonicalErr := os.Stat(seriesDir); os.IsNotExist(canonicalErr) {
-					if rErr := os.Rename(legacyDir, seriesDir); rErr == nil {
-						log.Printf("[Syncer] Migrated legacy TV show directory without ID: %q -> %q", legacyFolderName, folderName)
+					if rErr := os.Rename(candDir, seriesDir); rErr == nil {
+						log.Printf("[Syncer] Migrated legacy TV show directory without ID: %q -> %q", cand, folderName)
 					}
 				} else {
-					_ = os.RemoveAll(legacyDir)
+					_ = os.RemoveAll(candDir)
 					if s.database != nil {
-						_ = s.database.RemoveSoftDeletedItem(legacyDir)
+						_ = s.database.RemoveSoftDeletedItem(candDir)
 					}
-					log.Printf("[Syncer] Purged obsolete duplicate TV show directory: %q (canonical %q exists)", legacyFolderName, folderName)
+					log.Printf("[Syncer] Purged obsolete duplicate TV show directory: %q (canonical %q exists)", cand, folderName)
 				}
 			}
 		}
@@ -873,22 +873,22 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		}
 	}
 
-	// Automatically migrate legacy folder without ID if it exists on disk (e.g. "Movies/Title (Year)")
-	if movie.Year > 0 {
-		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(cleanTitle), movie.Year)
-		legacyDir := filepath.Join(s.cfg.OutputDir, "Movies", legacyFolderName)
-		if legacyDir != movieDir {
-			if _, statErr := os.Stat(legacyDir); statErr == nil {
+	// Automatically migrate legacy folder without ID if it exists on disk
+	candidates := sanitizer.GetLegacyFolderCandidates(movie.Name, movie.Year)
+	for _, cand := range candidates {
+		candDir := filepath.Join(s.cfg.OutputDir, "Movies", cand)
+		if candDir != movieDir {
+			if _, statErr := os.Stat(candDir); statErr == nil {
 				if _, canonicalErr := os.Stat(movieDir); os.IsNotExist(canonicalErr) {
-					if rErr := os.Rename(legacyDir, movieDir); rErr == nil {
-						log.Printf("[Syncer] Migrated legacy Movie directory without ID: %q -> %q", legacyFolderName, folderName)
+					if rErr := os.Rename(candDir, movieDir); rErr == nil {
+						log.Printf("[Syncer] Migrated legacy Movie directory without ID: %q -> %q", cand, folderName)
 					}
 				} else {
-					_ = os.RemoveAll(legacyDir)
+					_ = os.RemoveAll(candDir)
 					if s.database != nil {
-						_ = s.database.RemoveSoftDeletedItem(legacyDir)
+						_ = s.database.RemoveSoftDeletedItem(candDir)
 					}
-					log.Printf("[Syncer] Purged obsolete duplicate Movie directory: %q (canonical %q exists)", legacyFolderName, folderName)
+					log.Printf("[Syncer] Purged obsolete duplicate Movie directory: %q (canonical %q exists)", cand, folderName)
 				}
 			}
 		}
@@ -924,7 +924,7 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 
 	// 2. Write clean extensionless .strm file pointing to /play/movie/{identifier}
 	movieIdent := strm.FormatMovieIdentifier(movie.TMDBID, movie.IMDBID, movie.ID)
-	strmFilename := fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(cleanTitle))
+	strmFilename := sanitizer.BuildMovieFilename(cleanTitle, movie.Year)
 	strmPath := filepath.Join(movieDir, strmFilename)
 	proxyURL := strm.GenerateMovieProxyURL(s.cfg, movieIdent, "base")
 
@@ -936,6 +936,18 @@ func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Mo
 		strmCreated = true
 	} else {
 		preserved++
+	}
+
+	// Clean up any legacy or alternate base .strm files in the movie folder
+	if entries, rErr := os.ReadDir(movieDir); rErr == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".strm") {
+				if entry.Name() != strmFilename && !strings.Contains(entry.Name(), " - ") {
+					_ = os.Remove(filepath.Join(movieDir, entry.Name()))
+					log.Printf("[Syncer] Purged obsolete duplicate movie .strm file: %q (replaced by %q)", entry.Name(), strmFilename)
+				}
+			}
+		}
 	}
 
 	// Check if this movie has already been activated by user; if so, maintain its quality variants
@@ -1975,57 +1987,58 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 		currentDir := filepath.Join(tvShowsRoot, currentFolderName)
 		canonicalDir := filepath.Join(tvShowsRoot, canonicalFolderName)
 
-		// 1. Check if folder needs migration to canonical name (e.g. ID upgrade)
-		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(sanitizer.CleanTitle(st.Title)), st.Year)
-		if st.Year == 0 {
-			legacyFolderName = sanitizer.SanitizeFileName(sanitizer.CleanTitle(st.Title))
+		legacyCandidates := sanitizer.GetLegacyFolderCandidates(st.Title, st.Year)
+		if currentFolderName != "" && currentFolderName != canonicalFolderName {
+			legacyCandidates = append(legacyCandidates, currentFolderName)
 		}
-		legacyDir := filepath.Join(tvShowsRoot, legacyFolderName)
 
-		if currentDir != canonicalDir || legacyDir != canonicalDir {
-			if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
-				if currentDir != canonicalDir {
-					if _, statErr := os.Stat(currentDir); statErr == nil {
-						_ = os.RemoveAll(currentDir)
+		if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
+			for _, cand := range legacyCandidates {
+				candDir := filepath.Join(tvShowsRoot, cand)
+				if candDir != canonicalDir {
+					if _, statErr := os.Stat(candDir); statErr == nil {
+						_ = os.RemoveAll(candDir)
 						if s.database != nil {
-							_ = s.database.RemoveSoftDeletedItem(currentDir)
+							_ = s.database.RemoveSoftDeletedItem(candDir)
 						}
-						log.Printf("[Worker] Purged obsolete duplicate TV Show folder: %q (canonical %q exists)", currentFolderName, canonicalFolderName)
+						log.Printf("[Worker] Purged obsolete duplicate TV Show folder: %q (canonical %q exists)", cand, canonicalFolderName)
 					}
 				}
-				if legacyDir != canonicalDir {
-					if _, lStat := os.Stat(legacyDir); lStat == nil {
-						_ = os.RemoveAll(legacyDir)
-						if s.database != nil {
-							_ = s.database.RemoveSoftDeletedItem(legacyDir)
+			}
+			if s.database != nil {
+				_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
+			}
+			currentDir = canonicalDir
+			st.FolderName = canonicalFolderName
+		} else {
+			renamed := false
+			for _, cand := range legacyCandidates {
+				candDir := filepath.Join(tvShowsRoot, cand)
+				if candDir != canonicalDir {
+					if _, statErr := os.Stat(candDir); statErr == nil && !renamed {
+						if rErr := os.Rename(candDir, canonicalDir); rErr == nil {
+							log.Printf("[Worker] Reconciled TV Show folder: %q -> %q", cand, canonicalFolderName)
+							summary.STRMCreated = true
+							if s.database != nil {
+								_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
+							}
+							currentDir = canonicalDir
+							st.FolderName = canonicalFolderName
+							renamed = true
 						}
-						log.Printf("[Worker] Purged obsolete duplicate TV Show folder: %q (canonical %q exists)", legacyFolderName, canonicalFolderName)
+					} else if _, statErr := os.Stat(candDir); statErr == nil && renamed {
+						_ = os.RemoveAll(candDir)
+						if s.database != nil {
+							_ = s.database.RemoveSoftDeletedItem(candDir)
+						}
 					}
 				}
-				if s.database != nil {
-					_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
-				}
+			}
+			if !renamed {
 				currentDir = canonicalDir
 				st.FolderName = canonicalFolderName
-			} else if _, statErr := os.Stat(currentDir); statErr == nil {
-				if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
-					log.Printf("[Worker] Reconciled TV Show folder: %q -> %q", currentFolderName, canonicalFolderName)
-					summary.STRMCreated = true
-					if s.database != nil {
-						_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
-					}
-					currentDir = canonicalDir
-					st.FolderName = canonicalFolderName
-				}
-			} else if _, lStat := os.Stat(legacyDir); lStat == nil {
-				if rErr := os.Rename(legacyDir, canonicalDir); rErr == nil {
-					log.Printf("[Worker] Reconciled TV Show folder: %q -> %q", legacyFolderName, canonicalFolderName)
-					summary.STRMCreated = true
-					if s.database != nil {
-						_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
-					}
-					currentDir = canonicalDir
-					st.FolderName = canonicalFolderName
+				if s.database != nil {
+					_ = s.database.UpdateSeriesFolderName(st.SeriesID, canonicalFolderName)
 				}
 			}
 		}
@@ -2085,63 +2098,65 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 		currentDir := filepath.Join(moviesRoot, currentFolderName)
 		canonicalDir := filepath.Join(moviesRoot, canonicalFolderName)
 
-		// 1. Check if folder needs migration to canonical name (e.g. ID upgrade)
-		legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(sanitizer.CleanTitle(mst.Title)), mst.Year)
-		if mst.Year == 0 {
-			legacyFolderName = sanitizer.SanitizeFileName(sanitizer.CleanTitle(mst.Title))
+		legacyCandidates := sanitizer.GetLegacyFolderCandidates(mst.Title, mst.Year)
+		if currentFolderName != "" && currentFolderName != canonicalFolderName {
+			legacyCandidates = append(legacyCandidates, currentFolderName)
 		}
-		legacyDir := filepath.Join(moviesRoot, legacyFolderName)
 
-		if currentDir != canonicalDir || legacyDir != canonicalDir {
-			if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
-				if currentDir != canonicalDir {
-					if _, statErr := os.Stat(currentDir); statErr == nil {
-						_ = os.RemoveAll(currentDir)
+		if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
+			for _, cand := range legacyCandidates {
+				candDir := filepath.Join(moviesRoot, cand)
+				if candDir != canonicalDir {
+					if _, statErr := os.Stat(candDir); statErr == nil {
+						_ = os.RemoveAll(candDir)
 						if s.database != nil {
-							_ = s.database.RemoveSoftDeletedItem(currentDir)
+							_ = s.database.RemoveSoftDeletedItem(candDir)
 						}
-						log.Printf("[Worker] Purged obsolete duplicate Movie folder: %q (canonical %q exists)", currentFolderName, canonicalFolderName)
+						log.Printf("[Worker] Purged obsolete duplicate Movie folder: %q (canonical %q exists)", cand, canonicalFolderName)
 					}
 				}
-				if legacyDir != canonicalDir {
-					if _, lStat := os.Stat(legacyDir); lStat == nil {
-						_ = os.RemoveAll(legacyDir)
-						if s.database != nil {
-							_ = s.database.RemoveSoftDeletedItem(legacyDir)
+			}
+			if s.database != nil {
+				_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
+			}
+			currentDir = canonicalDir
+			mst.FolderName = canonicalFolderName
+		} else {
+			renamed := false
+			for _, cand := range legacyCandidates {
+				candDir := filepath.Join(moviesRoot, cand)
+				if candDir != canonicalDir {
+					if _, statErr := os.Stat(candDir); statErr == nil && !renamed {
+						if rErr := os.Rename(candDir, canonicalDir); rErr == nil {
+							log.Printf("[Worker] Reconciled Movie folder: %q -> %q", cand, canonicalFolderName)
+							summary.STRMCreated = true
+							if s.database != nil {
+								_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
+							}
+							currentDir = canonicalDir
+							mst.FolderName = canonicalFolderName
+							renamed = true
 						}
-						log.Printf("[Worker] Purged obsolete duplicate Movie folder: %q (canonical %q exists)", legacyFolderName, canonicalFolderName)
+					} else if _, statErr := os.Stat(candDir); statErr == nil && renamed {
+						_ = os.RemoveAll(candDir)
+						if s.database != nil {
+							_ = s.database.RemoveSoftDeletedItem(candDir)
+						}
 					}
 				}
-				if s.database != nil {
-					_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
-				}
+			}
+			if !renamed {
 				currentDir = canonicalDir
 				mst.FolderName = canonicalFolderName
-			} else if _, statErr := os.Stat(currentDir); statErr == nil {
-				if rErr := os.Rename(currentDir, canonicalDir); rErr == nil {
-					log.Printf("[Worker] Reconciled Movie folder: %q -> %q", currentFolderName, canonicalFolderName)
-					summary.STRMCreated = true
-					if s.database != nil {
-						_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
-					}
-					currentDir = canonicalDir
-					mst.FolderName = canonicalFolderName
-				}
-			} else if _, lStat := os.Stat(legacyDir); lStat == nil {
-				if rErr := os.Rename(legacyDir, canonicalDir); rErr == nil {
-					log.Printf("[Worker] Reconciled Movie folder: %q -> %q", legacyFolderName, canonicalFolderName)
-					summary.STRMCreated = true
-					if s.database != nil {
-						_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
-					}
-					currentDir = canonicalDir
-					mst.FolderName = canonicalFolderName
+				if s.database != nil {
+					_ = s.database.UpdateMovieFolderName(mst.MovieID, canonicalFolderName)
 				}
 			}
 		}
 
 		// 2. Ensure Movie.strm contains the canonical proxy URL (in-place update with mtime preservation)
-		strmPath := filepath.Join(currentDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(mst.Title)))
+		strmFilename := sanitizer.BuildMovieFilename(mst.Title, mst.Year)
+		strmPath := filepath.Join(currentDir, strmFilename)
 		expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)
 		expectedURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, "base")
 
@@ -2150,6 +2165,18 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 			if writeStatus == strm.STRMCreated {
 				summary.STRMCreated = true
 				log.Printf("[Reconciler] Restored missing Movie STRM file on disk: %q", strmPath)
+			}
+		}
+
+		// Prune any legacy or alternate base .strm files in currentDir
+		if entries, rErr := os.ReadDir(currentDir); rErr == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".strm") {
+					if entry.Name() != strmFilename && !strings.Contains(entry.Name(), " - ") {
+						_ = os.Remove(filepath.Join(currentDir, entry.Name()))
+						log.Printf("[Reconciler] Purged obsolete duplicate movie .strm file: %q (canonical: %q)", entry.Name(), strmFilename)
+					}
+				}
 			}
 		}
 
@@ -2287,12 +2314,10 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				canonicalDirPath := filepath.Join(tvShowsRoot, canonicalFolderName)
 
 				needsReconcile := false
-				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
-				legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(sanitizer.CleanTitle(st.Title)), st.Year)
-				if st.Year == 0 {
-					legacyFolderName = sanitizer.SanitizeFileName(sanitizer.CleanTitle(st.Title))
+				legacyCandidates := sanitizer.GetLegacyFolderCandidates(st.Title, st.Year)
+				if currentFolderName != "" && currentFolderName != canonicalFolderName {
+					legacyCandidates = append(legacyCandidates, currentFolderName)
 				}
-				legacyDir := filepath.Join(tvShowsRoot, legacyFolderName)
 
 				if _, canonicalErr := os.Stat(canonicalDirPath); canonicalErr == nil {
 					// Canonical directory exists on disk - only skip if canonical directory itself is soft-deleted
@@ -2303,23 +2328,16 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 					seriesDirPath = canonicalDirPath
 					st.FolderName = canonicalFolderName
 
-					// Prune obsolete duplicate legacy folder immediately
-					if legacyDir != canonicalDirPath {
-						if _, lStat := os.Stat(legacyDir); lStat == nil {
-							_ = os.RemoveAll(legacyDir)
-							if s.database != nil {
-								_ = s.database.RemoveSoftDeletedItem(legacyDir)
-							}
-						}
-					}
-					if currentFolderName != canonicalFolderName && currentFolderName != "" {
-						oldDir := filepath.Join(tvShowsRoot, currentFolderName)
-						if oldDir != canonicalDirPath {
-							if _, oStat := os.Stat(oldDir); oStat == nil {
-								_ = os.RemoveAll(oldDir)
+					// Prune obsolete duplicate legacy folders immediately
+					for _, cand := range legacyCandidates {
+						candDir := filepath.Join(tvShowsRoot, cand)
+						if candDir != canonicalDirPath {
+							if _, lStat := os.Stat(candDir); lStat == nil {
+								_ = os.RemoveAll(candDir)
 								if s.database != nil {
-									_ = s.database.RemoveSoftDeletedItem(oldDir)
+									_ = s.database.RemoveSoftDeletedItem(candDir)
 								}
+								log.Printf("[Reconciler] Purged obsolete duplicate TV Show folder: %q (canonical %q exists)", cand, canonicalFolderName)
 							}
 						}
 					}
@@ -2328,10 +2346,12 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 					if softDeletedMap[canonicalDirPath] || softDeletedMap[seriesDirPath] || softDeletedMap[canonicalFolderName] || softDeletedMap[currentFolderName] {
 						continue
 					}
-					if _, statErr := os.Stat(seriesDirPath); statErr == nil {
-						needsReconcile = true
-					} else if _, lStat := os.Stat(legacyDir); lStat == nil {
-						needsReconcile = true
+					for _, cand := range legacyCandidates {
+						candDir := filepath.Join(tvShowsRoot, cand)
+						if _, statErr := os.Stat(candDir); statErr == nil {
+							needsReconcile = true
+							break
+						}
 					}
 				}
 
@@ -2390,12 +2410,10 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 				canonicalDir := filepath.Join(moviesRoot, canonicalFolderName)
 
 				needsReconcile := false
-				// Check if on-disk folder needs migration to canonical name (e.g. ID upgrade)
-				legacyFolderName := fmt.Sprintf("%s (%d)", sanitizer.SanitizeFileName(sanitizer.CleanTitle(mst.Title)), mst.Year)
-				if mst.Year == 0 {
-					legacyFolderName = sanitizer.SanitizeFileName(sanitizer.CleanTitle(mst.Title))
+				legacyCandidates := sanitizer.GetLegacyFolderCandidates(mst.Title, mst.Year)
+				if currentFolderName != "" && currentFolderName != canonicalFolderName {
+					legacyCandidates = append(legacyCandidates, currentFolderName)
 				}
-				legacyDir := filepath.Join(moviesRoot, legacyFolderName)
 
 				if _, canonicalErr := os.Stat(canonicalDir); canonicalErr == nil {
 					// Canonical directory exists on disk - only skip if canonical directory itself is soft-deleted
@@ -2406,23 +2424,16 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 					movieDir = canonicalDir
 					mst.FolderName = canonicalFolderName
 
-					// Prune obsolete duplicate legacy folder immediately
-					if legacyDir != canonicalDir {
-						if _, lStat := os.Stat(legacyDir); lStat == nil {
-							_ = os.RemoveAll(legacyDir)
-							if s.database != nil {
-								_ = s.database.RemoveSoftDeletedItem(legacyDir)
-							}
-						}
-					}
-					if currentFolderName != canonicalFolderName && currentFolderName != "" {
-						oldDir := filepath.Join(moviesRoot, currentFolderName)
-						if oldDir != canonicalDir {
-							if _, oStat := os.Stat(oldDir); oStat == nil {
-								_ = os.RemoveAll(oldDir)
+					// Prune obsolete duplicate legacy folders immediately
+					for _, cand := range legacyCandidates {
+						candDir := filepath.Join(moviesRoot, cand)
+						if candDir != canonicalDir {
+							if _, lStat := os.Stat(candDir); lStat == nil {
+								_ = os.RemoveAll(candDir)
 								if s.database != nil {
-									_ = s.database.RemoveSoftDeletedItem(oldDir)
+									_ = s.database.RemoveSoftDeletedItem(candDir)
 								}
+								log.Printf("[Reconciler] Purged obsolete duplicate Movie folder: %q (canonical %q exists)", cand, canonicalFolderName)
 							}
 						}
 					}
@@ -2431,16 +2442,19 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 					if softDeletedMap[canonicalDir] || softDeletedMap[movieDir] || softDeletedMap[canonicalFolderName] || softDeletedMap[currentFolderName] {
 						continue
 					}
-					if _, statErr := os.Stat(movieDir); statErr == nil {
-						needsReconcile = true
-					} else if _, lStat := os.Stat(legacyDir); lStat == nil {
-						needsReconcile = true
+					for _, cand := range legacyCandidates {
+						candDir := filepath.Join(moviesRoot, cand)
+						if _, statErr := os.Stat(candDir); statErr == nil {
+							needsReconcile = true
+							break
+						}
 					}
 				}
 
 				expectedIdent := strm.FormatMovieIdentifier(mst.TMDBID, mst.IMDBID, mst.MovieID)
 				expectedURL := strm.GenerateMovieProxyURL(s.cfg, expectedIdent, "base")
-				strmPath := filepath.Join(movieDir, fmt.Sprintf("%s.strm", sanitizer.SanitizeFileName(sanitizer.CleanTitle(mst.Title))))
+				strmFilename := sanitizer.BuildMovieFilename(mst.Title, mst.Year)
+				strmPath := filepath.Join(movieDir, strmFilename)
 
 				if contentBytes, statErr := os.ReadFile(strmPath); statErr == nil {
 					if strings.TrimSpace(string(contentBytes)) != strings.TrimSpace(expectedURL) {
@@ -2463,6 +2477,18 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 					}
 					if !foundValid {
 						needsReconcile = true
+					}
+				}
+
+				// Check for duplicate/obsolete base .strm files in movieDir
+				if entries, rErr := os.ReadDir(movieDir); rErr == nil {
+					for _, entry := range entries {
+						if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".strm") {
+							if entry.Name() != strmFilename && !strings.Contains(entry.Name(), " - ") {
+								needsReconcile = true
+								break
+							}
+						}
 					}
 				}
 
