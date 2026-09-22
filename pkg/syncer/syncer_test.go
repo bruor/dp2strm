@@ -733,4 +733,108 @@ func TestWorkerProcessUpdateEpisodesTask(t *testing.T) {
 	}
 }
 
+func TestPopulateActivatedSeriesZeroEpisodesPreservesPlaceholder(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Mock Dispatcharr server that returns [] for /episodes/
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "/episodes/") {
+			_, _ = w.Write([]byte(`[]`))
+		} else {
+			_, _ = w.Write([]byte(`{"id": 99999, "name": "Empty Show (2024)", "year": 2024, "tmdb_id": "99999", "episode_count": 0}`))
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL: ts.URL,
+		APIKey:         "test-api-key",
+		OutputDir:      tempDir,
+		URL:            "http://localhost:8080",
+	}
+
+	c := client.NewClient(ts.URL, "test-api-key")
+	s := NewSyncer(cfg, c, database)
+
+	// Pre-create series state and on-disk Season 01 placeholder
+	seriesID := 99999
+	cleanTitle := "Empty Show"
+	folderName := "Empty Show (2024) [tmdbid=99999]"
+	seriesFolder := filepath.Join(tempDir, "TV Shows", folderName)
+	season1Dir := filepath.Join(seriesFolder, "Season 01")
+	if err := os.MkdirAll(season1Dir, 0755); err != nil {
+		t.Fatalf("Failed to create season1Dir: %v", err)
+	}
+	placeholderSTRM := filepath.Join(season1Dir, "Empty Show - S01E01.strm")
+	if err := os.WriteFile(placeholderSTRM, []byte("http://dummy"), 0644); err != nil {
+		t.Fatalf("Failed to write placeholder STRM: %v", err)
+	}
+
+	_ = database.UpsertInitialSeriesState(seriesID, "99999", "", cleanTitle, 2024, folderName)
+
+	// 1. Attempt to activate the series with 0 episodes
+	_, _, err = s.PopulateActivatedSeries(context.Background(), seriesID, cleanTitle, seriesFolder)
+	if err == nil {
+		t.Fatalf("Expected PopulateActivatedSeries to return error for 0 episodes series")
+	}
+
+	// 2. Verify placeholder STRM still exists on disk! (Must NOT be erased)
+	if _, err := os.Stat(placeholderSTRM); os.IsNotExist(err) {
+		t.Errorf("Expected placeholder STRM to be preserved on disk when series has 0 episodes!")
+	}
+	if _, err := os.Stat(season1Dir); os.IsNotExist(err) {
+		t.Errorf("Expected Season 01 directory to be preserved on disk!")
+	}
+
+	// 3. Verify SQLite is_activated is 0
+	st, err := database.GetSeriesState(seriesID)
+	if err != nil || st == nil {
+		t.Fatalf("GetSeriesState failed: %v", err)
+	}
+	if st.IsActivated {
+		t.Errorf("Expected series to remain unactivated in SQLite when 0 episodes upstream")
+	}
+
+	// 4. Test Self-Healing in ReconcileDiskState:
+	// Simulate an empty activated series (e.g. wiped disk + is_activated=1)
+	_ = database.SetSeriesActivated(seriesID, "99999", cleanTitle)
+	_ = os.RemoveAll(season1Dir) // wipe season1Dir
+
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("ReconcileDiskState failed: %v", err)
+	}
+
+	// Verify ReconcileDiskState reset is_activated to 0
+	healedSt, _ := database.GetSeriesState(seriesID)
+	if healedSt.IsActivated {
+		t.Errorf("Expected ReconcileDiskState to reset is_activated to false for empty series")
+	}
+
+	// Execute pending reconciliation task
+	task, _ := database.PopNextTask("")
+	if task == nil {
+		t.Fatalf("Expected reconcile_series task to be queued for empty series")
+	}
+	pErr, summary := s.processQueueTask(context.Background(), task)
+	if pErr != nil {
+		t.Fatalf("processQueueTask failed: %v", pErr)
+	}
+	if summary == nil || !summary.STRMCreated {
+		t.Errorf("Expected summary.STRMCreated=true after healing placeholder")
+	}
+
+	// Verify placeholder was restored on disk!
+	if _, err := os.Stat(placeholderSTRM); os.IsNotExist(err) {
+		t.Errorf("Expected placeholder STRM to be restored on disk after reconciliation healing!")
+	}
+}
+
+
 

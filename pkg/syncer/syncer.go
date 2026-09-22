@@ -696,6 +696,30 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
 	}
 
+	if len(episodes) == 0 {
+		log.Printf("[Activation] ⚠️ Series %q (ID %d) has 0 episodes in Dispatcharr. Cannot activate. Preserving placeholder until episodes are added upstream.", cleanTitle, seriesID)
+		// Ensure Season 01 placeholder is present on disk so the show does not disappear from Emby!
+		season1Dir := filepath.Join(seriesDir, "Season 01")
+		actStrmFilename := fmt.Sprintf("%s - S01E01.strm", sanitizer.SanitizeFileName(cleanTitle))
+		actStrmPath := filepath.Join(season1Dir, actStrmFilename)
+		seriesIdent := strconv.Itoa(seriesID)
+		if s.database != nil {
+			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
+				seriesIdent = strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, seriesID)
+			}
+		}
+		actProxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, models.ActivationSeasonNumber, models.ActivationEpisodeNumber, "base")
+		_, _ = strm.WriteSTRMFileDetailed(actStrmPath, actProxyURL)
+
+		actNFOPath := filepath.Join(season1Dir, fmt.Sprintf("%s - S01E01.nfo", sanitizer.SanitizeFileName(cleanTitle)))
+		_, _ = nfo.WriteActivationEpisodeNFO(actNFOPath, cleanTitle)
+
+		if s.database != nil {
+			_ = s.database.SetSeriesUnactivated(seriesID)
+		}
+		return 0, 0, fmt.Errorf("series %d has 0 episodes in Dispatcharr", seriesID)
+	}
+
 	// If NFO is disabled, clean up tvshow.nfo if present
 	if !s.cfg.EnableNFO {
 		tvshowNFOPath := filepath.Join(seriesDir, "tvshow.nfo")
@@ -742,7 +766,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 	}
 
 	// Clean up temporary Season 01 directory if show starts at Season 2+
-	if !hasS01E01 {
+	if len(episodes) > 0 && !hasS01E01 {
 		season1Dir := filepath.Join(seriesDir, "Season 01")
 		if entries, rErr := os.ReadDir(season1Dir); rErr == nil {
 			for _, entry := range entries {
@@ -2380,6 +2404,28 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 						if !strings.Contains(string(nfoBytes), "<watched>false</watched>") || !strings.Contains(string(nfoBytes), "<runtime>") {
 							needsReconcile = true
 						}
+					}
+				} else {
+					// Self-Healing Guardrail: If series was marked activated, but has no season directories or media files on disk,
+					// heal it by resetting is_activated=0 and enqueuing reconcile_series to restore the S01E01 placeholder!
+					hasDiskContent := false
+					if entries, dirErr := os.ReadDir(seriesDirPath); dirErr == nil {
+						for _, ent := range entries {
+							if ent.IsDir() && strings.HasPrefix(ent.Name(), "Season ") {
+								if epEntries, epErr := os.ReadDir(filepath.Join(seriesDirPath, ent.Name())); epErr == nil && len(epEntries) > 0 {
+									hasDiskContent = true
+									break
+								}
+							}
+						}
+					}
+					if !hasDiskContent {
+						log.Printf("[Reconciler] Healing empty activated series %q (ID %d): resetting to unactivated and restoring placeholder.", st.Title, st.SeriesID)
+						if s.database != nil {
+							_ = s.database.SetSeriesUnactivated(st.SeriesID)
+						}
+						st.IsActivated = false
+						needsReconcile = true
 					}
 				}
 

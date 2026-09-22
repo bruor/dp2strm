@@ -300,6 +300,17 @@ func (d *DB) SetSeriesActivated(seriesID int, tmdbID, title string) error {
 	return err
 }
 
+// SetSeriesUnactivated resets an activation if a series was found to have 0 episodes upstream.
+func (d *DB) SetSeriesUnactivated(seriesID int) error {
+	query := `
+	UPDATE series_state 
+	SET is_activated = 0, activated_at = NULL, last_episode_count = 0
+	WHERE series_id = ?;
+	`
+	_, err := d.conn.Exec(query, seriesID)
+	return err
+}
+
 // FindSeriesByTitleAndYear finds a series record by matching title and optionally year.
 func (d *DB) FindSeriesByTitleAndYear(title string, year int) (*SeriesState, error) {
 	var query string
