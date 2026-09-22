@@ -1299,10 +1299,24 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 			folderName = st.FolderName
 		}
 	}
+	if folderName == "" && title != "" {
+		var year int
+		if s.database != nil {
+			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
+				year = st.Year
+			}
+		}
+		folderName = sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(title), year, tmdbID, imdbID)
+	}
 
 	// Wait for active playback session in Emby before firing refresh (up to ActivationRefreshDelay timeout)
 	if s.embyClient != nil && s.embyClient.IsConfigured() && s.cfg.ActivationRefreshDelay > 0 {
 		s.embyClient.WaitForPlaybackSession(ctx, tmdbID, imdbID, title, s.cfg.ActivationRefreshDelay)
+	}
+
+	// 1. Notify Emby directory watcher that episode files were written to disk
+	if s.embyClient != nil && s.embyClient.IsConfigured() && folderName != "" {
+		_ = s.embyClient.NotifyMediaUpdated(ctx, "series", folderName)
 	}
 
 	var embyItemID string
@@ -1317,18 +1331,20 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 	if embyItemID != "" {
 		if s.embyClient != nil && s.embyClient.IsConfigured() {
 			startTime := time.Now()
-			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
-			_ = s.embyClient.RefreshSeriesEpisodes(ctx, embyItemID)
-			log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s, Folder: %q)", title, embyItemID, folderName)
 
-			// Wait for evidence that Emby has actually scanned and indexed the episodes before releasing VIP lock
+			// 2. Wait for evidence that Emby has scanned the folder and indexed the new episodes
 			epCount, confirmed := s.embyClient.WaitForSeriesEpisodesIndexed(ctx, embyItemID, 2, 25*time.Second)
 			elapsed := time.Since(startTime).Round(100 * time.Millisecond)
 			if confirmed {
-				log.Printf("[Emby] ✅ Verified series %q successfully indexed in Emby (%d episodes confirmed in %s). Ready to release VIP lock.", title, epCount, elapsed)
+				log.Printf("[Emby] ✅ Verified series %q successfully indexed in Emby (%d episodes confirmed in %s).", title, epCount, elapsed)
 			} else {
-				log.Printf("[Emby] ⚠️ Timed out waiting for Emby to index episodes for %q after %s (%d episodes visible). Releasing VIP lock.", title, elapsed, epCount)
+				log.Printf("[Emby] ⚠️ Timed out waiting for Emby to index episodes for %q after %s (%d episodes visible).", title, elapsed, epCount)
 			}
+
+			// 3. Trigger targeted metadata refresh on activation episode (S01E01 / placeholders) and series
+			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
+			_ = s.embyClient.RefreshSeriesEpisodes(ctx, embyItemID)
+			log.Printf("[Emby] Refreshed metadata for %q and activation episodes (Emby Item ID: %s, Folder: %q). Ready to release VIP lock.", title, embyItemID, folderName)
 			return
 		}
 	}
