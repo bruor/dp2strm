@@ -589,10 +589,13 @@ func (c *Client) WaitForScanCompletion(ctx context.Context, maxWait time.Duratio
 		for _, t := range tasks {
 			if t.Key == "RefreshLibrary" && t.State == "Running" {
 				scanning = true
-				pct := int(t.CurrentProgressPercentage)
-				if pct != lastLoggedPct {
+				bucket := int(t.CurrentProgressPercentage) / 20 * 20
+				if bucket > 100 {
+					bucket = 100
+				}
+				if lastLoggedPct == -1 || bucket > lastLoggedPct {
 					log.Printf("[Emby] Active media library scan progress: %.1f%%", t.CurrentProgressPercentage)
-					lastLoggedPct = pct
+					lastLoggedPct = bucket
 				}
 				break
 			}

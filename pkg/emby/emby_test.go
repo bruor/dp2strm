@@ -184,3 +184,51 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 		t.Errorf("Expected IsSeriesPlaying to return false for nonexistent show")
 	}
 }
+
+func TestWaitForScanCompletion(t *testing.T) {
+	step := 0
+	progresses := []float64{5.0, 15.0, 25.0, 45.0, 65.0, 85.0, 100.0}
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ScheduledTasks":
+			w.Header().Set("Content-Type", "application/json")
+			if step < len(progresses) {
+				pct := progresses[step]
+				step++
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{
+						"Id":                        "task-12345",
+						"Key":                       "RefreshLibrary",
+						"State":                     "Running",
+						"CurrentProgressPercentage": pct,
+					},
+				})
+			} else {
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{
+						"Id":                        "task-12345",
+						"Key":                       "RefreshLibrary",
+						"State":                     "Idle",
+						"CurrentProgressPercentage": 0.0,
+					},
+				})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	cfg := &models.Config{
+		EmbyURL:    mockServer.URL,
+		EmbyAPIKey: "test_key",
+	}
+	client := NewClient(cfg)
+
+	completed := client.WaitForScanCompletion(context.Background(), 10*time.Second)
+	if !completed {
+		t.Errorf("Expected WaitForScanCompletion to return true")
+	}
+}
+
