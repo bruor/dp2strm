@@ -38,6 +38,8 @@ type Server struct {
 	onSync            SyncCallback
 	activeSeriesMu    sync.Mutex
 	activeSeries      map[int]chan struct{}
+	activeTapsMu      sync.Mutex
+	activeTaps        map[string]struct{}
 	httpServer        *http.Server
 }
 
@@ -48,6 +50,7 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 		database:     database,
 		onActivation: onActivation,
 		activeSeries: make(map[int]chan struct{}),
+		activeTaps:   make(map[string]struct{}),
 	}
 
 	mux := http.NewServeMux()
@@ -494,33 +497,73 @@ func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey st
 		if ep.TargetURL == "" {
 			continue
 		}
-		tapURL := s.formatRedirect(ep.TargetURL)
-		log.Printf("[Proxy] Fetch-ahead tap (5s): Series %d S%02dE%02d -> %s", seriesID, ep.SeasonNum, ep.EpisodeNum, tapURL)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, tapURL, nil)
-		if err != nil {
-			cancel()
-			log.Printf("[Proxy] Fetch-ahead error building request: %v", err)
-			continue
-		}
-		req.Header.Set("User-Agent", "dp2strm-fetch-ahead/1.0")
-
-		resp, pErr := http.DefaultClient.Do(req)
-		if pErr != nil {
-			log.Printf("[Proxy] Fetch-ahead tap request failed for Series %d S%02dE%02d: %v", seriesID, ep.SeasonNum, ep.EpisodeNum, pErr)
-			cancel()
+		// 1. Check 24-hour cooldown: block re-tapping if successfully tapped within 24h
+		if ep.LastTappedAt != nil && time.Since(*ep.LastTappedAt) < 24*time.Hour {
+			log.Printf("[Proxy] Fetch-ahead tap skipped for Series %d S%02dE%02d: already tapped %s ago (cooldown: 24h)",
+				seriesID, ep.SeasonNum, ep.EpisodeNum, time.Since(*ep.LastTappedAt).Round(time.Minute))
 			continue
 		}
 
-		// Read a small initial buffer (64 KB) to ensure streamcache establishes the upstream
-		// hydration worker and begins background caching before we disconnect.
-		buf := make([]byte, 64*1024)
-		n, _ := io.ReadFull(resp.Body, buf)
-		_ = resp.Body.Close()
-		cancel()
+		// 2. In-flight deduplication: prevent concurrent taps during rapid client probes (e.g. ffprobe/ffmpeg)
+		tapKey := fmt.Sprintf("%d:%d:%d:%s", seriesID, ep.SeasonNum, ep.EpisodeNum, ep.VariantKey)
+		s.activeTapsMu.Lock()
+		if _, inFlight := s.activeTaps[tapKey]; inFlight {
+			s.activeTapsMu.Unlock()
+			continue
+		}
+		s.activeTaps[tapKey] = struct{}{}
+		s.activeTapsMu.Unlock()
 
-		log.Printf("[Proxy] Fetch-ahead tap latched: Series %d S%02dE%02d (status: %d, read %d bytes)", seriesID, ep.SeasonNum, ep.EpisodeNum, resp.StatusCode, n)
+		func(targetEp db.EpisodeTarget, key string) {
+			defer func() {
+				s.activeTapsMu.Lock()
+				delete(s.activeTaps, key)
+				s.activeTapsMu.Unlock()
+			}()
+
+			tapURL := s.formatRedirect(targetEp.TargetURL)
+			log.Printf("[Proxy] Fetch-ahead tap (5s): Series %d S%02dE%02d -> %s", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, tapURL)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, tapURL, nil)
+			if err != nil {
+				log.Printf("[Proxy] Fetch-ahead error building request for Series %d S%02dE%02d: %v", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, err)
+				return
+			}
+			req.Header.Set("User-Agent", "dp2strm-fetch-ahead/1.0")
+
+			resp, pErr := http.DefaultClient.Do(req)
+			if pErr != nil {
+				log.Printf("[Proxy] Fetch-ahead tap network error for Series %d S%02dE%02d: %v", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, pErr)
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				log.Printf("[Proxy] Fetch-ahead tap failed with HTTP status %d for Series %d S%02dE%02d", resp.StatusCode, seriesID, targetEp.SeasonNum, targetEp.EpisodeNum)
+				return
+			}
+
+			// Read a small initial buffer (64 KB) to ensure streamcache establishes the upstream
+			// hydration worker and begins background caching before we disconnect.
+			buf := make([]byte, 64*1024)
+			n, _ := io.ReadFull(resp.Body, buf)
+			if n == 0 {
+				log.Printf("[Proxy] Fetch-ahead tap failed to read stream data (0 bytes read) for Series %d S%02dE%02d", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum)
+				return
+			}
+
+			// Tap succeeded! Record last_tapped_at to enforce 24-hour cooldown.
+			log.Printf("[Proxy] Fetch-ahead tap latched: Series %d S%02dE%02d (status: %d, read %d bytes)", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, resp.StatusCode, n)
+			if s.database != nil {
+				if err := s.database.MarkStreamVariantTapped(seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, targetEp.VariantKey, time.Now()); err != nil {
+					log.Printf("[Proxy] Error updating last_tapped_at for Series %d S%02dE%02d: %v", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, err)
+				}
+			}
+		}(ep, tapKey)
 	}
 }
 

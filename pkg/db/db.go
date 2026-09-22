@@ -65,13 +65,16 @@ type StreamVariant struct {
 	StreamID           string
 	ContainerExtension string
 	UpdatedAt          time.Time
+	LastTappedAt       *time.Time
 }
 
 // EpisodeTarget represents an available episode and its Dispatcharr target URL.
 type EpisodeTarget struct {
-	SeasonNum  int
-	EpisodeNum int
-	TargetURL  string
+	SeasonNum    int
+	EpisodeNum   int
+	TargetURL    string
+	VariantKey   string
+	LastTappedAt *time.Time
 }
 
 // Open initializes the SQLite database at dbPath, enabling WAL mode and applying schema migrations.
@@ -159,6 +162,7 @@ func (d *DB) initSchema() error {
 		stream_id TEXT NOT NULL DEFAULT '',
 		container_extension TEXT NOT NULL DEFAULT 'mkv',
 		updated_at DATETIME NOT NULL,
+		last_tapped_at DATETIME,
 		UNIQUE(item_id, item_type, season_num, episode_num, variant_key)
 	);
 
@@ -211,6 +215,7 @@ func (d *DB) initSchema() error {
 		"ALTER TABLE movie_state ADD COLUMN folder_name TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE movie_state ADD COLUMN imdb_id TEXT NOT NULL DEFAULT '';",
 		"ALTER TABLE movie_state ADD COLUMN last_checked_at DATETIME;",
+		"ALTER TABLE stream_variants ADD COLUMN last_tapped_at DATETIME;",
 	}
 	for _, m := range migrations {
 		_, _ = d.conn.Exec(m) // Ignore error if column already exists
@@ -1025,7 +1030,7 @@ func (d *DB) GetNextSeriesEpisodes(seriesID, seasonNum, episodeNum int, variantK
 	              ORDER BY season_num ASC, episode_num ASC 
 	              LIMIT ?
 	          )
-	          SELECT ne.season_num, ne.episode_num, sv.target_url
+	          SELECT ne.season_num, ne.episode_num, sv.target_url, sv.variant_key, sv.last_tapped_at
 	          FROM next_eps ne
 	          JOIN stream_variants sv ON sv.item_id = ? AND sv.item_type = 'series'
 	            AND sv.season_num = ne.season_num AND sv.episode_num = ne.episode_num
@@ -1048,12 +1053,35 @@ func (d *DB) GetNextSeriesEpisodes(seriesID, seasonNum, episodeNum int, variantK
 	var targets []EpisodeTarget
 	for rows.Next() {
 		var t EpisodeTarget
-		if err := rows.Scan(&t.SeasonNum, &t.EpisodeNum, &t.TargetURL); err != nil {
+		var lastTapped sql.NullTime
+		if err := rows.Scan(&t.SeasonNum, &t.EpisodeNum, &t.TargetURL, &t.VariantKey, &lastTapped); err != nil {
 			return nil, err
+		}
+		if lastTapped.Valid {
+			t.LastTappedAt = &lastTapped.Time
 		}
 		targets = append(targets, t)
 	}
 	return targets, rows.Err()
+}
+
+// MarkStreamVariantTapped updates the last_tapped_at timestamp for a specific series episode stream variant.
+// Passing a zero time.Time{} clears the timestamp (sets to NULL).
+func (d *DB) MarkStreamVariantTapped(seriesID, seasonNum, epNum int, variantKey string, tappedAt time.Time) error {
+	if variantKey == "" {
+		variantKey = "base"
+	}
+	var val any = tappedAt
+	if tappedAt.IsZero() {
+		val = nil
+	}
+	query := `
+	UPDATE stream_variants
+	SET last_tapped_at = ?
+	WHERE item_id = ? AND item_type = 'series' AND season_num = ? AND episode_num = ? AND variant_key = ?
+	`
+	_, err := d.conn.Exec(query, val, seriesID, seasonNum, epNum, variantKey)
+	return err
 }
 
 // GetMovieStreamVariants retrieves all stream variant mappings for a movie.

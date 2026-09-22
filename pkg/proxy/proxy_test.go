@@ -332,6 +332,8 @@ func TestPredictiveFetchAhead(t *testing.T) {
 	}
 
 	// 5. Play S01E01 with variant "4k" -> should tap 4K variant for S01E02 and fallback to base for S02E01
+	// Clear tap cooldown on S02E01 from step 1 so it can be tapped again during this fallback test
+	_ = database.MarkStreamVariantTapped(seriesID, 2, 1, "base", time.Time{})
 	_ = database.SaveStreamVariant(&db.StreamVariant{
 		ItemID:     seriesID,
 		ItemType:   "series",
@@ -617,6 +619,236 @@ func TestProxyActivationSuccessNoS01E01StreamsBumper(t *testing.T) {
 	}
 	if rec.Header().Get("Content-Type") != "video/mp4" {
 		t.Errorf("Expected video/mp4 Content-Type for bumper, got %s", rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestPredictiveFetchAhead24HourCooldown(t *testing.T) {
+	tempDir := t.TempDir()
+	database, err := db.Open(filepath.Join(tempDir, "fetch_ahead_cooldown.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	var mu sync.Mutex
+	requestCount := 0
+	mockSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mock video chunk data for fetch ahead testing"))
+	}))
+	defer mockSC.Close()
+
+	seriesID := 555
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e01.mkv",
+	})
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e02.mkv",
+	})
+
+	cfg := &models.Config{
+		StreamcacheURL:  mockSC.URL,
+		FetchAheadCount: 1,
+		Port:            8080,
+	}
+	srv := NewServer(cfg, database, nil)
+
+	// 1. First trigger: should tap S01E02 and record last_tapped_at
+	srv.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+
+	mu.Lock()
+	if requestCount != 1 {
+		t.Fatalf("Expected 1 tap request, got %d", requestCount)
+	}
+	mu.Unlock()
+
+	eps, err := database.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("Failed to get next episode: %v", err)
+	}
+	if eps[0].LastTappedAt == nil {
+		t.Fatalf("Expected LastTappedAt to be populated after successful tap")
+	}
+
+	// 2. Second trigger immediately: should be SKIPPED due to 24-hour cooldown
+	srv.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+
+	mu.Lock()
+	if requestCount != 1 {
+		t.Errorf("Expected request count to remain 1 due to 24h cooldown, got %d", requestCount)
+	}
+	mu.Unlock()
+
+	// 3. Age the tap timestamp past 24 hours (e.g. 25 hours ago)
+	agedTime := time.Now().Add(-25 * time.Hour)
+	_ = database.MarkStreamVariantTapped(seriesID, 1, 2, "base", agedTime)
+
+	// 4. Third trigger after expiration: should tap again
+	srv.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+
+	mu.Lock()
+	if requestCount != 2 {
+		t.Errorf("Expected request count to be 2 after 24h expiration, got %d", requestCount)
+	}
+	mu.Unlock()
+
+	eps, _ = database.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if eps[0].LastTappedAt == nil || eps[0].LastTappedAt.Before(time.Now().Add(-1*time.Minute)) {
+		t.Errorf("Expected LastTappedAt to be refreshed to current time")
+	}
+}
+
+func TestPredictiveFetchAheadTapFailureDoesNotUpdateDB(t *testing.T) {
+	tempDir := t.TempDir()
+	database, err := db.Open(filepath.Join(tempDir, "fetch_ahead_failure.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 666
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e01.mkv",
+	})
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e02.mkv",
+	})
+
+	// Subcase A: Streamcache returns HTTP 502 Bad Gateway
+	mock502 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Bad Gateway from upstream IPTV", http.StatusBadGateway)
+	}))
+	cfg502 := &models.Config{
+		StreamcacheURL:  mock502.URL,
+		FetchAheadCount: 1,
+		Port:            8080,
+	}
+	srv502 := NewServer(cfg502, database, nil)
+	srv502.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+	mock502.Close()
+
+	eps, _ := database.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if eps[0].LastTappedAt != nil {
+		t.Errorf("Subcase A: LastTappedAt must be nil on HTTP 502, got %v", eps[0].LastTappedAt)
+	}
+
+	// Subcase B: Streamcache returns HTTP 200 OK but 0 bytes read
+	mockZeroBytes := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// No body written
+	}))
+	cfgZeroBytes := &models.Config{
+		StreamcacheURL:  mockZeroBytes.URL,
+		FetchAheadCount: 1,
+		Port:            8080,
+	}
+	srvZeroBytes := NewServer(cfgZeroBytes, database, nil)
+	srvZeroBytes.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+	mockZeroBytes.Close()
+
+	eps, _ = database.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if eps[0].LastTappedAt != nil {
+		t.Errorf("Subcase B: LastTappedAt must be nil on 0 bytes read, got %v", eps[0].LastTappedAt)
+	}
+
+	// Subcase C: Network connection refused
+	cfgNetErr := &models.Config{
+		StreamcacheURL:  "http://127.0.0.1:59999", // Unused port
+		FetchAheadCount: 1,
+		Port:            8080,
+	}
+	srvNetErr := NewServer(cfgNetErr, database, nil)
+	srvNetErr.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+
+	eps, _ = database.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if eps[0].LastTappedAt != nil {
+		t.Errorf("Subcase C: LastTappedAt must be nil on network error, got %v", eps[0].LastTappedAt)
+	}
+}
+
+func TestPredictiveFetchAheadInFlightDeduplication(t *testing.T) {
+	tempDir := t.TempDir()
+	database, err := db.Open(filepath.Join(tempDir, "fetch_ahead_inflight.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	var mu sync.Mutex
+	tapHits := 0
+	mockSlowSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		tapHits++
+		mu.Unlock()
+		time.Sleep(100 * time.Millisecond) // Simulate slow streamcache initial hydration
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("slow stream data payload for deduplication verification"))
+	}))
+	defer mockSlowSC.Close()
+
+	seriesID := 777
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e01.mkv",
+	})
+	_ = database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e02.mkv",
+	})
+
+	cfg := &models.Config{
+		StreamcacheURL:  mockSlowSC.URL,
+		FetchAheadCount: 1,
+		Port:            8080,
+	}
+	srv := NewServer(cfg, database, nil)
+
+	// Simulate 5 simultaneous rapid requests (e.g. Emby ffprobe/ffmpeg probing storm)
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			srv.triggerFetchAhead(seriesID, 1, 1, "base", 1)
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if tapHits != 1 {
+		t.Errorf("Expected exactly 1 tap hit due to in-flight deduplication, got %d", tapHits)
 	}
 }
 

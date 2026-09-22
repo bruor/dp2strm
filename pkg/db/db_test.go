@@ -717,6 +717,103 @@ func TestGetNextSeriesEpisodes(t *testing.T) {
 	}
 }
 
+func TestStreamVariantTappedTracking(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_db_tap_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	d, err := Open(filepath.Join(tempDir, "tap_test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer d.Close()
+
+	seriesID := 777
+	if err := d.SaveStreamVariant(&StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e01.mkv",
+	}); err != nil {
+		t.Fatalf("SaveStreamVariant failed: %v", err)
+	}
+	if err := d.SaveStreamVariant(&StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e02.mkv",
+	}); err != nil {
+		t.Fatalf("SaveStreamVariant failed: %v", err)
+	}
+
+	// 1. Initial state: LastTappedAt should be nil
+	res, err := d.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("Expected 1 episode, got %d", len(res))
+	}
+	if res[0].LastTappedAt != nil {
+		t.Errorf("Expected LastTappedAt to be nil initially, got %v", res[0].LastTappedAt)
+	}
+
+	// 2. Mark tapped at now
+	tapTime := time.Now().Truncate(time.Second)
+	if err := d.MarkStreamVariantTapped(seriesID, 1, 2, "base", tapTime); err != nil {
+		t.Fatalf("MarkStreamVariantTapped failed: %v", err)
+	}
+
+	// 3. Query again: LastTappedAt should be set
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if res[0].LastTappedAt == nil {
+		t.Fatalf("Expected LastTappedAt to be populated, got nil")
+	}
+	if res[0].LastTappedAt.Unix() != tapTime.Unix() {
+		t.Errorf("Expected LastTappedAt %v, got %v", tapTime, *res[0].LastTappedAt)
+	}
+
+	// 4. SaveStreamVariant on the same episode should PRESERVE last_tapped_at
+	if err := d.SaveStreamVariant(&StreamVariant{
+		ItemID:     seriesID,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 2,
+		VariantKey: "base",
+		TargetURL:  "https://dp.example.com/s01e02_updated.mkv",
+	}); err != nil {
+		t.Fatalf("SaveStreamVariant update failed: %v", err)
+	}
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if res[0].LastTappedAt == nil || res[0].LastTappedAt.Unix() != tapTime.Unix() {
+		t.Errorf("SaveStreamVariant should preserve LastTappedAt, got %v", res[0].LastTappedAt)
+	}
+
+	// 5. Clear tap timestamp with zero time
+	if err := d.MarkStreamVariantTapped(seriesID, 1, 2, "base", time.Time{}); err != nil {
+		t.Fatalf("MarkStreamVariantTapped clear failed: %v", err)
+	}
+	res, err = d.GetNextSeriesEpisodes(seriesID, 1, 1, "base", 1)
+	if err != nil {
+		t.Fatalf("GetNextSeriesEpisodes failed: %v", err)
+	}
+	if res[0].LastTappedAt != nil {
+		t.Errorf("Expected LastTappedAt to be nil after clearing, got %v", res[0].LastTappedAt)
+	}
+}
+
 func TestBatchStageMetadataUpgrade(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "dp2strm_db_meta_upgrade_*")
 	if err != nil {
