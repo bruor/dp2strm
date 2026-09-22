@@ -132,24 +132,37 @@ When mounting a shared host directory into Docker containers, permissions can be
 
 To ensure **any container or host user can read and write files** into the shared folder, follow this guide:
 
-### 1. Configure Host POSIX Default ACLs (One-Time Host Setup)
+### 1. Pre-Create Media Folders & Configure Host POSIX Default ACLs
 
-Run the following commands on your Linux host machine targeting your output directory (e.g. `/mnt/media/strm_output`):
+Before starting `dp2strm` or configuring Emby, manually pre-create the base output folder along with the `Movies` and `TV Shows` subdirectories on the host (e.g. `./strm` relative to your `docker-compose.yml`, or `/mnt/media/strm_output`), and configure POSIX Default ACLs so that newly created files automatically inherit full read/write permissions for all containers.
 
 ```bash
-# Step 1: Set POSIX Default Access Control Lists (ACLs)
-# This forces ALL newly created files and subdirectories to inherit full rwx permissions automatically!
-sudo setfacl -R -d -m g::rwx /mnt/media/strm_output
-sudo setfacl -R -d -m m::rwx /mnt/media/strm_output
+# Step 1: Create the base folder and required media subdirectories
+# (Run this in the directory where your docker-compose.yml is located)
+mkdir -p ./strm/Movies "./strm/TV Shows"
 
-# Step 2: Apply ACLs to existing files/directories
-sudo setfacl -R -m g::rwx /mnt/media/strm_output
-sudo setfacl -R -m m::rwx /mnt/media/strm_output
+# Step 2: Ensure permissive permissions on existing directories
+chmod -R 777 ./strm
+
+# Step 3: Set POSIX Default Access Control Lists (ACLs)
+# This forces ALL newly created files and subdirectories to inherit full rwx permissions automatically!
+sudo setfacl -R -d -m g::rwx ./strm
+sudo setfacl -R -d -m m::rwx ./strm
+
+# Step 4: Apply ACLs to existing directories
+sudo setfacl -R -m g::rwx ./strm
+sudo setfacl -R -m m::rwx ./strm
 ```
 
 #### **How This Works**:
 - **Automatic Inheritance**: Every new `.strm`, `.nfo`, or `poster.jpg` created by `dp2strm` inherits group `rwx` permissions automatically.
 - **`0666` / `0777` Creation Modes**: `dp2strm` creates files with `0666` mode and directories with `0777` mode so Linux kernel POSIX ACL inheritance works without permission masking.
+
+#### **Adding Folders to Emby**:
+Pre-creating these folders allows you to immediately browse and link them in Emby's library settings before or right after booting `dp2strm`:
+- **New Libraries**: Create a "Movies" library pointing to your mounted `Movies` folder and a "TV Shows" library pointing to your mounted `TV Shows` folder.
+- **Existing Multi-Path Libraries**: If you already have existing Movies or TV libraries with other paths (e.g. local NAS storage), simply open the library settings in Emby, click **Add Folder**, and add the new `Movies` / `TV Shows` path alongside your existing paths.
+- **Mount Path Alignment**: If Emby mounts the folder to a different container path than `dp2strm` (e.g. `dp2strm` uses `/data/strm` while Emby uses `/media/strm`), set `EMBY_MEDIA_PATH=/media/strm` in `dp2strm`'s environment so rescan notifications target the correct Emby container path.
 
 ---
 
