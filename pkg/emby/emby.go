@@ -127,10 +127,37 @@ func (c *Client) DiscoverLibraries(ctx context.Context) error {
 	return nil
 }
 
+// GetTVLibraryPath returns the active TV library path in Emby (overridden by EMBY_MEDIA_PATH if set).
+func (c *Client) GetTVLibraryPath() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cfg.EmbyMediaPath != "" {
+		return filepath.Join(c.cfg.EmbyMediaPath, "TV Shows")
+	}
+	return c.tvLibraryPath
+}
+
+// GetMoviesLibraryPath returns the active Movies library path in Emby (overridden by EMBY_MEDIA_PATH if set).
+func (c *Client) GetMoviesLibraryPath() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cfg.EmbyMediaPath != "" {
+		return filepath.Join(c.cfg.EmbyMediaPath, "Movies")
+	}
+	return c.moviesLibraryPath
+}
+
 // FindSeriesItemID resolves Emby's internal Item ID for a TV series using TMDB ID, IMDb ID, or Title.
-func (c *Client) FindSeriesItemID(ctx context.Context, tmdbID, imdbID, title string) (string, error) {
+// An optional expectedFolderName can be supplied to disambiguate if multiple items share the same provider IDs.
+func (c *Client) FindSeriesItemID(ctx context.Context, tmdbID, imdbID, title string, expectedFolderName ...string) (string, error) {
+	folderName := ""
+	if len(expectedFolderName) > 0 {
+		folderName = expectedFolderName[0]
+	}
+	tvDir := c.GetTVLibraryPath()
+
 	if tmdbID != "" {
-		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=tmdb.%s&IncludeItemTypes=Series", tmdbID)); id != "" {
+		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=tmdb.%s&IncludeItemTypes=Series", tmdbID), folderName, tvDir); id != "" {
 			return id, nil
 		}
 	}
@@ -139,13 +166,13 @@ func (c *Client) FindSeriesItemID(ctx context.Context, tmdbID, imdbID, title str
 		if !strings.HasPrefix(strings.ToLower(cleanIMDB), "tt") {
 			cleanIMDB = "tt" + cleanIMDB
 		}
-		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=imdb.%s&IncludeItemTypes=Series", cleanIMDB)); id != "" {
+		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=imdb.%s&IncludeItemTypes=Series", cleanIMDB), folderName, tvDir); id != "" {
 			return id, nil
 		}
 	}
 	if title != "" {
 		escaped := url.QueryEscape(title)
-		if id := c.queryItemID(ctx, fmt.Sprintf("searchTerm=%s&IncludeItemTypes=Series", escaped)); id != "" {
+		if id := c.queryItemID(ctx, fmt.Sprintf("searchTerm=%s&IncludeItemTypes=Series", escaped), folderName, tvDir); id != "" {
 			return id, nil
 		}
 	}
@@ -153,9 +180,16 @@ func (c *Client) FindSeriesItemID(ctx context.Context, tmdbID, imdbID, title str
 }
 
 // FindMovieItemID resolves Emby's internal Item ID for a Movie using TMDB ID, IMDb ID, or Title.
-func (c *Client) FindMovieItemID(ctx context.Context, tmdbID, imdbID, title string) (string, error) {
+// An optional expectedFolderName can be supplied to disambiguate if multiple items share the same provider IDs.
+func (c *Client) FindMovieItemID(ctx context.Context, tmdbID, imdbID, title string, expectedFolderName ...string) (string, error) {
+	folderName := ""
+	if len(expectedFolderName) > 0 {
+		folderName = expectedFolderName[0]
+	}
+	movieDir := c.GetMoviesLibraryPath()
+
 	if tmdbID != "" {
-		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=tmdb.%s&IncludeItemTypes=Movie", tmdbID)); id != "" {
+		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=tmdb.%s&IncludeItemTypes=Movie", tmdbID), folderName, movieDir); id != "" {
 			return id, nil
 		}
 	}
@@ -164,24 +198,24 @@ func (c *Client) FindMovieItemID(ctx context.Context, tmdbID, imdbID, title stri
 		if !strings.HasPrefix(strings.ToLower(cleanIMDB), "tt") {
 			cleanIMDB = "tt" + cleanIMDB
 		}
-		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=imdb.%s&IncludeItemTypes=Movie", cleanIMDB)); id != "" {
+		if id := c.queryItemID(ctx, fmt.Sprintf("AnyProviderIdEquals=imdb.%s&IncludeItemTypes=Movie", cleanIMDB), folderName, movieDir); id != "" {
 			return id, nil
 		}
 	}
 	if title != "" {
 		escaped := url.QueryEscape(title)
-		if id := c.queryItemID(ctx, fmt.Sprintf("searchTerm=%s&IncludeItemTypes=Movie", escaped)); id != "" {
+		if id := c.queryItemID(ctx, fmt.Sprintf("searchTerm=%s&IncludeItemTypes=Movie", escaped), folderName, movieDir); id != "" {
 			return id, nil
 		}
 	}
 	return "", nil
 }
 
-func (c *Client) queryItemID(ctx context.Context, queryParam string) string {
+func (c *Client) queryItemID(ctx context.Context, queryParam, expectedFolderName, expectedBaseDir string) string {
 	if !c.IsConfigured() {
 		return ""
 	}
-	searchURL := fmt.Sprintf("%s/Items?%s&Recursive=true", strings.TrimRight(c.cfg.EmbyURL, "/"), queryParam)
+	searchURL := fmt.Sprintf("%s/Items?%s&Recursive=true&Fields=Path", strings.TrimRight(c.cfg.EmbyURL, "/"), queryParam)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
 	if err != nil {
 		return ""
@@ -201,13 +235,49 @@ func (c *Client) queryItemID(ctx context.Context, queryParam string) string {
 
 	var res struct {
 		Items []struct {
-			ID string `json:"Id"`
+			ID   string `json:"Id"`
+			Path string `json:"Path"`
 		} `json:"Items"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil && len(res.Items) > 0 {
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil || len(res.Items) == 0 {
+		return ""
+	}
+
+	// 1. If only 1 item and no filter specified, return immediately
+	if len(res.Items) == 1 && expectedFolderName == "" && expectedBaseDir == "" {
 		return res.Items[0].ID
 	}
-	return ""
+
+	// 2. Exact match on both expectedBaseDir prefix and expectedFolderName tail
+	if expectedFolderName != "" && expectedBaseDir != "" {
+		for _, it := range res.Items {
+			if it.Path != "" && (strings.HasPrefix(it.Path, expectedBaseDir) || strings.Contains(it.Path, expectedBaseDir)) &&
+				(filepath.Base(it.Path) == expectedFolderName || strings.HasSuffix(filepath.Clean(it.Path), expectedFolderName)) {
+				return it.ID
+			}
+		}
+	}
+
+	// 3. Match on expectedFolderName tail
+	if expectedFolderName != "" {
+		for _, it := range res.Items {
+			if it.Path != "" && (filepath.Base(it.Path) == expectedFolderName || strings.HasSuffix(filepath.Clean(it.Path), expectedFolderName)) {
+				return it.ID
+			}
+		}
+	}
+
+	// 4. Match on expectedBaseDir prefix
+	if expectedBaseDir != "" {
+		for _, it := range res.Items {
+			if it.Path != "" && (strings.HasPrefix(it.Path, expectedBaseDir) || strings.Contains(it.Path, expectedBaseDir)) {
+				return it.ID
+			}
+		}
+	}
+
+	// Fallback to first item
+	return res.Items[0].ID
 }
 
 // RefreshItemByID sends a targeted metadata refresh directly to a specific series, season, or movie item in Emby.
@@ -489,6 +559,78 @@ func (c *Client) VerifyItemIndexed(ctx context.Context, itemType, tmdbID, imdbID
 		time.Sleep(1 * time.Second)
 	}
 	return false
+}
+
+// WaitForSeriesEpisodesIndexed polls Emby's GET /Shows/{seriesID}/Episodes until the series is reported
+// to have at least minEpisodes indexed, or until the S01E01 placeholder name changes, or until maxWait elapses.
+// While waiting, it aggressively cancels any active background global media library scans to prioritize the targeted series.
+func (c *Client) WaitForSeriesEpisodesIndexed(ctx context.Context, embySeriesID string, minEpisodes int, maxWait time.Duration) (int, bool) {
+	if !c.IsConfigured() || embySeriesID == "" {
+		return 0, true
+	}
+	if minEpisodes <= 0 {
+		minEpisodes = 2 // Default: more than just the initial placeholder episode
+	}
+	if maxWait <= 0 {
+		maxWait = 25 * time.Second
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.After(maxWait)
+	lastCount := 0
+
+	for {
+		// 1. Proactively cancel any running global scan that might lock Emby's library
+		_ = c.CancelRunningLibraryScan(ctx)
+
+		// 2. Query Emby for episode count and names under this specific series
+		epURL := fmt.Sprintf("%s/Shows/%s/Episodes", strings.TrimRight(c.cfg.EmbyURL, "/"), embySeriesID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, epURL, nil)
+		if err == nil {
+			req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
+			req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
+			if resp, rErr := c.httpClient.Do(req); rErr == nil {
+				var epRes struct {
+					TotalRecordCount int `json:"TotalRecordCount"`
+					Items            []struct {
+						Name              string `json:"Name"`
+						IndexNumber       int    `json:"IndexNumber"`
+						ParentIndexNumber int    `json:"ParentIndexNumber"`
+					} `json:"Items"`
+				}
+				if decErr := json.NewDecoder(resp.Body).Decode(&epRes); decErr == nil {
+					count := epRes.TotalRecordCount
+					if count == 0 && len(epRes.Items) > 0 {
+						count = len(epRes.Items)
+					}
+					lastCount = count
+					// Condition A: Emby has indexed multiple episodes
+					if count >= minEpisodes {
+						resp.Body.Close()
+						return count, true
+					}
+					// Condition B: S01E01 metadata was updated (no longer has the activation placeholder name)
+					for _, ep := range epRes.Items {
+						if ep.ParentIndexNumber == 1 && ep.IndexNumber == 1 && ep.Name != "" && !strings.Contains(ep.Name, "Activate") {
+							resp.Body.Close()
+							return count, true
+						}
+					}
+				}
+				resp.Body.Close()
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return lastCount, false
+		case <-timeout:
+			return lastCount, false
+		case <-ticker.C:
+		}
+	}
 }
 
 // NotifyMediaUpdated sends a POST /Library/Media/Updated notification to Emby for a specific item folder path.

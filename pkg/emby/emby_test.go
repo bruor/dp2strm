@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,15 +46,15 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 				},
 			})
 		case "/Items":
-			query := r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			if query == "AnyProviderIdEquals=tmdb.254528&IncludeItemTypes=Series&Recursive=true" {
+			pID := r.URL.Query().Get("AnyProviderIdEquals")
+			if pID == "tmdb.254528" {
 				json.NewEncoder(w).Encode(map[string]any{
 					"Items": []map[string]any{
 						{"Id": "49", "Name": "The Hawk"},
 					},
 				})
-			} else if query == "AnyProviderIdEquals=imdb.tt31038430&IncludeItemTypes=Series&Recursive=true" {
+			} else if pID == "imdb.tt31038430" {
 				json.NewEncoder(w).Encode(map[string]any{
 					"Items": []map[string]any{
 						{"Id": "5", "Name": "The Hunting Wives"},
@@ -229,6 +230,132 @@ func TestWaitForScanCompletion(t *testing.T) {
 	completed := client.WaitForScanCompletion(context.Background(), 10*time.Second)
 	if !completed {
 		t.Errorf("Expected WaitForScanCompletion to return true")
+	}
+}
+
+func TestFindSeriesItemIDDisambiguation(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/Library/VirtualFolders":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Name":           "TV shows",
+					"CollectionType": "tvshows",
+					"ItemId":         "103",
+					"Locations":      []string{"/media/strm/TV Shows", "/mnt/data/TV Shows"},
+					"LibraryOptions": map[string]any{"EnableRealtimeMonitor": true},
+				},
+			})
+		case r.URL.Path == "/Items" && r.URL.Query().Get("AnyProviderIdEquals") == "tmdb.90521":
+			// Return two items: one local (/mnt/data) and one STRM (/media/strm)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Items": []map[string]any{
+					{
+						"Id":   "38845669",
+						"Name": "Love Island USA",
+						"Path": "/mnt/data/TV Shows/Love Island USA",
+					},
+					{
+						"Id":   "41244834",
+						"Name": "Love Island USA",
+						"Path": "/media/strm/TV Shows/Love Island USA (2019) [tmdbid=90521]",
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	cfg := &models.Config{
+		EmbyURL:    mockServer.URL,
+		EmbyAPIKey: "test_key",
+	}
+	client := NewClient(cfg)
+	ctx := context.Background()
+	_ = client.DiscoverLibraries(ctx)
+
+	// 1. Without folder name, auto-discovered TV library path (/media/strm/TV Shows) prefers the STRM item
+	idAutoBase, err := client.FindSeriesItemID(ctx, "90521", "", "Love Island USA")
+	if err != nil || idAutoBase != "41244834" {
+		t.Errorf("Expected auto-discovered STRM ID 41244834, got %q, err %v", idAutoBase, err)
+	}
+
+	// 2. With expected STRM folder name, disambiguates to the STRM series (41244834)
+	idWithFolder, err := client.FindSeriesItemID(ctx, "90521", "", "Love Island USA", "Love Island USA (2019) [tmdbid=90521]")
+	if err != nil || idWithFolder != "41244834" {
+		t.Errorf("Expected STRM series ID 41244834, got %q, err %v", idWithFolder, err)
+	}
+
+	// 3. With local folder name, disambiguates to the local media series (38845669)
+	idLocalFolder, err := client.FindSeriesItemID(ctx, "90521", "", "Love Island USA", "Love Island USA")
+	if err != nil || idLocalFolder != "38845669" {
+		t.Errorf("Expected local media series ID 38845669, got %q, err %v", idLocalFolder, err)
+	}
+}
+
+func TestWaitForSeriesEpisodesIndexed(t *testing.T) {
+	pollCount := 0
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/ScheduledTasks":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Key": "RefreshLibrary", "State": "Idle"},
+			})
+		case strings.HasPrefix(r.URL.Path, "/Shows/41244834/Episodes"):
+			pollCount++
+			if pollCount == 1 {
+				// Initial state: only 1 placeholder episode
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"TotalRecordCount": 1,
+					"Items": []map[string]any{
+						{
+							"IndexNumber":       1,
+							"ParentIndexNumber": 1,
+							"Name":              "⚡ Play to Activate Series",
+						},
+					},
+				})
+			} else {
+				// Second poll: newly scanned 10 episodes
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"TotalRecordCount": 10,
+					"Items": []map[string]any{
+						{
+							"IndexNumber":       1,
+							"ParentIndexNumber": 1,
+							"Name":              "Episode 1",
+						},
+						{
+							"IndexNumber":       2,
+							"ParentIndexNumber": 1,
+							"Name":              "Episode 2",
+						},
+					},
+				})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	cfg := &models.Config{
+		EmbyURL:    mockServer.URL,
+		EmbyAPIKey: "test_key",
+	}
+	client := NewClient(cfg)
+	ctx := context.Background()
+
+	count, confirmed := client.WaitForSeriesEpisodesIndexed(ctx, "41244834", 2, 5*time.Second)
+	if !confirmed {
+		t.Fatalf("Expected WaitForSeriesEpisodesIndexed to confirm")
+	}
+	if count != 10 {
+		t.Errorf("Expected 10 episodes, got %d", count)
 	}
 }
 

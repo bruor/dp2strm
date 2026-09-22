@@ -2,11 +2,9 @@ package syncer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1280,7 +1278,8 @@ func (s *Syncer) CancelRunningEmbyScan(ctx context.Context) error {
 	return nil
 }
 
-// TriggerTargetedEmbySeriesRefresh triggers a targeted Emby rescan for the activated series by TMDB ID or title.
+// TriggerTargetedEmbySeriesRefresh triggers a targeted Emby rescan for the activated series by TMDB ID, title, and folder name,
+// and sits on the VIP lock until Emby confirms that the newly populated episodes are indexed.
 func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID int) {
 	if s.cfg.EmbyURL == "" || s.cfg.EmbyAPIKey == "" {
 		return
@@ -1291,12 +1290,13 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		_ = s.embyClient.CancelRunningLibraryScan(ctx)
 	}
 
-	var tmdbID, imdbID, title string
+	var tmdbID, imdbID, title, folderName string
 	if s.database != nil {
 		if st, _ := s.database.GetSeriesState(seriesID); st != nil {
 			tmdbID = st.TMDBID
 			imdbID = st.IMDBID
 			title = st.Title
+			folderName = st.FolderName
 		}
 	}
 
@@ -1305,54 +1305,30 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 		s.embyClient.WaitForPlaybackSession(ctx, tmdbID, imdbID, title, s.cfg.ActivationRefreshDelay)
 	}
 
-	// Helper to search Emby by query parameter and return internal Item ID
-	findEmbyItemID := func(param string) string {
-		searchURL := fmt.Sprintf("%s/Items?%s&IncludeItemTypes=Series&Recursive=true", strings.TrimRight(s.cfg.EmbyURL, "/"), param)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
-		if err != nil {
-			return ""
-		}
-		req.Header.Set("X-Emby-Token", s.cfg.EmbyAPIKey)
-		req.Header.Set("X-MediaBrowser-Token", s.cfg.EmbyAPIKey)
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil || resp == nil {
-			return ""
-		}
-		defer resp.Body.Close()
-
-		var searchResult struct {
-			Items []struct {
-				ID string `json:"Id"`
-			} `json:"Items"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&searchResult); err == nil && len(searchResult.Items) > 0 {
-			return searchResult.Items[0].ID
-		}
-		return ""
-	}
-
 	var embyItemID string
-	if tmdbID != "" {
-		embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=tmdb.%s", tmdbID))
-	}
-	if embyItemID == "" && imdbID != "" {
-		cleanIMDB := imdbID
-		if !strings.HasPrefix(strings.ToLower(cleanIMDB), "tt") {
-			cleanIMDB = "tt" + cleanIMDB
+	if s.embyClient != nil && s.embyClient.IsConfigured() {
+		var err error
+		embyItemID, err = s.embyClient.FindSeriesItemID(ctx, tmdbID, imdbID, title, folderName)
+		if err != nil {
+			log.Printf("[Emby] Error finding series Item ID for %q: %v", title, err)
 		}
-		embyItemID = findEmbyItemID(fmt.Sprintf("AnyProviderIdEquals=imdb.%s", cleanIMDB))
-	}
-	if embyItemID == "" && title != "" {
-		escapedTitle := url.QueryEscape(title)
-		embyItemID = findEmbyItemID(fmt.Sprintf("searchTerm=%s", escapedTitle))
 	}
 
 	if embyItemID != "" {
 		if s.embyClient != nil && s.embyClient.IsConfigured() {
+			startTime := time.Now()
 			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
 			_ = s.embyClient.RefreshSeriesEpisodes(ctx, embyItemID)
-			log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s)", title, embyItemID)
+			log.Printf("[Emby] Successfully triggered targeted series item refresh for %q (Emby Item ID: %s, Folder: %q)", title, embyItemID, folderName)
+
+			// Wait for evidence that Emby has actually scanned and indexed the episodes before releasing VIP lock
+			epCount, confirmed := s.embyClient.WaitForSeriesEpisodesIndexed(ctx, embyItemID, 2, 25*time.Second)
+			elapsed := time.Since(startTime).Round(100 * time.Millisecond)
+			if confirmed {
+				log.Printf("[Emby] ✅ Verified series %q successfully indexed in Emby (%d episodes confirmed in %s). Ready to release VIP lock.", title, epCount, elapsed)
+			} else {
+				log.Printf("[Emby] ⚠️ Timed out waiting for Emby to index episodes for %q after %s (%d episodes visible). Releasing VIP lock.", title, elapsed, epCount)
+			}
 			return
 		}
 	}
