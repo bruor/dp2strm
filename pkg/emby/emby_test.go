@@ -170,7 +170,7 @@ func TestEmbyDiscoveryAndTargetedRefresh(t *testing.T) {
 	}
 
 	// 7. Test CancelRunningLibraryScan
-	if err := client.CancelRunningLibraryScan(ctx); err != nil {
+	if _, err := client.CancelRunningLibraryScan(ctx); err != nil {
 		t.Errorf("CancelRunningLibraryScan failed: %v", err)
 	}
 

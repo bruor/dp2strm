@@ -38,6 +38,7 @@ type Syncer struct {
 	activationMu      sync.Mutex
 	activationCond    *sync.Cond
 	activeActivations int64
+	interruptedScan   bool
 
 	// Queue progress and Emby scan timing metrics
 	progressMu         sync.Mutex
@@ -1227,7 +1228,12 @@ func (s *Syncer) BeginVIPActivation(ctx context.Context, seriesID int) func() {
 	s.activationMu.Unlock()
 
 	log.Printf("[VIP Activation] ⚡ VIP lock acquired for Series ID %d (active: %d). Pausing background batch workers...", seriesID, activeCount)
-	_ = s.CancelRunningEmbyScan(ctx)
+	cancelled, _ := s.CancelRunningEmbyScan(ctx)
+	if cancelled {
+		s.activationMu.Lock()
+		s.interruptedScan = true
+		s.activationMu.Unlock()
+	}
 
 	return func() {
 		s.activationMu.Lock()
@@ -1236,12 +1242,25 @@ func (s *Syncer) BeginVIPActivation(ctx context.Context, seriesID int) func() {
 			s.activeActivations = 0
 		}
 		remaining := s.activeActivations
+		shouldRecallScan := false
 		if remaining == 0 {
-			s.activationCond.Broadcast()
+			shouldRecallScan = s.interruptedScan
+			s.interruptedScan = false
 		}
 		s.activationMu.Unlock()
 
 		if remaining == 0 {
+			if shouldRecallScan && s.embyClient != nil && s.embyClient.IsConfigured() {
+				log.Printf("[VIP Activation] ⚡ Interrupted global library scan detected. Recalling Emby media library scan before releasing worker lock...")
+				_ = s.embyClient.TriggerGlobalRefresh(ctx)
+				// Wait 2s for Emby task state to transition to Running
+				time.Sleep(2 * time.Second)
+			}
+
+			s.activationMu.Lock()
+			s.activationCond.Broadcast()
+			s.activationMu.Unlock()
+
 			log.Printf("[VIP Activation] ⚡ All VIP series activations completed. Resuming background batch workers.")
 		} else {
 			log.Printf("[VIP Activation] ⚡ VIP activation for Series ID %d completed (%d still active).", seriesID, remaining)
@@ -1271,11 +1290,12 @@ func (s *Syncer) IsVIPActivationInProgress() bool {
 }
 
 // CancelRunningEmbyScan cancels any active global media library scan in Emby to immediately clear the way for VIP item activations.
-func (s *Syncer) CancelRunningEmbyScan(ctx context.Context) error {
+// Returns whether an active scan was actually running and cancelled.
+func (s *Syncer) CancelRunningEmbyScan(ctx context.Context) (bool, error) {
 	if s.embyClient != nil && s.embyClient.IsConfigured() {
 		return s.embyClient.CancelRunningLibraryScan(ctx)
 	}
-	return nil
+	return false, nil
 }
 
 // TriggerTargetedEmbySeriesRefresh triggers a targeted Emby rescan for the activated series by TMDB ID, title, and folder name,
@@ -1287,7 +1307,7 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 
 	// Stop any background global scan to ensure the targeted item refresh is processed with zero delay
 	if s.embyClient != nil && s.embyClient.IsConfigured() {
-		_ = s.embyClient.CancelRunningLibraryScan(ctx)
+		_, _ = s.embyClient.CancelRunningLibraryScan(ctx)
 	}
 
 	var tmdbID, imdbID, title, folderName string
@@ -1953,6 +1973,12 @@ func (s *Syncer) verifyAndFlushBatch(ctx context.Context, workerID int, tasks []
 
 	// If a VIP activation cancelled the scan during WaitForScanCompletion, wait for it to finish
 	s.WaitForVIPActivations(ctx)
+
+	// If Emby is currently performing a scan (e.g. recalled after interrupted VIP activations), wait for it to finish
+	if s.embyClient.IsLibraryScanRunning(ctx) {
+		log.Printf("[Ingest] Waiting for recalled Emby library scan to complete and reach Idle before next batch...")
+		_ = s.embyClient.WaitForScanCompletion(ctx, 24*time.Hour)
+	}
 }
 
 func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (error, *itemSummary) {

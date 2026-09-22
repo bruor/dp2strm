@@ -583,7 +583,7 @@ func (c *Client) WaitForSeriesEpisodesIndexed(ctx context.Context, embySeriesID 
 
 	for {
 		// 1. Proactively cancel any running global scan that might lock Emby's library
-		_ = c.CancelRunningLibraryScan(ctx)
+		_, _ = c.CancelRunningLibraryScan(ctx)
 
 		// 2. Query Emby for episode count and names under this specific series
 		epURL := fmt.Sprintf("%s/Shows/%s/Episodes", strings.TrimRight(c.cfg.EmbyURL, "/"), embySeriesID)
@@ -789,9 +789,10 @@ func (c *Client) IsLibraryScanRunning(ctx context.Context) bool {
 
 // CancelRunningLibraryScan checks if a global media library scan (RefreshLibrary) is currently running or cancelling in Emby,
 // sends cancellation, and ensures it reaches Idle state so high-priority activations are not delayed or blocked by queued scans.
-func (c *Client) CancelRunningLibraryScan(ctx context.Context) error {
+// Returns whether an active scan was actually running and cancelled.
+func (c *Client) CancelRunningLibraryScan(ctx context.Context) (bool, error) {
 	if !c.IsConfigured() {
-		return nil
+		return false, nil
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -800,13 +801,13 @@ func (c *Client) CancelRunningLibraryScan(ctx context.Context) error {
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return cancelledAny, ctx.Err()
 		default:
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/ScheduledTasks", strings.TrimRight(c.cfg.EmbyURL, "/")), nil)
 		if err != nil {
-			return err
+			return cancelledAny, err
 		}
 		req.Header.Set("X-Emby-Token", c.cfg.EmbyAPIKey)
 		req.Header.Set("X-MediaBrowser-Token", c.cfg.EmbyAPIKey)
@@ -819,7 +820,7 @@ func (c *Client) CancelRunningLibraryScan(ctx context.Context) error {
 
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return fmt.Errorf("ScheduledTasks returned status %d", resp.StatusCode)
+			return cancelledAny, fmt.Errorf("ScheduledTasks returned status %d", resp.StatusCode)
 		}
 
 		var tasks []struct {
@@ -848,6 +849,7 @@ func (c *Client) CancelRunningLibraryScan(ctx context.Context) error {
 					}
 				} else if t.State == "Cancelling" {
 					stillBusy = true
+					cancelledAny = true
 				}
 				break
 			}
@@ -857,11 +859,11 @@ func (c *Client) CancelRunningLibraryScan(ctx context.Context) error {
 			if cancelledAny {
 				log.Printf("[Emby] Active media library scan confirmed stopped and Idle.")
 			}
-			return nil
+			return cancelledAny, nil
 		}
 
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	return nil
+	return cancelledAny, nil
 }

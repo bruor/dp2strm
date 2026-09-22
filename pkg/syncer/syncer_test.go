@@ -2,12 +2,14 @@ package syncer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -462,6 +464,77 @@ func TestVIPActivationPauseCoordination(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("Worker failed to unblock after all VIP activation locks were released")
 	}
+}
+
+func TestVIPActivationRecallsInterruptedScan(t *testing.T) {
+	scanState := "Running"
+	refreshTriggered := false
+	var mu sync.Mutex
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch r.URL.Path {
+		case "/ScheduledTasks":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id":    "task123",
+					"Key":   "RefreshLibrary",
+					"Name":  "Scan media library",
+					"State": scanState,
+				},
+			})
+		case "/ScheduledTasks/Running/task123":
+			if r.Method == http.MethodDelete {
+				scanState = "Idle"
+				w.WriteHeader(http.StatusNoContent)
+			}
+		case "/Library/Refresh":
+			refreshTriggered = true
+			scanState = "Running"
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer mockServer.Close()
+
+	cfg := &models.Config{
+		EmbyURL:    mockServer.URL,
+		EmbyAPIKey: "test_key",
+	}
+	s := NewSyncer(cfg, nil, nil)
+	ctx := context.Background()
+
+	// 1. Acquire VIP lock while a scan is running
+	unlock := s.BeginVIPActivation(ctx, 5001)
+
+	// Verify interruptedScan was recorded
+	s.activationMu.Lock()
+	if !s.interruptedScan {
+		t.Errorf("Expected interruptedScan to be true after stopping active scan")
+	}
+	s.activationMu.Unlock()
+
+	// 2. Release VIP lock
+	unlock()
+
+	// 3. Verify scan was recalled (re-triggered) and flag was cleared
+	mu.Lock()
+	recalled := refreshTriggered
+	mu.Unlock()
+
+	if !recalled {
+		t.Errorf("Expected global scan to be recalled after interrupted scan completed")
+	}
+
+	s.activationMu.Lock()
+	if s.interruptedScan {
+		t.Errorf("Expected interruptedScan to be reset to false after release")
+	}
+	s.activationMu.Unlock()
 }
 
 func TestReconcileDiskStateNoRedundantTasks(t *testing.T) {
