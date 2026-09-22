@@ -115,6 +115,7 @@ services:
 
       # Streamcache Integration (Optional)
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
+      - STREAMCACHE_DISPATCHARR_URL= # Optional override: Dispatcharr URL streamcache should use (e.g. https://dp.example.com)
       - FETCH_AHEAD_COUNT=0 # Default: 0 (disabled). Set to 1 or 2 when STREAMCACHE_URL is set
 
       # Retention & Emby Hooks
@@ -196,6 +197,7 @@ services:
 | `ENABLE_NFO` | `false` | Enable local NFO metadata generation for actual content (`false` = disabled by default so Emby scrapes TMDB/TVDB directly; synthetic `S01E01` instructions NFO is always generated for unactivated shows) |
 | `ACTIVATION_REFRESH_DELAY` | `10s` | Maximum wait duration for active Emby playback session verification before triggering targeted metadata refresh (Default: `10s`) |
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
+| `STREAMCACHE_DISPATCHARR_URL` | `""` | Optional override for Dispatcharr URL passed to `streamcache` (e.g. `https://dp.example.com` when internal Docker URL differs) |
 | `FETCH_AHEAD_COUNT` | `0` | Number of upcoming TV episodes to pre-fetch for cache warming (default `0` = disabled) |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |

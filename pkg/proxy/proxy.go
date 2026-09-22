@@ -167,13 +167,25 @@ func (s *Server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(tasks)
 }
 
-// format302Target formats the final 302 target URL, appending ?url= parameter for streamcache if configured.
-func format302Target(rawURL, streamcacheURL string) string {
+// format302Target formats the final 302 target URL, dynamically rewriting Dispatcharr's base URL
+// to streamcacheDispatcharrURL (if configured) and appending ?url= parameter for streamcache.
+func format302Target(rawURL, streamcacheURL, streamcacheDispatcharrURL, dispatcharrURL string) string {
+	if streamcacheDispatcharrURL != "" && dispatcharrURL != "" {
+		origBase := strings.TrimRight(dispatcharrURL, "/")
+		targetBase := strings.TrimRight(streamcacheDispatcharrURL, "/")
+		if strings.HasPrefix(rawURL, origBase) {
+			rawURL = targetBase + strings.TrimPrefix(rawURL, origBase)
+		}
+	}
 	if streamcacheURL == "" {
 		return rawURL
 	}
 	escapedURL := url.QueryEscape(rawURL)
 	return fmt.Sprintf("%s?url=%s", strings.TrimRight(streamcacheURL, "/"), escapedURL)
+}
+
+func (s *Server) formatRedirect(rawURL string) string {
+	return format302Target(rawURL, s.cfg.StreamcacheURL, s.cfg.StreamcacheDispatcharrURL, s.cfg.DispatcharrURL)
 }
 
 func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +283,7 @@ func (s *Server) handleMoviePlay(w http.ResponseWriter, r *http.Request) {
 		targetURL = fmt.Sprintf("%s/movie/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID)
 	}
 
-	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+	finalRedirectURL := s.formatRedirect(targetURL)
 	log.Printf("[Proxy] Movie %s (Resolved ID: %d, Variant '%s') -> HTTP 302 Redirect: %s", rawID, movieID, variantKey, finalRedirectURL)
 	http.Redirect(w, r, finalRedirectURL, http.StatusFound)
 }
@@ -391,7 +403,7 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 
 	// 2. If targetURL is available for the requested season/episode, redirect immediately!
 	if targetURL != "" {
-		finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+		finalRedirectURL := s.formatRedirect(targetURL)
 		log.Printf("[Proxy] Series %s (Resolved ID: %d) S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", rawSeriesID, seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
 
 		// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
@@ -420,7 +432,7 @@ func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey st
 		if ep.TargetURL == "" {
 			continue
 		}
-		tapURL := format302Target(ep.TargetURL, s.cfg.StreamcacheURL)
+		tapURL := s.formatRedirect(ep.TargetURL)
 		log.Printf("[Proxy] Fetch-ahead tap (500ms): Series %d S%02dE%02d -> %s", seriesID, ep.SeasonNum, ep.EpisodeNum, tapURL)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -471,7 +483,7 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("%s/series/%s/%s/%d.mkv", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, seriesID)
 	}
-	finalRedirectURL := format302Target(targetURL, s.cfg.StreamcacheURL)
+	finalRedirectURL := s.formatRedirect(targetURL)
 
 	// Sub-50ms Immediate 302 Redirect!
 	http.Redirect(w, r, finalRedirectURL, http.StatusFound)

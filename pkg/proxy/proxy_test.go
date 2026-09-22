@@ -383,3 +383,94 @@ func TestPredictiveFetchAhead(t *testing.T) {
 	}
 }
 
+func TestStreamcacheDispatcharrURLOverride(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_url_override_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	database, err := db.Open(filepath.Join(tempDir, "proxy_test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	// Seed movie with internal docker URL
+	movieTarget := "http://dispatcharr:9191/movie/dp2strm/mockpassword/1288105.mkv"
+	database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     1288105,
+		ItemType:   "movie",
+		VariantKey: "base",
+		TargetURL:  movieTarget,
+	})
+
+	// Seed series episode with internal docker URL
+	seriesTarget := "http://dispatcharr:9191/series/dp2strm/mockpassword/438365.mkv"
+	database.SaveStreamVariant(&db.StreamVariant{
+		ItemID:     30998,
+		ItemType:   "series",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+		VariantKey: "base",
+		TargetURL:  seriesTarget,
+	})
+
+	cfg := &models.Config{
+		DispatcharrURL:            "http://dispatcharr:9191",
+		StreamcacheURL:            "http://streamcache:8080",
+		StreamcacheDispatcharrURL: "https://dp.example.com",
+		Port:                      8080,
+	}
+
+	srv := NewServer(cfg, database, nil)
+
+	// 1. Test Movie Redirect: http://dispatcharr:9191 should be replaced with https://dp.example.com
+	req := httptest.NewRequest("GET", "/play/movie/1288105", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for movie play, got %d", rec.Code)
+	}
+	expectedRewrittenMovie := "https://dp.example.com/movie/dp2strm/mockpassword/1288105.mkv"
+	expectedMovieLoc := "http://streamcache:8080?url=" + url.QueryEscape(expectedRewrittenMovie)
+	if loc := rec.Header().Get("Location"); loc != expectedMovieLoc {
+		t.Errorf("Expected movie location:\n%s\ngot:\n%s", expectedMovieLoc, loc)
+	}
+
+	// 2. Test Series Redirect: http://dispatcharr:9191 should be replaced with https://dp.example.com
+	req = httptest.NewRequest("GET", "/play/series/30998/1/1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for series play, got %d", rec.Code)
+	}
+	expectedRewrittenSeries := "https://dp.example.com/series/dp2strm/mockpassword/438365.mkv"
+	expectedSeriesLoc := "http://streamcache:8080?url=" + url.QueryEscape(expectedRewrittenSeries)
+	if loc := rec.Header().Get("Location"); loc != expectedSeriesLoc {
+		t.Errorf("Expected series location:\n%s\ngot:\n%s", expectedSeriesLoc, loc)
+	}
+
+	// 3. Test without StreamcacheURL: should redirect directly to https://dp.example.com
+	cfgDirect := &models.Config{
+		DispatcharrURL:            "http://dispatcharr:9191",
+		StreamcacheURL:            "",
+		StreamcacheDispatcharrURL: "https://dp.example.com",
+		Port:                      8080,
+	}
+	srvDirect := NewServer(cfgDirect, database, nil)
+
+	req = httptest.NewRequest("GET", "/play/movie/1288105", nil)
+	rec = httptest.NewRecorder()
+	srvDirect.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("Expected 302 Found for direct movie play, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != expectedRewrittenMovie {
+		t.Errorf("Expected direct location %s, got %s", expectedRewrittenMovie, loc)
+	}
+}
+

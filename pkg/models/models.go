@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,7 @@ type Config struct {
 	XCPassword            string        `json:"xc_password"`
 	OutputDir             string        `json:"output_dir"`
 	StreamcacheURL        string        `json:"streamcache_url"`
+	StreamcacheDispatcharrURL string        `json:"streamcache_dispatcharr_url"`
 	FetchAheadCount       int           `json:"fetch_ahead_count"`
 	RetentionGraceDays    int           `json:"retention_grace_days"`
 	Port                  int           `json:"port"`
@@ -42,6 +44,14 @@ type Config struct {
 	Ordering               string        `json:"ordering"`
 	EnableNFO              bool          `json:"enable_nfo"`
 	ActivationRefreshDelay time.Duration `json:"activation_refresh_delay"`
+}
+
+// GetDispatcharrStreamURL returns StreamcacheDispatcharrURL if set, otherwise falls back to DispatcharrURL.
+func (c *Config) GetDispatcharrStreamURL() string {
+	if c.StreamcacheDispatcharrURL != "" {
+		return strings.TrimRight(c.StreamcacheDispatcharrURL, "/")
+	}
+	return strings.TrimRight(c.DispatcharrURL, "/")
 }
 
 // Special activation placeholder identifiers (Season 01 Episode 01)

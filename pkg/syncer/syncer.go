@@ -783,9 +783,9 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		// Record real stream 302 target URL in SQLite
 		var realTargetURL string
 		if ep.UUID != "" && s.cfg.APIKey != "" {
-			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s?api_key=%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), ep.UUID, s.cfg.APIKey)
+			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s?api_key=%s", s.cfg.GetDispatcharrStreamURL(), ep.UUID, s.cfg.APIKey)
 		} else {
-			realTargetURL = fmt.Sprintf("%s/series/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
+			realTargetURL = fmt.Sprintf("%s/series/%s/%s/%d.%s", s.cfg.GetDispatcharrStreamURL(), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
 		}
 		if s.database != nil {
 			s.database.SaveStreamVariant(&db.StreamVariant{
@@ -1017,9 +1017,9 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 
 			var realTargetURL string
 			if targetUUID != "" && s.cfg.APIKey != "" {
-				realTargetURL = fmt.Sprintf("%s/proxy/vod/movie/%s?api_key=%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), targetUUID, s.cfg.APIKey)
+				realTargetURL = fmt.Sprintf("%s/proxy/vod/movie/%s?api_key=%s", s.cfg.GetDispatcharrStreamURL(), targetUUID, s.cfg.APIKey)
 			} else {
-				realTargetURL = fmt.Sprintf("%s/movie/%s/%s/%d.%s", strings.TrimRight(s.cfg.DispatcharrURL, "/"), s.cfg.XCUser, s.cfg.XCPassword, movieID, v.Container)
+				realTargetURL = fmt.Sprintf("%s/movie/%s/%s/%d.%s", s.cfg.GetDispatcharrStreamURL(), s.cfg.XCUser, s.cfg.XCPassword, movieID, v.Container)
 			}
 
 			if varKey == "base" && baseTargetURL == "" {

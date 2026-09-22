@@ -20,9 +20,10 @@ func DefaultConfig() *models.Config {
 		XCUser:                "username",
 		XCPassword:            "password",
 		OutputDir:             "/data/strm",
-		StreamcacheURL:        "",
-		FetchAheadCount:       0,
-		RetentionGraceDays:    7,
+		StreamcacheURL:            "",
+		StreamcacheDispatcharrURL: "",
+		FetchAheadCount:           0,
+		RetentionGraceDays:        7,
 		Port:                  8080,
 		URL:                   "http://localhost:8080",
 		SyncInterval:          4 * time.Hour,
@@ -73,6 +74,11 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("STREAMCACHE_URL"); v != "" {
 		cfg.StreamcacheURL = v
+	}
+	if v := os.Getenv("STREAMCACHE_DISPATCHARR_URL"); v != "" {
+		cfg.StreamcacheDispatcharrURL = v
+	} else if v := os.Getenv("DISPATCHARR_STREAM_URL"); v != "" {
+		cfg.StreamcacheDispatcharrURL = v
 	}
 	if v := os.Getenv("FETCH_AHEAD_COUNT"); v != "" {
 		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
