@@ -78,7 +78,7 @@ func main() {
 	// Series Activation Callback Worker (auto-resolves canonical title & folder)
 	onActivation := func(seriesID int) error {
 		log.Printf("[Activation] Fast stream resolution activated for Series ID %d...", seriesID)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 
 		// Acquire VIP activation lock to halt any running global scan and pause background batch workers
 		unlock := syncEngine.BeginVIPActivation(ctx, seriesID)

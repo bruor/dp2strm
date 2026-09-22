@@ -1336,8 +1336,8 @@ func (s *Syncer) TriggerTargetedEmbySeriesRefresh(ctx context.Context, seriesID 
 			_ = s.embyClient.RefreshItemByID(ctx, embyItemID)
 			log.Printf("[Emby] Triggered targeted series refresh for %q (Emby Item ID: %s, Folder: %q)", title, embyItemID, folderName)
 
-			// 2. Wait for evidence that Emby has scanned the folder and indexed the new episodes
-			epCount, confirmed := s.embyClient.WaitForSeriesEpisodesIndexed(ctx, embyItemID, 2, 25*time.Second)
+			// 2. Wait for evidence that Emby has scanned the folder and indexed the new episodes (up to 2 minutes for large multi-season series)
+			epCount, confirmed := s.embyClient.WaitForSeriesEpisodesIndexed(ctx, embyItemID, 2, 2*time.Minute)
 			elapsed := time.Since(startTime).Round(100 * time.Millisecond)
 			if confirmed {
 				log.Printf("[Emby] ✅ Verified series %q successfully indexed in Emby (%d episodes confirmed in %s).", title, epCount, elapsed)
