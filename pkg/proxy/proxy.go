@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/pprof"
@@ -460,7 +461,11 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey string, count int) {
 	nextEps, err := s.database.GetNextSeriesEpisodes(seriesID, seasonNum, epNum, variantKey, count)
-	if err != nil || len(nextEps) == 0 {
+	if err != nil {
+		log.Printf("[Proxy] Fetch-ahead error querying upcoming episodes for series %d: %v", seriesID, err)
+		return
+	}
+	if len(nextEps) == 0 {
 		return
 	}
 
@@ -469,17 +474,32 @@ func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey st
 			continue
 		}
 		tapURL := s.formatRedirect(ep.TargetURL)
-		log.Printf("[Proxy] Fetch-ahead tap (500ms): Series %d S%02dE%02d -> %s", seriesID, ep.SeasonNum, ep.EpisodeNum, tapURL)
+		log.Printf("[Proxy] Fetch-ahead tap (5s): Series %d S%02dE%02d -> %s", seriesID, ep.SeasonNum, ep.EpisodeNum, tapURL)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, tapURL, nil)
-		if err == nil {
-			resp, pErr := http.DefaultClient.Do(req)
-			if pErr == nil && resp != nil {
-				_ = resp.Body.Close()
-			}
+		if err != nil {
+			cancel()
+			log.Printf("[Proxy] Fetch-ahead error building request: %v", err)
+			continue
 		}
+		req.Header.Set("User-Agent", "dp2strm-fetch-ahead/1.0")
+
+		resp, pErr := http.DefaultClient.Do(req)
+		if pErr != nil {
+			log.Printf("[Proxy] Fetch-ahead tap request failed for Series %d S%02dE%02d: %v", seriesID, ep.SeasonNum, ep.EpisodeNum, pErr)
+			cancel()
+			continue
+		}
+
+		// Read a small initial buffer (64 KB) to ensure streamcache establishes the upstream
+		// hydration worker and begins background caching before we disconnect.
+		buf := make([]byte, 64*1024)
+		n, _ := io.ReadFull(resp.Body, buf)
+		_ = resp.Body.Close()
 		cancel()
+
+		log.Printf("[Proxy] Fetch-ahead tap latched: Series %d S%02dE%02d (status: %d, read %d bytes)", seriesID, ep.SeasonNum, ep.EpisodeNum, resp.StatusCode, n)
 	}
 }
 
