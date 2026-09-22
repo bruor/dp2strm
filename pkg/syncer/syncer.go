@@ -1352,10 +1352,15 @@ func (s *Syncer) StartWorkers(ctx context.Context) {
 		}
 	}
 
-	// 2. Reset hanging in_progress tasks back to pending
+	// 2. Reset hanging in_progress tasks back to pending and prune duplicate tasks
 	if s.database != nil {
 		if err := s.database.ResetInProgressTasks(); err != nil {
 			log.Printf("[Syncer] Error resetting in-progress tasks: %v", err)
+		}
+		if pruned, err := s.database.DeduplicateQueue(); err != nil {
+			log.Printf("[Syncer] Error deduplicating queue: %v", err)
+		} else if pruned > 0 {
+			log.Printf("[Syncer] Pruned %d duplicate queue task(s)", pruned)
 		}
 	}
 
@@ -2347,8 +2352,12 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 	}
 
 	var softDeletedMap map[string]bool
+	var queuedSeriesMap map[int]bool
+	var queuedMoviesMap map[int]bool
 	if s.database != nil {
 		softDeletedMap, _ = s.database.GetSoftDeletedPathsMap()
+		queuedSeriesMap, _ = s.database.GetQueuedItemIDsMap("series")
+		queuedMoviesMap, _ = s.database.GetQueuedItemIDsMap("movie")
 	}
 
 	// 2. Scan and enqueue TV Shows needing ID upgrade, Specials S00E99 upgrade, or episode URL reconciliation
@@ -2357,6 +2366,11 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		allSeries, err := s.database.GetAllSeriesStates()
 		if err == nil {
 			for _, st := range allSeries {
+				// Skip if series already has a pending or in-progress task in the queue
+				if queuedSeriesMap != nil && queuedSeriesMap[st.SeriesID] {
+					continue
+				}
+
 				canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(st.Title), st.Year, st.TMDBID, st.IMDBID)
 				currentFolderName := st.FolderName
 				if currentFolderName == "" {
@@ -2475,6 +2489,11 @@ func (s *Syncer) ReconcileDiskState(ctx context.Context) error {
 		allMovies, err := s.database.GetAllMovieStates()
 		if err == nil {
 			for _, mst := range allMovies {
+				// Skip if movie already has a pending or in-progress task in the queue
+				if queuedMoviesMap != nil && queuedMoviesMap[mst.MovieID] {
+					continue
+				}
+
 				canonicalFolderName := sanitizer.BuildMovieFolderName(sanitizer.CleanTitle(mst.Title), mst.Year, mst.TMDBID, mst.IMDBID)
 				currentFolderName := mst.FolderName
 				if currentFolderName == "" {

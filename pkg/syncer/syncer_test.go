@@ -928,5 +928,84 @@ func TestResolveSeriesStreamVariantsFast(t *testing.T) {
 	}
 }
 
+func TestReconcileDiskStateSkipsAlreadyQueuedItems(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_reconcile_queue.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	cfg := &models.Config{
+		OutputDir: tempDir,
+		URL:       "http://localhost:8080",
+	}
+	s := NewSyncer(cfg, nil, database)
+
+	// 1. Setup movie 7001 and series 8001 in SQLite that are NOT yet written to disk and NOT in queue
+	movieID := 7001
+	seriesID := 8001
+	_ = database.UpsertInitialMovieState(movieID, "7001", "tt7001", "Pending Movie", 2024, "Pending Movie (2024) [tmdbid=7001]")
+	_ = database.UpsertInitialSeriesState(seriesID, "8001", "tt8001", "Pending Show", 2024, "Pending Show (2024) [tmdbid=8001]")
+
+	// 2. Run ReconcileDiskState when items are not in sync_queue -> should enqueue reconcile tasks
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("ReconcileDiskState failed: %v", err)
+	}
+	stats1, err := database.GetDetailedQueueStats()
+	if err != nil {
+		t.Fatalf("GetDetailedQueueStats failed: %v", err)
+	}
+	if stats1.MovieReconciles != 1 || stats1.SeriesReconciles != 1 {
+		t.Errorf("Expected 1 movie reconcile and 1 series reconcile, got %+v", stats1)
+	}
+
+	// 3. Test DeduplicateQueue: enqueue lower-priority pass1 alongside the reconcile tasks
+	_ = database.EnqueueTask("movie", movieID, "pass1", 10)
+	_ = database.EnqueueTask("series", seriesID, "pass1", 10)
+	pruned, err := database.DeduplicateQueue()
+	if err != nil {
+		t.Fatalf("DeduplicateQueue failed: %v", err)
+	}
+	if pruned != 2 {
+		t.Errorf("Expected 2 pruned pass1 tasks, got %d", pruned)
+	}
+
+	// 4. Run ReconcileDiskState again while reconcile tasks are pending -> should NOT enqueue duplicates!
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("ReconcileDiskState second run failed: %v", err)
+	}
+	stats2, err := database.GetDetailedQueueStats()
+	if err != nil {
+		t.Fatalf("GetDetailedQueueStats failed: %v", err)
+	}
+	if stats2.MovieReconciles != 1 || stats2.SeriesReconciles != 1 {
+		t.Errorf("Expected reconcile counts to stay 1, got %+v", stats2)
+	}
+
+	// 5. Setup new movie 7002 and series 8002 that have ONLY pass1 queued
+	movieID2 := 7002
+	seriesID2 := 8002
+	_ = database.UpsertInitialMovieState(movieID2, "7002", "tt7002", "Pass1 Movie", 2024, "Pass1 Movie (2024) [tmdbid=7002]")
+	_ = database.UpsertInitialSeriesState(seriesID2, "8002", "tt8002", "Pass1 Show", 2024, "Pass1 Show (2024) [tmdbid=8002]")
+	_ = database.EnqueueTask("movie", movieID2, "pass1", 10)
+	_ = database.EnqueueTask("series", seriesID2, "pass1", 10)
+
+	// 6. Run ReconcileDiskState -> should NOT enqueue reconcile tasks for items with pass1 already queued!
+	if err := s.ReconcileDiskState(context.Background()); err != nil {
+		t.Fatalf("ReconcileDiskState third run failed: %v", err)
+	}
+	stats3, err := database.GetDetailedQueueStats()
+	if err != nil {
+		t.Fatalf("GetDetailedQueueStats failed: %v", err)
+	}
+	if stats3.MovieReconciles != 1 || stats3.SeriesReconciles != 1 {
+		t.Errorf("Expected reconcile counts to remain 1 (no reconcile tasks added for items with pass1), got %+v", stats3)
+	}
+}
+
+
+
 
 

@@ -1390,6 +1390,47 @@ func (d *DB) ResetInProgressTasks() error {
 	return err
 }
 
+// GetQueuedItemIDsMap returns a set of item IDs that have a pending or in_progress task in sync_queue for the given itemType.
+func (d *DB) GetQueuedItemIDsMap(itemType string) (map[int]bool, error) {
+	query := `SELECT item_id FROM sync_queue WHERE item_type = ? AND status IN ('pending', 'in_progress')`
+	rows, err := d.conn.Query(query, itemType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	res := make(map[int]bool)
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err == nil {
+			res[id] = true
+		}
+	}
+	return res, rows.Err()
+}
+
+// DeduplicateQueue removes redundant tasks where an item has multiple pending tasks in sync_queue.
+// For example, if an item has both a 'pass1' (add) and a 'reconcile_movie'/'reconcile_series' task,
+// it deletes the lower-priority 'pass1' task so each item is only processed once.
+func (d *DB) DeduplicateQueue() (int64, error) {
+	query := `
+	DELETE FROM sync_queue 
+	WHERE status = 'pending' AND action = 'pass1' 
+	  AND EXISTS (
+	      SELECT 1 
+	      FROM sync_queue sq2 
+	      WHERE sq2.item_type = sync_queue.item_type 
+	        AND sq2.item_id = sync_queue.item_id 
+	        AND sq2.action IN ('reconcile_movie', 'reconcile_series')
+	  );
+	`
+	res, err := d.conn.Exec(query)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // QueueStats represents queue status and breakdown by media type and task action type.
 type QueueStats struct {
 	Pending           int

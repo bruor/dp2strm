@@ -785,4 +785,64 @@ func TestBatchStageMetadataUpgrade(t *testing.T) {
 	}
 }
 
+func TestDeduplicateQueueAndGetQueuedItemIDsMap(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_db_dedup_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	d, err := Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer d.Close()
+
+	// 1. Enqueue pass1 for movie 101, series 201, movie 102
+	_ = d.EnqueueTask("movie", 101, "pass1", 10)
+	_ = d.EnqueueTask("series", 201, "pass1", 10)
+	_ = d.EnqueueTask("movie", 102, "pass1", 10)
+
+	// 2. Enqueue reconcile_movie for movie 101, and reconcile_series for series 201
+	_ = d.EnqueueTask("movie", 101, "reconcile_movie", 50)
+	_ = d.EnqueueTask("series", 201, "reconcile_series", 50)
+
+	// Verify GetQueuedItemIDsMap returns both items
+	mMap, err := d.GetQueuedItemIDsMap("movie")
+	if err != nil {
+		t.Fatalf("GetQueuedItemIDsMap movie failed: %v", err)
+	}
+	if !mMap[101] || !mMap[102] || mMap[999] {
+		t.Errorf("Unexpected movie queue map: %+v", mMap)
+	}
+
+	sMap, err := d.GetQueuedItemIDsMap("series")
+	if err != nil {
+		t.Fatalf("GetQueuedItemIDsMap series failed: %v", err)
+	}
+	if !sMap[201] || sMap[101] {
+		t.Errorf("Unexpected series queue map: %+v", sMap)
+	}
+
+	// 3. Run DeduplicateQueue
+	pruned, err := d.DeduplicateQueue()
+	if err != nil {
+		t.Fatalf("DeduplicateQueue failed: %v", err)
+	}
+	// Should have pruned pass1 for movie 101 and series 201 (total 2)
+	if pruned != 2 {
+		t.Errorf("Expected 2 pruned tasks, got %d", pruned)
+	}
+
+	// Movie 102 should still have pass1
+	pending, _, _, err := d.GetQueueStats()
+	if err != nil {
+		t.Fatalf("GetQueueStats failed: %v", err)
+	}
+	if pending != 3 { // movie 102 pass1, movie 101 reconcile_movie, series 201 reconcile_series
+		t.Errorf("Expected 3 pending tasks after dedup, got %d", pending)
+	}
+}
+
+
 
