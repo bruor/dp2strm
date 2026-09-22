@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -273,9 +274,14 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 		return nil, fmt.Errorf("failed to read series episodes body: %w", err)
 	}
 
+	trimmed := bytes.TrimSpace(bodyBytes)
+	if len(trimmed) == 0 || string(trimmed) == "[]" || string(trimmed) == "{}" || string(trimmed) == "null" {
+		return []models.Episode{}, nil
+	}
+
 	// 1. Try decoding as direct JSON array [...]
 	var episodes []models.Episode
-	if err := json.Unmarshal(bodyBytes, &episodes); err == nil && len(episodes) > 0 {
+	if err := json.Unmarshal(bodyBytes, &episodes); err == nil {
 		return episodes, nil
 	}
 
@@ -283,7 +289,7 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 	var paginated struct {
 		Results []models.Episode `json:"results"`
 	}
-	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && len(paginated.Results) > 0 {
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && paginated.Results != nil {
 		return paginated.Results, nil
 	}
 
@@ -291,7 +297,7 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 	var xcObj struct {
 		Episodes map[string][]models.Episode `json:"episodes"`
 	}
-	if err := json.Unmarshal(bodyBytes, &xcObj); err == nil && len(xcObj.Episodes) > 0 {
+	if err := json.Unmarshal(bodyBytes, &xcObj); err == nil && xcObj.Episodes != nil {
 		var allEps []models.Episode
 		for _, seasonEps := range xcObj.Episodes {
 			allEps = append(allEps, seasonEps...)
@@ -303,13 +309,13 @@ func (c *Client) FetchSeriesEpisodes(ctx context.Context, seriesID int) ([]model
 	var xcArray struct {
 		Episodes []models.Episode `json:"episodes"`
 	}
-	if err := json.Unmarshal(bodyBytes, &xcArray); err == nil && len(xcArray.Episodes) > 0 {
+	if err := json.Unmarshal(bodyBytes, &xcArray); err == nil && xcArray.Episodes != nil {
 		return xcArray.Episodes, nil
 	}
 
 	// 5. Try decoding as direct map[string][]models.Episode
 	var seasonsMap map[string][]models.Episode
-	if err := json.Unmarshal(bodyBytes, &seasonsMap); err == nil && len(seasonsMap) > 0 {
+	if err := json.Unmarshal(bodyBytes, &seasonsMap); err == nil && seasonsMap != nil {
 		var allEps []models.Episode
 		for _, seasonEps := range seasonsMap {
 			allEps = append(allEps, seasonEps...)

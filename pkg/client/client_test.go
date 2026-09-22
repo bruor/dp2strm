@@ -162,3 +162,81 @@ func TestClientInvalidJSONError(t *testing.T) {
 		t.Errorf("Expected error for HTML/unparseable series response, got nil")
 	}
 }
+
+func TestClientFetchSeriesEpisodes(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch r.URL.Path {
+		case "/api/vod/series/1/episodes/":
+			_, _ = w.Write([]byte(`[]`))
+		case "/api/vod/series/2/episodes/":
+			_, _ = w.Write([]byte(`{}`))
+		case "/api/vod/series/3/episodes/":
+			_, _ = w.Write([]byte(`{"results": []}`))
+		case "/api/vod/series/4/episodes/":
+			_, _ = w.Write([]byte(`[{"id": 1001, "season_number": 1, "episode_number": 1, "title": "Pilot"}]`))
+		case "/api/vod/series/5/episodes/":
+			_, _ = w.Write([]byte(`{"episodes": {"1": [{"id": 1002, "season_number": 1, "episode_number": 2, "title": "Episode 2"}]}}`))
+		case "/api/vod/series/6/episodes/":
+			_, _ = w.Write([]byte(`<html>Error</html>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "test-key")
+	ctx := context.Background()
+
+	// 1. Empty array
+	eps1, err1 := c.FetchSeriesEpisodes(ctx, 1)
+	if err1 != nil {
+		t.Fatalf("Expected nil error for empty array [], got: %v", err1)
+	}
+	if len(eps1) != 0 {
+		t.Errorf("Expected 0 episodes for [], got %d", len(eps1))
+	}
+
+	// 2. Empty object
+	eps2, err2 := c.FetchSeriesEpisodes(ctx, 2)
+	if err2 != nil {
+		t.Fatalf("Expected nil error for empty object {}, got: %v", err2)
+	}
+	if len(eps2) != 0 {
+		t.Errorf("Expected 0 episodes for {}, got %d", len(eps2))
+	}
+
+	// 3. Paginated empty results
+	eps3, err3 := c.FetchSeriesEpisodes(ctx, 3)
+	if err3 != nil {
+		t.Fatalf("Expected nil error for empty paginated results, got: %v", err3)
+	}
+	if len(eps3) != 0 {
+		t.Errorf("Expected 0 episodes for empty results, got %d", len(eps3))
+	}
+
+	// 4. Direct array with items
+	eps4, err4 := c.FetchSeriesEpisodes(ctx, 4)
+	if err4 != nil {
+		t.Fatalf("Expected nil error for direct array, got: %v", err4)
+	}
+	if len(eps4) != 1 || eps4[0].ID != 1001 {
+		t.Errorf("Unexpected episodes: %+v", eps4)
+	}
+
+	// 5. XC nested map with items
+	eps5, err5 := c.FetchSeriesEpisodes(ctx, 5)
+	if err5 != nil {
+		t.Fatalf("Expected nil error for XC nested map, got: %v", err5)
+	}
+	if len(eps5) != 1 || eps5[0].ID != 1002 {
+		t.Errorf("Unexpected episodes: %+v", eps5)
+	}
+
+	// 6. Invalid HTML response should return parse error
+	_, err6 := c.FetchSeriesEpisodes(ctx, 6)
+	if err6 == nil {
+		t.Fatalf("Expected error for HTML response, got nil")
+	}
+}
+
