@@ -1989,16 +1989,6 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 				summary.IMDBID = st.IMDBID
 				summary.STRMCreated = strmCreated
 			}
-			// Send targeted Media/Updated notification to Emby
-			if s.embyClient.IsConfigured() && summary.STRMCreated {
-				folderName := ""
-				if st != nil && st.FolderName != "" {
-					folderName = st.FolderName
-				}
-				if folderName != "" {
-					_ = s.embyClient.NotifyMediaUpdated(ctx, "series", folderName)
-				}
-			}
 		} else {
 			mst, err := s.database.GetMovieState(task.ItemID)
 			if err != nil || mst == nil {
@@ -2011,9 +2001,6 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 				summary.TMDBID = mv.TMDBID
 				summary.IMDBID = mv.IMDBID
 				summary.STRMCreated = strmCreated
-				if s.database != nil {
-					mst, _ = s.database.GetMovieState(task.ItemID)
-				}
 			} else {
 				movieModel := models.Movie{
 					ID:     mst.MovieID,
@@ -2027,16 +2014,6 @@ func (s *Syncer) processQueueTask(ctx context.Context, task *models.QueueItem) (
 				summary.TMDBID = mst.TMDBID
 				summary.IMDBID = mst.IMDBID
 				summary.STRMCreated = strmCreated
-			}
-			// Send targeted Media/Updated notification to Emby
-			if s.embyClient.IsConfigured() && summary.STRMCreated {
-				folderName := ""
-				if mst != nil && mst.FolderName != "" {
-					folderName = mst.FolderName
-				}
-				if folderName != "" {
-					_ = s.embyClient.NotifyMediaUpdated(ctx, "movie", folderName)
-				}
 			}
 		}
 		return nil, summary
