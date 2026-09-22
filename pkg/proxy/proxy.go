@@ -35,7 +35,8 @@ type Server struct {
 	onActivation      ActivationCallback
 	onMovieActivation MovieActivationCallback
 	onSync            SyncCallback
-	activeSeries      sync.Map
+	activeSeriesMu    sync.Mutex
+	activeSeries      map[int]chan struct{}
 	httpServer        *http.Server
 }
 
@@ -45,6 +46,7 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 		cfg:          cfg,
 		database:     database,
 		onActivation: onActivation,
+		activeSeries: make(map[int]chan struct{}),
 	}
 
 	mux := http.NewServeMux()
@@ -364,12 +366,22 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If unactivated, run activation (with deduplication)
+	// If unactivated, run activation (or wait if another concurrent request is already activating it)
 	if !isActivated && s.onActivation != nil {
-		if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
+		s.activeSeriesMu.Lock()
+		waitCh, inProgress := s.activeSeries[seriesID]
+		if !inProgress {
+			waitCh = make(chan struct{})
+			s.activeSeries[seriesID] = waitCh
+			s.activeSeriesMu.Unlock()
+
 			if targetURL == "" {
 				s.onActivation(seriesID)
-				s.activeSeries.Delete(seriesID)
+				s.activeSeriesMu.Lock()
+				delete(s.activeSeries, seriesID)
+				close(waitCh)
+				s.activeSeriesMu.Unlock()
+
 				if s.database != nil {
 					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
 					// Self-Healing Fallback for Series if targetURL still empty
@@ -397,10 +409,30 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			} else {
-				go func(sid int) {
-					defer s.activeSeries.Delete(sid)
+				go func(sid int, ch chan struct{}) {
+					defer func() {
+						s.activeSeriesMu.Lock()
+						delete(s.activeSeries, sid)
+						close(ch)
+						s.activeSeriesMu.Unlock()
+					}()
 					s.onActivation(sid)
-				}(seriesID)
+				}(seriesID, waitCh)
+			}
+		} else {
+			s.activeSeriesMu.Unlock()
+			// Another concurrent request is already running activation for this series!
+			// Wait for it to finish so we redirect to the real stream instead of streaming the bumper!
+			select {
+			case <-waitCh:
+				// Leader activation completed!
+				if s.database != nil {
+					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, seasonNum, epNum, variantKey)
+				}
+			case <-r.Context().Done():
+				return
+			case <-time.After(30 * time.Second):
+				log.Printf("[Proxy] Timeout waiting for concurrent activation of Series %d", seriesID)
 			}
 		}
 	}
@@ -468,18 +500,44 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 
 	// Trigger activation to populate real episode target streams (with deduplication)
 	if s.onActivation != nil {
-		if _, inProgress := s.activeSeries.LoadOrStore(seriesID, struct{}{}); !inProgress {
+		s.activeSeriesMu.Lock()
+		waitCh, inProgress := s.activeSeries[seriesID]
+		if !inProgress {
+			waitCh = make(chan struct{})
+			s.activeSeries[seriesID] = waitCh
+			s.activeSeriesMu.Unlock()
+
 			if targetURL == "" {
 				s.onActivation(seriesID)
-				s.activeSeries.Delete(seriesID)
+				s.activeSeriesMu.Lock()
+				delete(s.activeSeries, seriesID)
+				close(waitCh)
+				s.activeSeriesMu.Unlock()
+
 				if s.database != nil {
 					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
 				}
 			} else {
-				go func(sid int) {
-					defer s.activeSeries.Delete(sid)
+				go func(sid int, ch chan struct{}) {
+					defer func() {
+						s.activeSeriesMu.Lock()
+						delete(s.activeSeries, sid)
+						close(ch)
+						s.activeSeriesMu.Unlock()
+					}()
 					s.onActivation(sid)
-				}(seriesID)
+				}(seriesID, waitCh)
+			}
+		} else {
+			s.activeSeriesMu.Unlock()
+			select {
+			case <-waitCh:
+				if s.database != nil {
+					targetURL, _ = s.database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+				}
+			case <-r.Context().Done():
+				return
+			case <-time.After(30 * time.Second):
 			}
 		}
 	}

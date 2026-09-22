@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -473,4 +474,70 @@ func TestStreamcacheDispatcharrURLOverride(t *testing.T) {
 		t.Errorf("Expected direct location %s, got %s", expectedRewrittenMovie, loc)
 	}
 }
+
+func TestConcurrentSeriesActivationWaits(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_concurrent_act_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	database, err := db.Open(filepath.Join(tempDir, "proxy_concurrent.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 77777
+	targetStream := "https://dp.example.com/episodes/real_stream.mkv"
+
+	// Mock onActivation that takes 50ms and saves stream variant
+	onActivation := func(sid int) {
+		time.Sleep(50 * time.Millisecond)
+		_ = database.SaveStreamVariant(&db.StreamVariant{
+			ItemID:     sid,
+			ItemType:   "series",
+			SeasonNum:  1,
+			EpisodeNum: 1,
+			VariantKey: "base",
+			TargetURL:  targetStream,
+		})
+	}
+
+	cfg := &models.Config{
+		DispatcharrURL: "http://dispatcharr:9191",
+		Port:           8080,
+	}
+
+	srv := NewServer(cfg, database, onActivation)
+
+	// Send two requests concurrently
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+	locations := make([]string, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest("GET", fmt.Sprintf("/play/series/%d/1/1", seriesID), nil)
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			results[idx] = rec.Code
+			locations[idx] = rec.Header().Get("Location")
+		}(i)
+	}
+
+	wg.Wait()
+
+	for idx, code := range results {
+		if code != http.StatusFound {
+			t.Errorf("Request %d expected 302 Found, got %d (bumper served instead of waiting!)", idx, code)
+		}
+		if locations[idx] != targetStream {
+			t.Errorf("Request %d expected location %s, got %s", idx, targetStream, locations[idx])
+		}
+	}
+}
+
 
