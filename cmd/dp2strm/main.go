@@ -75,26 +75,33 @@ func main() {
 
 	syncEngine := syncer.NewSyncer(cfg, restClient, database)
 
-	// Async Series Activation Callback Worker (auto-resolves canonical title & folder)
+	// Series Activation Callback Worker (auto-resolves canonical title & folder)
 	onActivation := func(seriesID int) {
-		log.Printf("[Activation] Async worker activated for Series ID %d...", seriesID)
+		log.Printf("[Activation] Fast stream resolution activated for Series ID %d...", seriesID)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 
 		// Acquire VIP activation lock to halt any running global scan and pause background batch workers
 		unlock := syncEngine.BeginVIPActivation(ctx, seriesID)
 
-		_, _, err := syncEngine.PopulateActivatedSeries(ctx, seriesID, "", "")
+		episodes, cleanTitle, seriesDir, err := syncEngine.ResolveSeriesStreamVariants(ctx, seriesID)
 		if err != nil {
-			log.Printf("[Activation] Error populating series ID %d: %v", seriesID, err)
+			log.Printf("[Activation] Error resolving streams for series ID %d: %v", seriesID, err)
 			unlock()
 			cancel()
 			return
 		}
 
-		// Run session polling & targeted refresh in background so the HTTP proxy can send 302 redirect IMMEDIATELY without waiting for session polling
+		// Stream variants are now in SQLite!
+		// The calling HTTP proxy unblocks immediately to issue 302 redirects to Emby.
+		// Launch background worker to write disk files, perform NFO cleanup/generation,
+		// and trigger targeted Emby metadata refresh after playback session starts.
 		go func() {
 			defer cancel()
 			defer unlock()
+			_, _, diskErr := syncEngine.PopulateActivatedSeriesDisk(ctx, seriesID, cleanTitle, seriesDir, episodes)
+			if diskErr != nil {
+				log.Printf("[Activation] Error writing series disk files for series ID %d: %v", seriesID, diskErr)
+			}
 			syncEngine.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
 		}()
 	}

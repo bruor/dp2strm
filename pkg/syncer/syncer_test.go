@@ -836,5 +836,97 @@ func TestPopulateActivatedSeriesZeroEpisodesPreservesPlaceholder(t *testing.T) {
 	}
 }
 
+func TestResolveSeriesStreamVariantsFast(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_resolve.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Mock Dispatcharr server that returns episodes for /episodes/
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "/episodes/") {
+			_, _ = w.Write([]byte(`[
+				{"id": 101, "name": "Episode One", "season_number": 1, "episode_number": 1, "container_extension": "mkv"},
+				{"id": 102, "name": "Episode Two", "season_number": 1, "episode_number": 2, "container_extension": "mkv"}
+			]`))
+		} else {
+			_, _ = w.Write([]byte(`{"id": 88888, "name": "Fast Show", "year": 2024, "tmdb_id": "88888", "episode_count": 2}`))
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL: ts.URL,
+		APIKey:         "test-api-key",
+		OutputDir:      tempDir,
+		URL:            "http://localhost:8080",
+		XCUser:         "testuser",
+		XCPassword:     "testpass",
+		EnableNFO:      false,
+	}
+
+	c := client.NewClient(ts.URL, "test-api-key")
+	s := NewSyncer(cfg, c, database)
+
+	seriesID := 88888
+	cleanTitle := "Fast Show"
+	folderName := "Fast Show (2024) [tmdbid=88888]"
+	seriesFolder := filepath.Join(tempDir, "TV Shows", folderName)
+	_ = database.UpsertInitialSeriesState(seriesID, "88888", "", cleanTitle, 2024, folderName)
+
+	// 1. Run ResolveSeriesStreamVariants
+	episodes, title, dir, err := s.ResolveSeriesStreamVariants(context.Background(), seriesID)
+	if err != nil {
+		t.Fatalf("ResolveSeriesStreamVariants failed: %v", err)
+	}
+	if len(episodes) != 2 {
+		t.Fatalf("Expected 2 episodes, got %d", len(episodes))
+	}
+	if title != cleanTitle {
+		t.Errorf("Expected title %q, got %q", cleanTitle, title)
+	}
+	if dir != seriesFolder {
+		t.Errorf("Expected dir %q, got %q", seriesFolder, dir)
+	}
+
+	// 2. Verify stream variants are already in SQLite for immediate 302 redirect
+	targetURL1, err := database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+	if err != nil || targetURL1 == "" {
+		t.Errorf("Expected targetURL for S01E01 to be immediately available in DB, got %q (err: %v)", targetURL1, err)
+	}
+	targetURL2, err := database.GetSeriesTargetURL(seriesID, 1, 2, "base")
+	if err != nil || targetURL2 == "" {
+		t.Errorf("Expected targetURL for S01E02 to be immediately available in DB, got %q (err: %v)", targetURL2, err)
+	}
+
+	// 3. Verify series is marked as activated in DB
+	st, err := database.GetSeriesState(seriesID)
+	if err != nil || st == nil || !st.IsActivated {
+		t.Errorf("Expected series to be marked as activated in DB after ResolveSeriesStreamVariants")
+	}
+
+	// 4. Verify disk files are written when PopulateActivatedSeriesDisk is called
+	created, preserved, err := s.PopulateActivatedSeriesDisk(context.Background(), seriesID, title, dir, episodes)
+	if err != nil {
+		t.Fatalf("PopulateActivatedSeriesDisk failed: %v", err)
+	}
+	if created == 0 && preserved == 0 {
+		t.Errorf("Expected created or preserved > 0 from PopulateActivatedSeriesDisk")
+	}
+
+	ep1STRM := filepath.Join(seriesFolder, "Season 01", "Fast Show - S01E01.strm")
+	if _, err := os.Stat(ep1STRM); os.IsNotExist(err) {
+		t.Errorf("Expected S01E01 STRM to exist on disk after PopulateActivatedSeriesDisk")
+	}
+	ep2STRM := filepath.Join(seriesFolder, "Season 01", "Fast Show - S01E02.strm")
+	if _, err := os.Stat(ep2STRM); os.IsNotExist(err) {
+		t.Errorf("Expected S01E02 STRM to exist on disk after PopulateActivatedSeriesDisk")
+	}
+}
+
 
 

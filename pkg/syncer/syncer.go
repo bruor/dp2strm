@@ -659,25 +659,25 @@ func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series mo
 	return created, preserved, strmCreated, artDur, diskDur, nil
 }
 
-// PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr and writes real .strm files on disk.
-func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, cleanTitle, seriesDir string) (created, preserved int, err error) {
+// ResolveSeriesStreamVariants fetches episodes from Dispatcharr, validates episode count,
+// records all stream variants into SQLite, and marks the series activated in SQLite.
+// This executes in ~150ms so the HTTP proxy can immediately issue 302 redirects to streamcache.
+func (s *Syncer) ResolveSeriesStreamVariants(ctx context.Context, seriesID int) (episodes []models.Episode, cleanTitle, seriesDir string, err error) {
 	// Auto-resolve canonical seriesDir and cleanTitle if not provided
-	if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
-		if s.database != nil {
-			st, _ := s.database.GetSeriesState(seriesID)
-			if st != nil && st.FolderName != "" {
-				seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", st.FolderName)
-				cleanTitle = st.Title
-			}
+	if s.database != nil {
+		st, _ := s.database.GetSeriesState(seriesID)
+		if st != nil && st.FolderName != "" {
+			seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", st.FolderName)
+			cleanTitle = st.Title
 		}
-		if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
-			if srs, fetchErr := s.client.FetchSingleSeries(ctx, seriesID); fetchErr == nil && srs != nil {
-				cleanTitle = sanitizer.CleanTitle(srs.Name)
-				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
-				seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
-				if s.database != nil {
-					_ = s.database.UpsertInitialSeriesState(seriesID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
-				}
+	}
+	if seriesDir == "" || cleanTitle == "" || strings.HasPrefix(cleanTitle, "Series ") {
+		if srs, fetchErr := s.client.FetchSingleSeries(ctx, seriesID); fetchErr == nil && srs != nil {
+			cleanTitle = sanitizer.CleanTitle(srs.Name)
+			folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
+			seriesDir = filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
+			if s.database != nil {
+				_ = s.database.UpsertInitialSeriesState(seriesID, srs.TMDBID, srs.IMDBID, cleanTitle, srs.Year, folderName)
 			}
 		}
 	}
@@ -688,12 +688,12 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		cleanTitle = fmt.Sprintf("Series %d", seriesID)
 	}
 
-	episodes, err := s.client.FetchSeriesEpisodes(ctx, seriesID)
+	episodes, err = s.client.FetchSeriesEpisodes(ctx, seriesID)
 	if err != nil {
 		if err == client.ErrRateLimited && s.cfg.CircuitBreakerEnabled {
 			s.tripCircuitBreaker()
 		}
-		return 0, 0, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
+		return nil, cleanTitle, seriesDir, fmt.Errorf("failed to fetch episodes for series ID %d: %w", seriesID, err)
 	}
 
 	if len(episodes) == 0 {
@@ -717,9 +717,48 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		if s.database != nil {
 			_ = s.database.SetSeriesUnactivated(seriesID)
 		}
-		return 0, 0, fmt.Errorf("series %d has 0 episodes in Dispatcharr", seriesID)
+		return nil, cleanTitle, seriesDir, fmt.Errorf("series %d has 0 episodes in Dispatcharr", seriesID)
 	}
 
+	// Record real stream 302 target URLs in SQLite
+	for _, ep := range episodes {
+		ext := ep.ContainerExtension
+		if ext == "" {
+			ext = "mkv"
+		}
+
+		var realTargetURL string
+		if ep.UUID != "" && s.cfg.APIKey != "" {
+			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s?api_key=%s", s.cfg.GetDispatcharrStreamURL(), ep.UUID, s.cfg.APIKey)
+		} else {
+			realTargetURL = fmt.Sprintf("%s/series/%s/%s/%d.%s", s.cfg.GetDispatcharrStreamURL(), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
+		}
+		if s.database != nil {
+			_ = s.database.SaveStreamVariant(&db.StreamVariant{
+				ItemID:             seriesID,
+				ItemType:           "series",
+				SeasonNum:          ep.SeasonNumber,
+				EpisodeNum:         ep.EpisodeNumber,
+				VariantKey:         "base",
+				TargetURL:          realTargetURL,
+				Quality:            "1080p",
+				StreamID:           fmt.Sprintf("%d", ep.ID),
+				ContainerExtension: ext,
+			})
+		}
+	}
+
+	// Record series as activated in SQLite
+	if s.database != nil {
+		_ = s.database.SetSeriesActivated(seriesID, "", cleanTitle)
+	}
+
+	return episodes, cleanTitle, seriesDir, nil
+}
+
+// PopulateActivatedSeriesDisk writes all episode .strm files, handles NFO removal/updates,
+// cleans legacy specials/placeholders, and records refresh state in SQLite.
+func (s *Syncer) PopulateActivatedSeriesDisk(ctx context.Context, seriesID int, cleanTitle, seriesDir string, episodes []models.Episode) (created, preserved int, err error) {
 	// If NFO is disabled, clean up tvshow.nfo if present
 	if !s.cfg.EnableNFO {
 		tvshowNFOPath := filepath.Join(seriesDir, "tvshow.nfo")
@@ -780,6 +819,16 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
+	seriesIdent := ""
+	if s.database != nil {
+		if st, _ := s.database.GetSeriesState(seriesID); st != nil {
+			seriesIdent = strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, seriesID)
+		}
+	}
+	if seriesIdent == "" {
+		seriesIdent = strconv.Itoa(seriesID)
+	}
+
 	for _, ep := range episodes {
 		seasonDir := filepath.Join(seriesDir, fmt.Sprintf("Season %02d", ep.SeasonNumber))
 		filename := fmt.Sprintf("%s - S%02dE%02d.strm", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
@@ -788,42 +837,7 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		nfoFilename := fmt.Sprintf("%s - S%02dE%02d.nfo", sanitizer.SanitizeFileName(cleanTitle), ep.SeasonNumber, ep.EpisodeNumber)
 		nfoPath := filepath.Join(seasonDir, nfoFilename)
 
-		seriesIdent := ""
-		if s.database != nil {
-			if st, _ := s.database.GetSeriesState(seriesID); st != nil {
-				seriesIdent = strm.FormatSeriesIdentifier(st.TMDBID, st.IMDBID, seriesID)
-			}
-		}
-		if seriesIdent == "" {
-			seriesIdent = strconv.Itoa(seriesID)
-		}
 		proxyURL := strm.GenerateSeriesProxyURL(s.cfg, seriesIdent, ep.SeasonNumber, ep.EpisodeNumber, "base")
-
-		ext := ep.ContainerExtension
-		if ext == "" {
-			ext = "mkv"
-		}
-
-		// Record real stream 302 target URL in SQLite
-		var realTargetURL string
-		if ep.UUID != "" && s.cfg.APIKey != "" {
-			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s?api_key=%s", s.cfg.GetDispatcharrStreamURL(), ep.UUID, s.cfg.APIKey)
-		} else {
-			realTargetURL = fmt.Sprintf("%s/series/%s/%s/%d.%s", s.cfg.GetDispatcharrStreamURL(), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
-		}
-		if s.database != nil {
-			s.database.SaveStreamVariant(&db.StreamVariant{
-				ItemID:             seriesID,
-				ItemType:           "series",
-				SeasonNum:          ep.SeasonNumber,
-				EpisodeNum:         ep.EpisodeNumber,
-				VariantKey:         "base",
-				TargetURL:          realTargetURL,
-				Quality:            "1080p",
-				StreamID:           fmt.Sprintf("%d", ep.ID),
-				ContainerExtension: ext,
-			})
-		}
 
 		writeStatus, err := strm.WriteSTRMFileDetailed(strmPath, proxyURL)
 		if err != nil {
@@ -859,13 +873,27 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 		}
 	}
 
-	// Record series as activated in SQLite and record refresh state
+	// Record series refresh state in SQLite
 	if s.database != nil {
-		s.database.SetSeriesActivated(seriesID, "", cleanTitle)
 		_ = s.database.MarkSeriesRefreshed(seriesID, len(episodes), time.Time{})
 	}
 
 	return created, preserved, nil
+}
+
+// PopulateActivatedSeries (Pass 2): Loads all episodes from Dispatcharr, saves stream variants, and writes real .strm files on disk.
+func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, cleanTitle, seriesDir string) (created, preserved int, err error) {
+	episodes, title, dir, err := s.ResolveSeriesStreamVariants(ctx, seriesID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if cleanTitle != "" {
+		title = cleanTitle
+	}
+	if seriesDir != "" {
+		dir = seriesDir
+	}
+	return s.PopulateActivatedSeriesDisk(ctx, seriesID, title, dir, episodes)
 }
 
 func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, err error) {
