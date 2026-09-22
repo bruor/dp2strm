@@ -180,8 +180,12 @@ func format302Target(rawURL, streamcacheURL, streamcacheDispatcharrURL, dispatch
 	if streamcacheURL == "" {
 		return rawURL
 	}
+	baseSC := strings.TrimRight(streamcacheURL, "/")
+	if !strings.HasSuffix(baseSC, "/stream") {
+		baseSC += "/stream"
+	}
 	escapedURL := url.QueryEscape(rawURL)
-	return fmt.Sprintf("%s?url=%s", strings.TrimRight(streamcacheURL, "/"), escapedURL)
+	return fmt.Sprintf("%s?url=%s", baseSC, escapedURL)
 }
 
 func (s *Server) formatRedirect(rawURL string) string {

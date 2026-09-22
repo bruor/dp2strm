@@ -65,7 +65,7 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 		t.Errorf("Expected 302 Found for movie play, got %d", rec.Code)
 	}
 	expectedQueryMovie := url.QueryEscape(movieTarget)
-	expectedLocation := "http://streamcache:8080?url=" + expectedQueryMovie
+	expectedLocation := "http://streamcache:8080/stream?url=" + expectedQueryMovie
 	if loc := rec.Header().Get("Location"); loc != expectedLocation {
 		t.Errorf("Expected 302 Location %s, got %s", expectedLocation, loc)
 	}
@@ -79,7 +79,7 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 		t.Errorf("Expected 302 Found for 4k movie play, got %d", rec.Code)
 	}
 	expectedQuery4k := url.QueryEscape(movie4kTarget)
-	expectedLocation4k := "http://streamcache:8080?url=" + expectedQuery4k
+	expectedLocation4k := "http://streamcache:8080/stream?url=" + expectedQuery4k
 	if loc := rec.Header().Get("Location"); loc != expectedLocation4k {
 		t.Errorf("Expected 302 Location %s, got %s", expectedLocation4k, loc)
 	}
@@ -93,7 +93,7 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 		t.Errorf("Expected 302 Found for series play, got %d", rec.Code)
 	}
 	expectedQuerySeries := url.QueryEscape(seriesTarget)
-	expectedSeriesLoc := "http://streamcache:8080?url=" + expectedQuerySeries
+	expectedSeriesLoc := "http://streamcache:8080/stream?url=" + expectedQuerySeries
 	if loc := rec.Header().Get("Location"); loc != expectedSeriesLoc {
 		t.Errorf("Expected 302 Location %s, got %s", expectedSeriesLoc, loc)
 	}
@@ -127,7 +127,7 @@ func TestProxyServerExtensionlessAndQueryURL(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Errorf("Expected 302 Found for unactivated movie play, got %d", rec.Code)
 	}
-	expectedUnactLoc := "http://streamcache:8080?url=" + url.QueryEscape(unactivatedTarget)
+	expectedUnactLoc := "http://streamcache:8080/stream?url=" + url.QueryEscape(unactivatedTarget)
 	if loc := rec.Header().Get("Location"); loc != expectedUnactLoc {
 		t.Errorf("Expected 302 Location %s, got %s", expectedUnactLoc, loc)
 	}
@@ -434,7 +434,7 @@ func TestStreamcacheDispatcharrURLOverride(t *testing.T) {
 		t.Errorf("Expected 302 Found for movie play, got %d", rec.Code)
 	}
 	expectedRewrittenMovie := "https://dp.example.com/movie/dp2strm/mockpassword/1288105.mkv"
-	expectedMovieLoc := "http://streamcache:8080?url=" + url.QueryEscape(expectedRewrittenMovie)
+	expectedMovieLoc := "http://streamcache:8080/stream?url=" + url.QueryEscape(expectedRewrittenMovie)
 	if loc := rec.Header().Get("Location"); loc != expectedMovieLoc {
 		t.Errorf("Expected movie location:\n%s\ngot:\n%s", expectedMovieLoc, loc)
 	}
@@ -448,7 +448,7 @@ func TestStreamcacheDispatcharrURLOverride(t *testing.T) {
 		t.Errorf("Expected 302 Found for series play, got %d", rec.Code)
 	}
 	expectedRewrittenSeries := "https://dp.example.com/series/dp2strm/mockpassword/438365.mkv"
-	expectedSeriesLoc := "http://streamcache:8080?url=" + url.QueryEscape(expectedRewrittenSeries)
+	expectedSeriesLoc := "http://streamcache:8080/stream?url=" + url.QueryEscape(expectedRewrittenSeries)
 	if loc := rec.Header().Get("Location"); loc != expectedSeriesLoc {
 		t.Errorf("Expected series location:\n%s\ngot:\n%s", expectedSeriesLoc, loc)
 	}

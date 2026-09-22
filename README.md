@@ -72,7 +72,7 @@
 - **Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preventing port 80 connection errors in FFmpeg/Emby.
 - **Single Unified Emby Refresh Trigger**: Emby receives a single refresh webhook at the end of each shared sync pass only when new `.strm` media files are created on disk.
 - **`streamcache` Integration & Boundary-Aware Predictive Pre-Caching**:
-  - Optional integration with `streamcache` transparent proxy (`<STREAMCACHE_URL>?url=<escaped_target>`).
+  - Optional integration with `streamcache` transparent proxy (`<STREAMCACHE_URL>/stream?url=<escaped_target>`).
   - **Predictive Tap & Bail** (`FETCH_AHEAD_COUNT`, default `0` = disabled): When watching a series, fires lightweight 500ms background requests directly to `streamcache` with the upstream Dispatcharr target URL to warm/pre-buffer upcoming episodes.
   - **Boundary & Variant Aware**: Discovers only valid sequential episodes in SQLite, seamlessly rolling over season boundaries (e.g. `S01E10` ➔ `S02E01`), matching the user's active playback variant (e.g. `4k` vs `base`) with per-episode base fallback, and stopping cleanly at season/series finales.
 - **Timezone-Aware Cron Scheduler**: Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).

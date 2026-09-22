@@ -62,7 +62,7 @@ This document tracks all completed features and remaining roadmap items for `dp2
   - When `STREAMCACHE_URL` and `FETCH_AHEAD_COUNT > 0` are configured, playing an episode triggers background pre-caching.
   - **Boundary-Aware Sequential Rollover**: Queries SQLite via `GetNextSeriesEpisodes` to discover only existing sequential episodes (`stream_variants`), seamlessly rolling over season boundaries (e.g. `S01E10` ➔ `S02E01`) and stopping cleanly at season/series finales (0 out-of-bounds requests and 0 accidental bumper fallbacks).
   - **Variant Awareness & Intelligent Fallback**: Tracks the user's active playback variant (e.g. `4k` vs `base`) and matches that exact variant for upcoming episodes, automatically falling back to `base` on an episode-by-episode basis if a subsequent episode lacks the variant stream.
-  - **Direct Streamcache Tap & Bail**: Sends lightweight 500ms HTTP GET requests directly to `<STREAMCACHE_URL>?url=<escaped_dispatcharr_url>`, allowing `streamcache` to hydrate and pre-buffer upcoming episodes ahead of playback without internal loopback hops.
+  - **Direct Streamcache Tap & Bail**: Sends lightweight 500ms HTTP GET requests directly to `<STREAMCACHE_URL>/stream?url=<escaped_dispatcharr_url>`, allowing `streamcache` to hydrate and pre-buffer upcoming episodes ahead of playback without internal loopback hops.
 
 ---
 
