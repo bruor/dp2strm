@@ -73,7 +73,7 @@
 - **Single Unified Emby Refresh Trigger**: Emby receives a single refresh webhook at the end of each shared sync pass only when new `.strm` media files are created on disk.
 - **`streamcache` Integration & Boundary-Aware Predictive Pre-Caching**:
   - Optional integration with `streamcache` transparent proxy (`<STREAMCACHE_URL>/stream?url=<escaped_target>`).
-  - **Predictive Tap & Bail** (`FETCH_AHEAD_COUNT`, default `0` = disabled): When watching a series, fires lightweight 500ms background requests directly to `streamcache` with the upstream Dispatcharr target URL to warm/pre-buffer upcoming episodes.
+  - **Predictive Tap & Bail** (`FETCH_AHEAD_COUNT`, default `0` = disabled; `PREFETCH_DELAY`, default `5m`): When watching a series, waits `PREFETCH_DELAY` before sequentially firing lightweight background requests directly to `streamcache` with the upstream Dispatcharr target URL to warm/pre-buffer upcoming episodes without overwhelming upstream connections.
   - **Boundary & Variant Aware**: Discovers only valid sequential episodes in SQLite, seamlessly rolling over season boundaries (e.g. `S01E10` ➔ `S02E01`), matching the user's active playback variant (e.g. `4k` vs `base`) with per-episode base fallback, and stopping cleanly at season/series finales.
 - **Timezone-Aware Cron Scheduler**: Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).
 
@@ -117,6 +117,7 @@ services:
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
       - STREAMCACHE_DISPATCHARR_URL= # Optional override: Dispatcharr URL streamcache should use (e.g. https://dp.example.com)
       - FETCH_AHEAD_COUNT=0 # Default: 0 (disabled). Set to 1 or 2 when STREAMCACHE_URL is set
+      - PREFETCH_DELAY=5m # Sequential delay before & between next-episode taps (Default: 5m)
 
       # Retention & Emby Hooks
       - RETENTION_GRACE_DAYS=7
@@ -212,6 +213,7 @@ services:
 | `STREAMCACHE_URL` | `""` | Optional `streamcache` service URL (e.g. `http://streamcache:8080`) |
 | `STREAMCACHE_DISPATCHARR_URL` | `""` | Optional override for Dispatcharr URL passed to `streamcache` (e.g. `https://dp.example.com` when internal Docker URL differs) |
 | `FETCH_AHEAD_COUNT` | `0` | Number of upcoming TV episodes to pre-fetch for cache warming (default `0` = disabled) |
+| `PREFETCH_DELAY` | `5m` | Sequential delay before and between upcoming episode pre-fetch taps (e.g. `5m`, `300s`) |
 | `RETENTION_GRACE_DAYS` | `7` | Days to buffer deleted content before purging from disk |
 | `TZ` | `UTC` | IANA timezone for cron evaluation (e.g., `America/New_York`) |
 | `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial staging pass on container startup |

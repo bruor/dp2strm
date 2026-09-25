@@ -17,6 +17,7 @@ type Config struct {
 	StreamcacheURL        string        `json:"streamcache_url"`
 	StreamcacheDispatcharrURL string        `json:"streamcache_dispatcharr_url"`
 	FetchAheadCount       int           `json:"fetch_ahead_count"`
+	PrefetchDelay         time.Duration `json:"prefetch_delay"`
 	RetentionGraceDays    int           `json:"retention_grace_days"`
 	Port                  int           `json:"port"`
 	URL                   string        `json:"url"`

@@ -1084,6 +1084,26 @@ func (d *DB) MarkStreamVariantTapped(seriesID, seasonNum, epNum int, variantKey 
 	return err
 }
 
+// GetSeriesEpisodeLastTappedAt retrieves the last_tapped_at timestamp for a specific series episode stream variant.
+func (d *DB) GetSeriesEpisodeLastTappedAt(seriesID, seasonNum, epNum int, variantKey string) (*time.Time, error) {
+	if variantKey == "" {
+		variantKey = "base"
+	}
+	query := `SELECT last_tapped_at FROM stream_variants WHERE item_id = ? AND item_type = 'series' AND season_num = ? AND episode_num = ? AND variant_key = ?`
+	var lastTapped sql.NullTime
+	err := d.conn.QueryRow(query, seriesID, seasonNum, epNum, variantKey).Scan(&lastTapped)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if lastTapped.Valid {
+		return &lastTapped.Time, nil
+	}
+	return nil, nil
+}
+
 // GetMovieStreamVariants retrieves all stream variant mappings for a movie.
 func (d *DB) GetMovieStreamVariants(movieID int) ([]*StreamVariant, error) {
 	query := `SELECT item_id, item_type, season_num, episode_num, variant_key, target_url, quality, stream_id, container_extension FROM stream_variants WHERE item_id = ? AND item_type = 'movie'`

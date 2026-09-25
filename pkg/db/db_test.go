@@ -782,6 +782,15 @@ func TestStreamVariantTappedTracking(t *testing.T) {
 		t.Errorf("Expected LastTappedAt %v, got %v", tapTime, *res[0].LastTappedAt)
 	}
 
+	// Also verify direct lookup via GetSeriesEpisodeLastTappedAt
+	directTapped, dErr := d.GetSeriesEpisodeLastTappedAt(seriesID, 1, 2, "base")
+	if dErr != nil {
+		t.Fatalf("GetSeriesEpisodeLastTappedAt failed: %v", dErr)
+	}
+	if directTapped == nil || directTapped.Unix() != tapTime.Unix() {
+		t.Errorf("GetSeriesEpisodeLastTappedAt got %v, want %v", directTapped, tapTime)
+	}
+
 	// 4. SaveStreamVariant on the same episode should PRESERVE last_tapped_at
 	if err := d.SaveStreamVariant(&StreamVariant{
 		ItemID:     seriesID,

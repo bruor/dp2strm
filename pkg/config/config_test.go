@@ -88,3 +88,27 @@ func TestURLPortNormalization(t *testing.T) {
 
 	os.Unsetenv("PORT")
 }
+
+func TestPrefetchDelayConfig(t *testing.T) {
+	// 1. Default should be 5 minutes
+	cfgDefault := DefaultConfig()
+	if cfgDefault.PrefetchDelay != 5*time.Minute {
+		t.Errorf("Default PrefetchDelay = %v, want 5m", cfgDefault.PrefetchDelay)
+	}
+
+	// 2. Custom duration string (e.g. 2m30s)
+	os.Setenv("PREFETCH_DELAY", "2m30s")
+	cfgParsed := LoadConfig()
+	if cfgParsed.PrefetchDelay != 150*time.Second {
+		t.Errorf("PrefetchDelay = %v, want 2m30s", cfgParsed.PrefetchDelay)
+	}
+
+	// 3. Integer seconds (e.g. 60)
+	os.Setenv("PREFETCH_DELAY", "60")
+	cfgSec := LoadConfig()
+	if cfgSec.PrefetchDelay != 60*time.Second {
+		t.Errorf("PrefetchDelay from integer = %v, want 1m0s", cfgSec.PrefetchDelay)
+	}
+
+	os.Unsetenv("PREFETCH_DELAY")
+}

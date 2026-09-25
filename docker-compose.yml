@@ -45,6 +45,7 @@ services:
       - STREAMCACHE_URL= # e.g. http://streamcache:8080
       - STREAMCACHE_DISPATCHARR_URL= # Optional override: Dispatcharr URL streamcache should use (e.g. https://dp.example.com)
       - FETCH_AHEAD_COUNT=0 # Default: 0 (disabled). Set to 1 or 2 when STREAMCACHE_URL is set
+      - PREFETCH_DELAY=5m # Sequential delay before & between next-episode taps (Default: 5m)
       - RETENTION_GRACE_DAYS=7
 
       # --- Emby / Jellyfin Rescan Hooks (Zero-Config Auto-Discovered) ---

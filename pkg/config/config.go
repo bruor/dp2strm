@@ -23,6 +23,7 @@ func DefaultConfig() *models.Config {
 		StreamcacheURL:            "",
 		StreamcacheDispatcharrURL: "",
 		FetchAheadCount:           0,
+		PrefetchDelay:             5 * time.Minute,
 		RetentionGraceDays:        7,
 		Port:                  8080,
 		URL:                   "http://localhost:8080",
@@ -83,6 +84,13 @@ func LoadConfig() *models.Config {
 	if v := os.Getenv("FETCH_AHEAD_COUNT"); v != "" {
 		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
 			cfg.FetchAheadCount = cnt
+		}
+	}
+	if v := os.Getenv("PREFETCH_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.PrefetchDelay = d
+		} else if sec, err := strconv.Atoi(v); err == nil && sec >= 0 {
+			cfg.PrefetchDelay = time.Duration(sec) * time.Second
 		}
 	}
 	urlEnvSet := false

@@ -36,11 +36,15 @@ type Server struct {
 	onActivation      ActivationCallback
 	onMovieActivation MovieActivationCallback
 	onSync            SyncCallback
-	activeSeriesMu    sync.Mutex
-	activeSeries      map[int]chan struct{}
-	activeTapsMu      sync.Mutex
-	activeTaps        map[string]struct{}
-	httpServer        *http.Server
+	activeSeriesMu        sync.Mutex
+	activeSeries          map[int]chan struct{}
+	httpServer            *http.Server
+	prefetchMu            sync.Mutex
+	prefetchCond          *sync.Cond
+	prefetchQueue         []*prefetchTask
+	prefetchStop          chan struct{}
+	currentPrefetch       *prefetchTask
+	cancelCurrentPrefetch context.CancelFunc
 }
 
 // NewServer creates a new HTTP client playback handler server.
@@ -50,8 +54,10 @@ func NewServer(cfg *models.Config, database *db.DB, onActivation ActivationCallb
 		database:     database,
 		onActivation: onActivation,
 		activeSeries: make(map[int]chan struct{}),
-		activeTaps:   make(map[string]struct{}),
+		prefetchStop: make(chan struct{}),
 	}
+	srv.prefetchCond = sync.NewCond(&srv.prefetchMu)
+	go srv.prefetchWorker()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/play/movie/", srv.handleMoviePlay)
@@ -114,8 +120,19 @@ func (s *Server) Start() {
 	}()
 }
 
-// Stop gracefully shuts down the HTTP server.
+// Stop gracefully shuts down the HTTP server and prefetch worker.
 func (s *Server) Stop(ctx context.Context) error {
+	s.prefetchMu.Lock()
+	select {
+	case <-s.prefetchStop:
+	default:
+		close(s.prefetchStop)
+	}
+	s.prefetchCond.Broadcast()
+	if s.cancelCurrentPrefetch != nil {
+		s.cancelCurrentPrefetch()
+	}
+	s.prefetchMu.Unlock()
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -356,6 +373,10 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 0. If client is requesting an episode currently in the prefetch queue or waiting in delay,
+	// cancel it immediately because the player is now requesting it directly.
+	s.cancelPrefetchIfQueued(seriesID, seasonNum, epNum, variantKey)
+
 	// 1. Query SQLite database for 302 target URL
 	targetURL := ""
 	if s.database != nil {
@@ -452,9 +473,9 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		finalRedirectURL := s.formatRedirect(targetURL)
 		log.Printf("[Proxy] Series %s (Resolved ID: %d) S%02dE%02d (Variant '%s') -> HTTP 302 Redirect: %s", rawSeriesID, seriesID, seasonNum, epNum, variantKey, finalRedirectURL)
 
-		// Trigger predictive fetch-ahead for next episode(s) in background (500ms Tap & Bail) ONLY if streamcache is enabled
+		// Enqueue predictive fetch-ahead for next episode(s) in global prefetch queue ONLY if streamcache is enabled
 		if s.cfg.StreamcacheURL != "" && s.cfg.FetchAheadCount > 0 && s.database != nil {
-			go s.triggerFetchAhead(seriesID, seasonNum, epNum, variantKey, s.cfg.FetchAheadCount)
+			s.triggerFetchAhead(seriesID, seasonNum, epNum, variantKey, s.cfg.FetchAheadCount)
 		}
 
 		http.Redirect(w, r, finalRedirectURL, http.StatusFound)
@@ -483,87 +504,246 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Target episode not available and series unactivated", http.StatusBadGateway)
 }
 
+// prefetchTask represents a single upcoming series episode queued for streamcache warming.
+type prefetchTask struct {
+	seriesID   int
+	seasonNum  int
+	episodeNum int
+	variantKey string
+	targetURL  string
+}
+
+// enqueuePrefetch appends an upcoming episode to the global prefetch queue if not already queued or in-flight.
+func (s *Server) enqueuePrefetch(task *prefetchTask) {
+	if s.cfg.StreamcacheURL == "" || task == nil || task.targetURL == "" {
+		return
+	}
+
+	s.prefetchMu.Lock()
+	defer s.prefetchMu.Unlock()
+
+	// 1. Check if currently in-flight
+	if s.currentPrefetch != nil &&
+		s.currentPrefetch.seriesID == task.seriesID &&
+		s.currentPrefetch.seasonNum == task.seasonNum &&
+		s.currentPrefetch.episodeNum == task.episodeNum &&
+		s.currentPrefetch.variantKey == task.variantKey {
+		return
+	}
+
+	// 2. Check if already queued
+	for _, item := range s.prefetchQueue {
+		if item.seriesID == task.seriesID &&
+			item.seasonNum == task.seasonNum &&
+			item.episodeNum == task.episodeNum &&
+			item.variantKey == task.variantKey {
+			return
+		}
+	}
+
+	s.prefetchQueue = append(s.prefetchQueue, task)
+	log.Printf("[Proxy] Enqueued prefetch task: Series %d S%02dE%02d '%s' (Queue length: %d)",
+		task.seriesID, task.seasonNum, task.episodeNum, task.variantKey, len(s.prefetchQueue))
+	s.prefetchCond.Signal()
+}
+
+// cancelPrefetchIfQueued immediately dequeues or aborts prefetch for an episode if a client begins playing it.
+func (s *Server) cancelPrefetchIfQueued(seriesID, seasonNum, epNum int, variantKey string) {
+	if variantKey == "" {
+		variantKey = "base"
+	}
+
+	s.prefetchMu.Lock()
+	defer s.prefetchMu.Unlock()
+
+	// 1. If currently waiting in delay timer for this exact episode, abort it immediately
+	if s.currentPrefetch != nil &&
+		s.currentPrefetch.seriesID == seriesID &&
+		s.currentPrefetch.seasonNum == seasonNum &&
+		s.currentPrefetch.episodeNum == epNum &&
+		s.currentPrefetch.variantKey == variantKey {
+		log.Printf("[Proxy] Client requested Series %d S%02dE%02d during prefetch delay. Aborting prefetch tap (player will stream directly).",
+			seriesID, seasonNum, epNum)
+		if s.cancelCurrentPrefetch != nil {
+			cancelFn := s.cancelCurrentPrefetch
+			s.cancelCurrentPrefetch = nil
+			cancelFn()
+		}
+		s.currentPrefetch = nil
+		return
+	}
+
+	// 2. Remove from pending queue if present
+	poppedFromQueue := false
+	newQueue := make([]*prefetchTask, 0, len(s.prefetchQueue))
+	for _, item := range s.prefetchQueue {
+		if item.seriesID == seriesID &&
+			item.seasonNum == seasonNum &&
+			item.episodeNum == epNum &&
+			item.variantKey == variantKey {
+			log.Printf("[Proxy] Client requested Series %d S%02dE%02d. Removed from prefetch queue (Queue length: %d -> %d).",
+				seriesID, seasonNum, epNum, len(s.prefetchQueue), len(s.prefetchQueue)-1)
+			poppedFromQueue = true
+			continue
+		}
+		newQueue = append(newQueue, item)
+	}
+	s.prefetchQueue = newQueue
+
+	// 3. If an item was popped from the queue while another item was actively counting down,
+	// reset the countdown timer so the newly started playback gets a full fresh quiet window.
+	if poppedFromQueue && s.currentPrefetch != nil && s.cancelCurrentPrefetch != nil {
+		log.Printf("[Proxy] Live playback popped an item from queue. Resetting active prefetch delay timer for Series %d S%02dE%02d to full %s quiet window.",
+			s.currentPrefetch.seriesID, s.currentPrefetch.seasonNum, s.currentPrefetch.episodeNum, s.cfg.PrefetchDelay)
+		s.prefetchQueue = append([]*prefetchTask{s.currentPrefetch}, s.prefetchQueue...)
+		s.currentPrefetch = nil
+		cancelFn := s.cancelCurrentPrefetch
+		s.cancelCurrentPrefetch = nil
+		cancelFn()
+	}
+}
+
+// prefetchWorker processes the global prefetch queue in FIFO order, waiting PREFETCH_DELAY between sequential taps.
+func (s *Server) prefetchWorker() {
+	for {
+		s.prefetchMu.Lock()
+		for len(s.prefetchQueue) == 0 {
+			select {
+			case <-s.prefetchStop:
+				s.prefetchMu.Unlock()
+				return
+			default:
+			}
+			s.prefetchCond.Wait()
+			select {
+			case <-s.prefetchStop:
+				s.prefetchMu.Unlock()
+				return
+			default:
+			}
+		}
+
+		// Pop next task (FIFO)
+		task := s.prefetchQueue[0]
+		s.prefetchQueue = s.prefetchQueue[1:]
+
+		ctx, cancel := context.WithCancel(context.Background())
+		s.currentPrefetch = task
+		s.cancelCurrentPrefetch = cancel
+		delay := s.cfg.PrefetchDelay
+		s.prefetchMu.Unlock()
+
+		// Wait prefetch delay (can be canceled if client plays this episode)
+		canceled := false
+		if delay > 0 {
+			log.Printf("[Proxy] Prefetch worker: waiting %s delay before tapping Series %d S%02dE%02d...",
+				delay, task.seriesID, task.seasonNum, task.episodeNum)
+			select {
+			case <-ctx.Done():
+				canceled = true
+			case <-time.After(delay):
+			case <-s.prefetchStop:
+				cancel()
+				s.prefetchMu.Lock()
+				s.currentPrefetch = nil
+				s.cancelCurrentPrefetch = nil
+				s.prefetchMu.Unlock()
+				return
+			}
+		}
+
+		if canceled {
+			s.prefetchMu.Lock()
+			s.currentPrefetch = nil
+			s.cancelCurrentPrefetch = nil
+			s.prefetchMu.Unlock()
+			cancel()
+			continue
+		}
+
+		// Delay completed without cancellation. Clear cancel function before tapping
+		// so cancelPrefetchIfQueued knows delay has finished.
+		s.prefetchMu.Lock()
+		s.cancelCurrentPrefetch = nil
+		s.prefetchMu.Unlock()
+
+		// Execute tap while currentPrefetch is still set for in-flight deduplication
+		s.executePrefetchTap(task)
+
+		s.prefetchMu.Lock()
+		s.currentPrefetch = nil
+		s.prefetchMu.Unlock()
+		cancel()
+	}
+}
+
+// executePrefetchTap sends a 5-second 64 KB tap to streamcache to begin upstream hydration.
+func (s *Server) executePrefetchTap(task *prefetchTask) {
+	if task == nil || task.targetURL == "" {
+		return
+	}
+
+	tapURL := s.formatRedirect(task.targetURL)
+	log.Printf("[Proxy] Prefetch worker executing tap (5s): Series %d S%02dE%02d -> %s",
+		task.seriesID, task.seasonNum, task.episodeNum, tapURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tapURL, nil)
+	if err != nil {
+		log.Printf("[Proxy] Prefetch tap error building request for Series %d S%02dE%02d: %v",
+			task.seriesID, task.seasonNum, task.episodeNum, err)
+		return
+	}
+	req.Header.Set("User-Agent", "dp2strm-fetch-ahead/1.0")
+
+	resp, pErr := http.DefaultClient.Do(req)
+	if pErr != nil {
+		log.Printf("[Proxy] Prefetch tap network error for Series %d S%02dE%02d: %v",
+			task.seriesID, task.seasonNum, task.episodeNum, pErr)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[Proxy] Prefetch tap failed with HTTP status %d for Series %d S%02dE%02d",
+			resp.StatusCode, task.seriesID, task.seasonNum, task.episodeNum)
+		return
+	}
+
+	buf := make([]byte, 64*1024)
+	n, _ := io.ReadFull(resp.Body, buf)
+	if n == 0 {
+		log.Printf("[Proxy] Prefetch tap failed to read stream data (0 bytes read) for Series %d S%02dE%02d",
+			task.seriesID, task.seasonNum, task.episodeNum)
+		return
+	}
+
+	log.Printf("[Proxy] Prefetch tap latched: Series %d S%02dE%02d (status: %d, read %d bytes)",
+		task.seriesID, task.seasonNum, task.episodeNum, resp.StatusCode, n)
+}
+
+// triggerFetchAhead queries upcoming episodes and enqueues them into the global prefetch queue.
 func (s *Server) triggerFetchAhead(seriesID, seasonNum, epNum int, variantKey string, count int) {
+	if s.database == nil || count <= 0 {
+		return
+	}
 	nextEps, err := s.database.GetNextSeriesEpisodes(seriesID, seasonNum, epNum, variantKey, count)
 	if err != nil {
 		log.Printf("[Proxy] Fetch-ahead error querying upcoming episodes for series %d: %v", seriesID, err)
 		return
 	}
-	if len(nextEps) == 0 {
-		return
-	}
-
 	for _, ep := range nextEps {
-		if ep.TargetURL == "" {
-			continue
+		if ep.TargetURL != "" {
+			s.enqueuePrefetch(&prefetchTask{
+				seriesID:   seriesID,
+				seasonNum:  ep.SeasonNum,
+				episodeNum: ep.EpisodeNum,
+				variantKey: ep.VariantKey,
+				targetURL:  ep.TargetURL,
+			})
 		}
-
-		// 1. Check 24-hour cooldown: block re-tapping if successfully tapped within 24h
-		if ep.LastTappedAt != nil && time.Since(*ep.LastTappedAt) < 24*time.Hour {
-			log.Printf("[Proxy] Fetch-ahead tap skipped for Series %d S%02dE%02d: already tapped %s ago (cooldown: 24h)",
-				seriesID, ep.SeasonNum, ep.EpisodeNum, time.Since(*ep.LastTappedAt).Round(time.Minute))
-			continue
-		}
-
-		// 2. In-flight deduplication: prevent concurrent taps during rapid client probes (e.g. ffprobe/ffmpeg)
-		tapKey := fmt.Sprintf("%d:%d:%d:%s", seriesID, ep.SeasonNum, ep.EpisodeNum, ep.VariantKey)
-		s.activeTapsMu.Lock()
-		if _, inFlight := s.activeTaps[tapKey]; inFlight {
-			s.activeTapsMu.Unlock()
-			continue
-		}
-		s.activeTaps[tapKey] = struct{}{}
-		s.activeTapsMu.Unlock()
-
-		func(targetEp db.EpisodeTarget, key string) {
-			defer func() {
-				s.activeTapsMu.Lock()
-				delete(s.activeTaps, key)
-				s.activeTapsMu.Unlock()
-			}()
-
-			tapURL := s.formatRedirect(targetEp.TargetURL)
-			log.Printf("[Proxy] Fetch-ahead tap (5s): Series %d S%02dE%02d -> %s", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, tapURL)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, tapURL, nil)
-			if err != nil {
-				log.Printf("[Proxy] Fetch-ahead error building request for Series %d S%02dE%02d: %v", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, err)
-				return
-			}
-			req.Header.Set("User-Agent", "dp2strm-fetch-ahead/1.0")
-
-			resp, pErr := http.DefaultClient.Do(req)
-			if pErr != nil {
-				log.Printf("[Proxy] Fetch-ahead tap network error for Series %d S%02dE%02d: %v", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, pErr)
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				log.Printf("[Proxy] Fetch-ahead tap failed with HTTP status %d for Series %d S%02dE%02d", resp.StatusCode, seriesID, targetEp.SeasonNum, targetEp.EpisodeNum)
-				return
-			}
-
-			// Read a small initial buffer (64 KB) to ensure streamcache establishes the upstream
-			// hydration worker and begins background caching before we disconnect.
-			buf := make([]byte, 64*1024)
-			n, _ := io.ReadFull(resp.Body, buf)
-			if n == 0 {
-				log.Printf("[Proxy] Fetch-ahead tap failed to read stream data (0 bytes read) for Series %d S%02dE%02d", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum)
-				return
-			}
-
-			// Tap succeeded! Record last_tapped_at to enforce 24-hour cooldown.
-			log.Printf("[Proxy] Fetch-ahead tap latched: Series %d S%02dE%02d (status: %d, read %d bytes)", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, resp.StatusCode, n)
-			if s.database != nil {
-				if err := s.database.MarkStreamVariantTapped(seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, targetEp.VariantKey, time.Now()); err != nil {
-					log.Printf("[Proxy] Error updating last_tapped_at for Series %d S%02dE%02d: %v", seriesID, targetEp.SeasonNum, targetEp.EpisodeNum, err)
-				}
-			}
-		}(ep, tapKey)
 	}
 }
 
