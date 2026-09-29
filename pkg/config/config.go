@@ -50,6 +50,7 @@ func DefaultConfig() *models.Config {
 		Ordering:               "-created_at",
 		EnableNFO:              false,
 		ActivationRefreshDelay: 10 * time.Second,
+		ActiveSeriesRefreshInterval: 4 * time.Hour,
 	}
 }
 
@@ -91,6 +92,13 @@ func LoadConfig() *models.Config {
 			cfg.PrefetchDelay = d
 		} else if sec, err := strconv.Atoi(v); err == nil && sec >= 0 {
 			cfg.PrefetchDelay = time.Duration(sec) * time.Second
+		}
+	}
+	if v := os.Getenv("ACTIVE_SERIES_REFRESH_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.ActiveSeriesRefreshInterval = d
+		} else if sec, err := strconv.Atoi(v); err == nil && sec >= 0 {
+			cfg.ActiveSeriesRefreshInterval = time.Duration(sec) * time.Second
 		}
 	}
 	urlEnvSet := false

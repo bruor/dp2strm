@@ -362,6 +362,7 @@ func (c *Client) FetchSeriesProviders(ctx context.Context, seriesID int) ([]mode
 func (c *Client) TriggerSeriesProviderInfo(ctx context.Context, seriesID, relationID int) (map[string]any, error) {
 	path := fmt.Sprintf("/api/vod/series/%d/provider-info/", seriesID)
 	query := url.Values{}
+	query.Set("include_episodes", "true")
 	if relationID > 0 {
 		query.Set("relation_id", fmt.Sprintf("%d", relationID))
 	}

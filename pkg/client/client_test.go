@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -239,4 +240,34 @@ func TestClientFetchSeriesEpisodes(t *testing.T) {
 		t.Fatalf("Expected error for HTML response, got nil")
 	}
 }
+
+func TestTriggerSeriesProviderInfo(t *testing.T) {
+	var capturedQuery url.Values
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/vod/series/123/provider-info/" {
+			capturedQuery = r.URL.Query()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id": 123, "episodes_fetched": true}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "test-api-key", "")
+	res, err := c.TriggerSeriesProviderInfo(context.Background(), 123, 456)
+	if err != nil {
+		t.Fatalf("Expected nil error, got: %v", err)
+	}
+	if res["episodes_fetched"] != true {
+		t.Errorf("Unexpected result: %v", res)
+	}
+	if capturedQuery.Get("include_episodes") != "true" {
+		t.Errorf("Expected include_episodes=true, got: %q", capturedQuery.Get("include_episodes"))
+	}
+	if capturedQuery.Get("relation_id") != "456" {
+		t.Errorf("Expected relation_id=456, got: %q", capturedQuery.Get("relation_id"))
+	}
+}
+
 

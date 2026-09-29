@@ -124,6 +124,19 @@ func main() {
 	// 2. Start HTTP Playback Handler Server
 	proxyServer := proxy.NewServer(cfg, database, onActivation)
 	proxyServer.SetMovieActivationCallback(onMovieActivation)
+	proxyServer.SetSeriesActivityCallback(func(seriesID int) {
+		log.Printf("[Proxy] Series activity detected for series ID %d (playback). Checking for upstream updates...", seriesID)
+		rCtx, rCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer rCancel()
+		newEps, err := syncEngine.RefreshSeriesUpstream(rCtx, seriesID)
+		if err != nil {
+			log.Printf("[Proxy] Error refreshing series ID %d upstream: %v", seriesID, err)
+		} else if newEps > 0 {
+			log.Printf("[Proxy] Series ID %d upstream refresh complete: %d new episodes created.", seriesID, newEps)
+		} else {
+			log.Printf("[Proxy] Series ID %d upstream refresh complete: already up to date.", seriesID)
+		}
+	})
 	proxyServer.SetSyncCallback(func() error {
 		return syncEngine.StageCatalogDelta(context.Background())
 	})

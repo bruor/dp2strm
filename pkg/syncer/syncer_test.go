@@ -1164,6 +1164,175 @@ func TestResolveSeriesStreamVariantsLazyUpstreamTrigger(t *testing.T) {
 	}
 }
 
+func TestRefreshSeriesUpstream(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_refresh.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	seriesID := 9901
+	cleanTitle := "Dark Matter"
+	folderName := "Dark Matter (2024) [tmdbid=1234]"
+	_ = database.UpsertInitialSeriesState(seriesID, "1234", "", cleanTitle, 2024, folderName)
+	_ = database.SetSeriesActivated(seriesID, "1234", cleanTitle)
+
+	providerInfoCalled := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case strings.Contains(r.URL.Path, "/providers/"):
+			_, _ = w.Write([]byte(`[{"id": 42}]`))
+		case strings.Contains(r.URL.Path, "/provider-info/"):
+			providerInfoCalled = true
+			if r.URL.Query().Get("include_episodes") != "true" {
+				t.Errorf("Expected include_episodes=true query param")
+			}
+			_, _ = w.Write([]byte(`{"status": "ok"}`))
+		case strings.Contains(r.URL.Path, "/episodes/"):
+			_, _ = w.Write([]byte(`[
+				{"id": 101, "name": "Episode 1", "season_number": 1, "episode_number": 1, "container_extension": "mkv"},
+				{"id": 102, "name": "Episode 2", "season_number": 1, "episode_number": 2, "container_extension": "mkv"}
+			]`))
+		default:
+			_, _ = w.Write([]byte(`{"id": 9901, "name": "Dark Matter", "year": 2024, "tmdb_id": "1234"}`))
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL:              ts.URL,
+		APIKey:                      "test-key",
+		OutputDir:                   tempDir,
+		URL:                         "http://localhost:8080",
+		ActiveSeriesRefreshInterval: 4 * time.Hour,
+	}
+	c := client.NewClient(ts.URL, "test-key")
+	s := NewSyncer(cfg, c, database)
+
+	created, err := s.RefreshSeriesUpstream(context.Background(), seriesID)
+	if err != nil {
+		t.Fatalf("RefreshSeriesUpstream failed: %v", err)
+	}
+	if !providerInfoCalled {
+		t.Errorf("Expected provider-info to be called")
+	}
+	if created != 2 {
+		t.Errorf("Expected 2 episodes created, got %d", created)
+	}
+
+	// Verify strm files on disk
+	ep1 := filepath.Join(tempDir, "TV Shows", folderName, "Season 01", "Dark Matter - S01E01.strm")
+	if _, err := os.Stat(ep1); os.IsNotExist(err) {
+		t.Errorf("Expected S01E01 to exist on disk")
+	}
+	ep2 := filepath.Join(tempDir, "TV Shows", folderName, "Season 01", "Dark Matter - S01E02.strm")
+	if _, err := os.Stat(ep2); os.IsNotExist(err) {
+		t.Errorf("Expected S01E02 to exist on disk")
+	}
+
+	// Verify DB state updated
+	st, _ := database.GetSeriesState(seriesID)
+	if st == nil {
+		t.Fatalf("Expected series state to exist in DB")
+	}
+	if st.LastEpisodeCount != 2 {
+		t.Errorf("Expected LastEpisodeCount=2, got %d", st.LastEpisodeCount)
+	}
+	if st.LastRefreshedAt == nil {
+		t.Errorf("Expected LastRefreshedAt to be set")
+	}
+}
+
+func TestStageCatalogDeltaActiveSeriesSweep(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_sweep.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Series 9901: Activated, last refreshed 5 hours ago -> DUE
+	_ = database.UpsertInitialSeriesState(9901, "1234", "", "Dark Matter", 2024, "Dark Matter (2024) [tmdbid=1234]")
+	_ = database.SetSeriesActivated(9901, "1234", "Dark Matter")
+	fiveHoursAgo := time.Now().Add(-5 * time.Hour)
+	_ = database.SetSeriesLastRefreshedForTest(9901, fiveHoursAgo)
+
+	// Series 9902: Activated, last refreshed 10 minutes ago -> NOT DUE
+	_ = database.UpsertInitialSeriesState(9902, "5678", "", "Recent Show", 2024, "Recent Show (2024) [tmdbid=5678]")
+	_ = database.SetSeriesActivated(9902, "5678", "Recent Show")
+	tenMinutesAgo := time.Now().Add(-10 * time.Minute)
+	_ = database.SetSeriesLastRefreshedForTest(9902, tenMinutesAgo)
+
+	// Series 9903: Not activated -> NOT DUE
+	_ = database.UpsertInitialSeriesState(9903, "9012", "", "Unactivated Show", 2024, "Unactivated Show (2024) [tmdbid=9012]")
+
+	probedSeriesIDs := make(map[string]bool)
+	var mu sync.Mutex
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case strings.Contains(r.URL.Path, "/providers/"):
+			_, _ = w.Write([]byte(`[{"id": 1}]`))
+		case strings.Contains(r.URL.Path, "/provider-info/"):
+			for _, idStr := range []string{"9901", "9902", "9903"} {
+				if strings.Contains(r.URL.Path, "/series/"+idStr+"/") {
+					probedSeriesIDs[idStr] = true
+				}
+			}
+			_, _ = w.Write([]byte(`{"status": "ok"}`))
+		case strings.Contains(r.URL.Path, "/episodes/"):
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "name": "Episode 1", "season_number": 1, "episode_number": 1, "container_extension": "mkv"}
+			]`))
+		case strings.Contains(r.URL.Path, "/movies/"):
+			_, _ = w.Write([]byte(`{"count": 0, "next": null, "previous": null, "results": []}`))
+		case strings.Contains(r.URL.Path, "/series/"):
+			_, _ = w.Write([]byte(`{"count": 0, "next": null, "previous": null, "results": []}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL:              ts.URL,
+		APIKey:                      "test-key",
+		OutputDir:                   tempDir,
+		URL:                         "http://localhost:8080",
+		ActiveSeriesRefreshInterval: 4 * time.Hour,
+	}
+	c := client.NewClient(ts.URL, "test-key")
+	s := NewSyncer(cfg, c, database)
+
+	err = s.StageCatalogDelta(context.Background())
+	if err != nil {
+		t.Fatalf("StageCatalogDelta failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !probedSeriesIDs["9901"] {
+		t.Errorf("Expected Series 9901 (due for refresh) to be probed")
+	}
+	if probedSeriesIDs["9902"] {
+		t.Errorf("Series 9902 (recently refreshed) should NOT have been probed")
+	}
+	if probedSeriesIDs["9903"] {
+		t.Errorf("Series 9903 (not activated) should NOT have been probed")
+	}
+}
+
+
+
 
 
 

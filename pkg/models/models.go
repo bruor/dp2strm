@@ -45,6 +45,7 @@ type Config struct {
 	Ordering               string        `json:"ordering"`
 	EnableNFO              bool          `json:"enable_nfo"`
 	ActivationRefreshDelay time.Duration `json:"activation_refresh_delay"`
+	ActiveSeriesRefreshInterval time.Duration `json:"active_series_refresh_interval"`
 }
 
 // GetDispatcharrStreamURL returns StreamcacheDispatcharrURL if set, otherwise falls back to DispatcharrURL.

@@ -112,3 +112,28 @@ func TestPrefetchDelayConfig(t *testing.T) {
 
 	os.Unsetenv("PREFETCH_DELAY")
 }
+
+func TestActiveSeriesRefreshIntervalConfig(t *testing.T) {
+	// 1. Default should be 4 hours
+	cfgDefault := DefaultConfig()
+	if cfgDefault.ActiveSeriesRefreshInterval != 4*time.Hour {
+		t.Errorf("Default ActiveSeriesRefreshInterval = %v, want 4h", cfgDefault.ActiveSeriesRefreshInterval)
+	}
+
+	// 2. Custom duration string (e.g. 6h)
+	os.Setenv("ACTIVE_SERIES_REFRESH_INTERVAL", "6h")
+	cfgParsed := LoadConfig()
+	if cfgParsed.ActiveSeriesRefreshInterval != 6*time.Hour {
+		t.Errorf("ActiveSeriesRefreshInterval = %v, want 6h", cfgParsed.ActiveSeriesRefreshInterval)
+	}
+
+	// 3. Integer seconds (e.g. 7200)
+	os.Setenv("ACTIVE_SERIES_REFRESH_INTERVAL", "7200")
+	cfgSec := LoadConfig()
+	if cfgSec.ActiveSeriesRefreshInterval != 2*time.Hour {
+		t.Errorf("ActiveSeriesRefreshInterval from integer = %v, want 2h", cfgSec.ActiveSeriesRefreshInterval)
+	}
+
+	os.Unsetenv("ACTIVE_SERIES_REFRESH_INTERVAL")
+}
+

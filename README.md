@@ -107,6 +107,7 @@ services:
       # Timezone & Scheduling
       - TZ=America/Toronto
       - SYNC_INTERVAL=4h
+      - ACTIVE_SERIES_REFRESH_INTERVAL=4h # Probe interval for activated series upstream episode refresh (Default: 4h)
       - BATCH_SIZE=100 # Shared budget per run (50% movies / 50% series with rollover)
       - DISPATCHARR_ORDERING=-created_at # Server-side sorting prioritizing recent updates & additions
       - PAGE_SIZE=100 # Number of items fetched per API page request (Dispatcharr max: 100)
@@ -202,6 +203,7 @@ services:
 | `SYNC_CRON` | `""` | Optional 5-field cron schedule expression (e.g., `0 */4 * * *`) |
 | `RECONCILE_INTERVAL` | `24h` | Daily deep disk reconciliation janitor interval (Default: `24h`) |
 | `RECONCILE_CRON` | `""` | Optional 5-field cron expression for reconciler (e.g., `0 3 * * *`) |
+| `ACTIVE_SERIES_REFRESH_INTERVAL` | `4h` | Upstream probe interval for activated series episode updates (`4h`, `2h`, `0` to disable) |
 | `DISPATCHARR_WORKERS` | `1` | Number of concurrent workers staging from Dispatcharr |
 | `EMBY_WORKERS` | `1` | Number of concurrent workers processing queue tasks & Emby updates |
 | `EMBY_BATCH_SIZE` | `25` | Micro-batch size of newly written media files before triggering Emby scan |

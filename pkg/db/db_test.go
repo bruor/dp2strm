@@ -950,5 +950,66 @@ func TestDeduplicateQueueAndGetQueuedItemIDsMap(t *testing.T) {
 	}
 }
 
+func TestActivatedSeriesRefreshHelpers(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "dp2strm_db_refresh_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	d, err := Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+	defer d.Close()
+
+	now := time.Now()
+
+	// 1001: Activated, last_refreshed_at = nil
+	_ = d.UpsertInitialSeriesState(1001, "tmdb1001", "", "Show One", 2024, "Show One (2024)")
+	_ = d.SetSeriesActivated(1001, "tmdb1001", "Show One")
+
+	// 1002: Activated, last_refreshed_at = 5 hours ago
+	_ = d.UpsertInitialSeriesState(1002, "tmdb1002", "", "Show Two", 2024, "Show Two (2024)")
+	_ = d.SetSeriesActivated(1002, "tmdb1002", "Show Two")
+	_, _ = d.conn.Exec("UPDATE series_state SET last_refreshed_at = ? WHERE series_id = 1002", now.Add(-5*time.Hour))
+
+	// 1003: Activated, last_refreshed_at = 10 minutes ago
+	_ = d.UpsertInitialSeriesState(1003, "tmdb1003", "", "Show Three", 2024, "Show Three (2024)")
+	_ = d.SetSeriesActivated(1003, "tmdb1003", "Show Three")
+	_, _ = d.conn.Exec("UPDATE series_state SET last_refreshed_at = ? WHERE series_id = 1003", now.Add(-10*time.Minute))
+
+	// 1004: Unactivated
+	_ = d.UpsertInitialSeriesState(1004, "tmdb1004", "", "Show Four", 2024, "Show Four (2024)")
+
+	// Test GetActivatedSeriesDueForRefresh(4 * time.Hour) -> should return 1001 and 1002
+	due, err := d.GetActivatedSeriesDueForRefresh(4 * time.Hour)
+	if err != nil {
+		t.Fatalf("GetActivatedSeriesDueForRefresh failed: %v", err)
+	}
+	dueMap := make(map[int]bool)
+	for _, id := range due {
+		dueMap[id] = true
+	}
+	if !dueMap[1001] || !dueMap[1002] || dueMap[1003] || dueMap[1004] {
+		t.Errorf("Unexpected due series for 4h refresh: %v", due)
+	}
+
+	// Test IsSeriesDueForActivityRefresh(..., 30 * time.Minute)
+	if !d.IsSeriesDueForActivityRefresh(1001, 30*time.Minute) {
+		t.Errorf("Series 1001 with nil last_refreshed_at should be due for activity refresh")
+	}
+	if !d.IsSeriesDueForActivityRefresh(1002, 30*time.Minute) {
+		t.Errorf("Series 1002 with 5h old last_refreshed_at should be due for activity refresh")
+	}
+	if d.IsSeriesDueForActivityRefresh(1003, 30*time.Minute) {
+		t.Errorf("Series 1003 with 10m old last_refreshed_at should NOT be due for 30m activity refresh")
+	}
+	if d.IsSeriesDueForActivityRefresh(1004, 30*time.Minute) {
+		t.Errorf("Unactivated series 1004 should NOT be due for activity refresh")
+	}
+}
+
+
 
 

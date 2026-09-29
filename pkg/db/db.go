@@ -404,6 +404,12 @@ func (d *DB) MarkSeriesRefreshed(seriesID int, epCount int, dispatcharrUpdatedAt
 	return err
 }
 
+// SetSeriesLastRefreshedForTest overrides the last_refreshed_at timestamp for testing purposes.
+func (d *DB) SetSeriesLastRefreshedForTest(seriesID int, t time.Time) error {
+	_, err := d.conn.Exec("UPDATE series_state SET last_refreshed_at = ? WHERE series_id = ?;", t, seriesID)
+	return err
+}
+
 // GetActiveSeriesToSync returns all activated series that need episode checking (skips Ended series and series with future next_episode_air_date).
 func (d *DB) GetActiveSeriesToSync(currentDate string) ([]int, error) {
 	query := `
@@ -426,6 +432,45 @@ func (d *DB) GetActiveSeriesToSync(currentDate string) ([]int, error) {
 		}
 	}
 	return ids, nil
+}
+
+// GetActivatedSeriesDueForRefresh returns all activated series that haven't been refreshed within maxAge.
+func (d *DB) GetActivatedSeriesDueForRefresh(maxAge time.Duration) ([]int, error) {
+	cutoff := time.Now().Add(-maxAge)
+	query := `
+	SELECT series_id FROM series_state
+	WHERE is_activated = 1
+	  AND (last_refreshed_at IS NULL OR last_refreshed_at <= ?);
+	`
+	rows, err := d.conn.Query(query, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// IsSeriesDueForActivityRefresh checks if an activated series is due for an activity-driven refresh based on a debounce cooldown.
+func (d *DB) IsSeriesDueForActivityRefresh(seriesID int, cooldown time.Duration) bool {
+	var isActivated bool
+	var lastRefreshed sql.NullTime
+	query := `SELECT is_activated, last_refreshed_at FROM series_state WHERE series_id = ?`
+	err := d.conn.QueryRow(query, seriesID).Scan(&isActivated, &lastRefreshed)
+	if err != nil || !isActivated {
+		return false
+	}
+	if !lastRefreshed.Valid {
+		return true
+	}
+	return time.Since(lastRefreshed.Time) >= cooldown
 }
 
 // GetSeriesIDByIdentifier resolves a series identifier string (e.g. "tmdb:218510", "imdb:tt12345", or "26078") to the active Dispatcharr series ID.

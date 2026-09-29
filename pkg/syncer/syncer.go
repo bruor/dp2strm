@@ -915,6 +915,39 @@ func (s *Syncer) PopulateActivatedSeries(ctx context.Context, seriesID int, clea
 	return s.PopulateActivatedSeriesDisk(ctx, seriesID, title, dir, episodes)
 }
 
+// RefreshSeriesUpstream probes Dispatcharr for fresh upstream episode data for an activated series,
+// ingests any newly discovered episodes to disk as .strm files, and refreshes Emby if new content was found.
+func (s *Syncer) RefreshSeriesUpstream(ctx context.Context, seriesID int) (int, error) {
+	if s.client != nil {
+		relations, pErr := s.client.FetchSeriesProviders(ctx, seriesID)
+		if pErr == nil && len(relations) > 0 {
+			for _, rel := range relations {
+				_, _ = s.client.TriggerSeriesProviderInfo(ctx, seriesID, rel.ID)
+			}
+		} else {
+			_, _ = s.client.TriggerSeriesProviderInfo(ctx, seriesID, 0)
+		}
+	}
+
+	created, _, err := s.PopulateActivatedSeries(ctx, seriesID, "", "")
+	if err != nil {
+		if s.database != nil {
+			_ = s.database.MarkSeriesRefreshed(seriesID, 0, time.Time{})
+		}
+		return 0, err
+	}
+
+	if s.database != nil {
+		_ = s.database.MarkSeriesRefreshed(seriesID, 0, time.Time{})
+	}
+
+	if created > 0 {
+		s.TriggerTargetedEmbySeriesRefresh(ctx, seriesID)
+	}
+
+	return created, nil
+}
+
 func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, err error) {
 	c, p, _, _, _, err := s.processSingleMovieProfiled(ctx, movie, dryRun)
 	return c, p, err
@@ -1524,7 +1557,39 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 		}
 	}
 
-	// 2. Stage Series
+	// 2. Probe upstream provider info for activated series due for refresh
+	if s.database != nil && s.cfg.ActiveSeriesRefreshInterval > 0 {
+		dueSeriesIDs, err := s.database.GetActivatedSeriesDueForRefresh(s.cfg.ActiveSeriesRefreshInterval)
+		if err != nil {
+			log.Printf("[Stager] Error checking active series due for refresh: %v", err)
+		} else if len(dueSeriesIDs) > 0 {
+			log.Printf("[Stager] Probing upstream provider info for %d active series (interval: %v)...", len(dueSeriesIDs), s.cfg.ActiveSeriesRefreshInterval)
+			for i, sid := range dueSeriesIDs {
+				if s.isCircuitTripped() {
+					log.Printf("[Stager] Circuit breaker tripped, pausing active series upstream sweep.")
+					break
+				}
+				if i > 0 {
+					select {
+					case <-ctx.Done():
+						break
+					case <-time.After(500 * time.Millisecond):
+					}
+				}
+				if ctx.Err() != nil {
+					break
+				}
+				newEps, rErr := s.RefreshSeriesUpstream(ctx, sid)
+				if rErr != nil {
+					log.Printf("[Stager] Upstream refresh failed for active series ID %d: %v", sid, rErr)
+				} else if newEps > 0 {
+					log.Printf("[Stager] Active series ID %d refreshed: %d new episodes created.", sid, newEps)
+				}
+			}
+		}
+	}
+
+	// 3. Stage Series
 	seenSeriesTMDB := make(map[string]bool)
 	seenSeriesFingerprint := make(map[string]bool)
 	trackSeriesSeen := func(srs []models.Series) {
@@ -1586,7 +1651,7 @@ func (s *Syncer) StageCatalogDelta(ctx context.Context) error {
 		}
 	}
 
-	// 3. Detect disappeared Movies and Series (only if full sync completed without errors and circuit breaker was not tripped)
+	// 4. Detect disappeared Movies and Series (only if full sync completed without errors and circuit breaker was not tripped)
 	if !s.isCircuitTripped() && s.database != nil {
 		if movieFetchComplete {
 			moviesRoot := filepath.Join(s.cfg.OutputDir, "Movies")

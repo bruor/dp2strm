@@ -29,6 +29,9 @@ type MovieActivationCallback func(movieID int) (baseTargetURL string, err error)
 // SyncCallback is a function signature for triggering an on-demand catalog staging pass.
 type SyncCallback func() error
 
+// SeriesActivityCallback is a function signature for background series upstream refresh on playback activity.
+type SeriesActivityCallback func(seriesID int)
+
 // Server is the HTTP client playback handler (issues HTTP 302 redirects to Dispatcharr / streamcache).
 type Server struct {
 	cfg               *models.Config
@@ -36,6 +39,7 @@ type Server struct {
 	onActivation      ActivationCallback
 	onMovieActivation MovieActivationCallback
 	onSync            SyncCallback
+	onSeriesActivity  SeriesActivityCallback
 	activeSeriesMu        sync.Mutex
 	activeSeries          map[int]chan struct{}
 	httpServer            *http.Server
@@ -96,6 +100,11 @@ func (s *Server) SetMovieActivationCallback(cb MovieActivationCallback) {
 // SetSyncCallback sets the callback function for triggering manual staging runs.
 func (s *Server) SetSyncCallback(cb SyncCallback) {
 	s.onSync = cb
+}
+
+// SetSeriesActivityCallback sets the callback function for activity-driven series upstream refresh.
+func (s *Server) SetSeriesActivityCallback(cb SeriesActivityCallback) {
+	s.onSeriesActivity = cb
 }
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +485,11 @@ func (s *Server) handleSeriesPlay(w http.ResponseWriter, r *http.Request) {
 		// Enqueue predictive fetch-ahead for next episode(s) in global prefetch queue ONLY if streamcache is enabled
 		if s.cfg.StreamcacheURL != "" && s.cfg.FetchAheadCount > 0 && s.database != nil {
 			s.triggerFetchAhead(seriesID, seasonNum, epNum, variantKey, s.cfg.FetchAheadCount)
+		}
+
+		// Trigger background activity-driven series upstream refresh if due (30m debounce cooldown)
+		if s.onSeriesActivity != nil && s.database != nil && s.database.IsSeriesDueForActivityRefresh(seriesID, 30*time.Minute) {
+			go s.onSeriesActivity(seriesID)
 		}
 
 		http.Redirect(w, r, finalRedirectURL, http.StatusFound)
