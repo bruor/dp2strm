@@ -16,7 +16,7 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 	os.Setenv("EMBY_URL", "http://emby.example.com")
 	os.Setenv("EMBY_API_KEY", "emby-token-456")
 	os.Setenv("STREAMCACHE_URL", "http://streamcache.local:8080")
-	os.Setenv("STREAMCACHE_DISPATCHARR_URL", "https://dp.example.com")
+	os.Setenv("STREAMCACHE_DISPATCHARR_URL", "https://dp-public.example.com")
 
 	defer func() {
 		os.Unsetenv("DISPATCHARR_URL")
@@ -51,11 +51,11 @@ func TestLoadConfigFromEnvironment(t *testing.T) {
 	if cfg.StreamcacheURL != "http://streamcache.local:8080" {
 		t.Errorf("StreamcacheURL = %q; want %q", cfg.StreamcacheURL, "http://streamcache.local:8080")
 	}
-	if cfg.StreamcacheDispatcharrURL != "https://dp.example.com" {
-		t.Errorf("StreamcacheDispatcharrURL = %q; want %q", cfg.StreamcacheDispatcharrURL, "https://dp.example.com")
+	if cfg.StreamcacheDispatcharrURL != "https://dp-public.example.com" {
+		t.Errorf("StreamcacheDispatcharrURL = %q; want %q", cfg.StreamcacheDispatcharrURL, "https://dp-public.example.com")
 	}
-	if cfg.GetDispatcharrStreamURL() != "https://dp.example.com" {
-		t.Errorf("GetDispatcharrStreamURL() = %q; want %q", cfg.GetDispatcharrStreamURL(), "https://dp.example.com")
+	if cfg.GetDispatcharrStreamURL() != "https://dp-public.example.com" {
+		t.Errorf("GetDispatcharrStreamURL() = %q; want %q", cfg.GetDispatcharrStreamURL(), "https://dp-public.example.com")
 	}
 }
 
