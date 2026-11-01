@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)](Dockerfile)
 
-`dp2strm` is a high-performance, cloud-native Go application designed to bridge [Dispatcharr](https://github.com/dispatcharr) with [Emby](https://emby.media) / Jellyfin and [bruor/streamcache](https://github.com/bruor/streamcache).
+`dp2strm` is a high-performance, cloud-native Go application designed to bridge [Dispatcharr](https://github.com/dispatcharr) with [Emby](https://emby.media) and [bruor/streamcache](https://github.com/bruor/streamcache).
 
 Rather than simply dumping tens of thousands of `.strm` files onto disk and overwhelming your media server, `dp2strm` acts as a complete **ingestion rate controller, playback router, and cache orchestrator**:
 
@@ -192,7 +192,7 @@ services:
 | `DISPATCHARR_XC_PASSWORD` | `""` | Optional: legacy XC password (not required when using API Key) |
 | `OUTPUT_DIR` | `/data/strm` | Target container path for generated `.strm` tree |
 | `PORT` | `8080` | Port for the embedded HTTP 302 redirect handler |
-| `URL` | `http://localhost:8080` | Public URL accessible by Emby/Jellyfin players |
+| `URL` | `http://localhost:8080` | Public URL accessible by Emby players |
 | `SYNC_INTERVAL` | `4h` | Background catalog staging interval (`4h`, `1h`, `0` for single run) |
 | `SYNC_CRON` | `""` | Optional 5-field cron schedule expression (e.g., `0 */4 * * *`) |
 | `RECONCILE_INTERVAL` | `24h` | Daily deep disk reconciliation janitor interval (Default: `24h`) |
@@ -215,8 +215,8 @@ services:
 | `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial staging pass on container startup |
 | `BATCH_SIZE` | `0` | Shared batch creation limit per run (`0` = Unlimited) |
 | `DISPATCHARR_ORDERING` | `-created_at` | Server-side ordering parameter for Dispatcharr VOD endpoints |
-| `EMBY_URL` | `""` | Optional Emby/Jellyfin server URL for library refresh hooks |
-| `EMBY_API_KEY` | `""` | Optional Emby/Jellyfin API key |
+| `EMBY_URL` | `""` | Optional Emby server URL for library refresh hooks |
+| `EMBY_API_KEY` | `""` | Optional Emby API key |
 | `EMBY_MEDIA_PATH` | `""` | Optional override: internal Emby mount path for `.strm` media folder |
 | `EMBY_TV_LIBRARY` | `""` | Optional override: library name if multiple TV libraries exist (e.g. `"TV shows"`) |
 | `EMBY_MOVIES_LIBRARY` | `""` | Optional override: library name if multiple Movie libraries exist (e.g. `"Movies"`) |

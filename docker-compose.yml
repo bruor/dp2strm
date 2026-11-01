@@ -50,7 +50,7 @@ services:
       - PREFETCH_DELAY=5m # Sequential delay before & between next-episode taps (Default: 5m)
       - RETENTION_GRACE_DAYS=7
 
-      # --- Emby / Jellyfin Rescan Hooks (Zero-Config Auto-Discovered) ---
+      # --- Emby Rescan Hooks (Zero-Config Auto-Discovered) ---
       - EMBY_URL= # e.g. http://emby:8096
       - EMBY_API_KEY= # Emby API Token
       - EMBY_MEDIA_PATH= # Optional override: only needed if auto-discovery fails (e.g. /media/strm)
