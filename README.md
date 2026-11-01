@@ -1,81 +1,76 @@
-# dp2strm - Dispatcharr to STRM File Generator & Playback Handler
+# dp2strm - Dispatcharr to STRM Bridge, Emby Ingestion Controller & Streamcache Proxy Router
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)](Dockerfile)
 
-`dp2strm` is a lightweight, cloud-native Go application designed to interface with [Dispatcharr](https://github.com/dispatcharr). It generates standardized `.strm` stream pointers, `.nfo` metadata XML files, and `poster.jpg`/`fanart.jpg` artwork on disk formatted specifically for Emby, Jellyfin, and Kodi.
+`dp2strm` is a high-performance, cloud-native Go application designed to bridge [Dispatcharr](https://github.com/dispatcharr) with [Emby](https://emby.media) / Jellyfin and [bruor/streamcache](https://github.com/bruor/streamcache).
 
-`dp2strm` operates strictly as a metadata generator and high-speed HTTP `302 Found` redirect handler—it **does not buffer, transcode, or proxy media bytes**.
+Rather than simply dumping tens of thousands of `.strm` files onto disk and overwhelming your media server, `dp2strm` acts as a complete **ingestion rate controller, playback router, and cache orchestrator**:
+
+1. **Active Emby Ingestion Rate Control**: Paces large library ingestions into controlled micro-batches, actively monitors Emby's scheduled task status until idle, logs real-time dynamic completion ETAs, and implements reference-counted **VIP On-Demand Playback** that immediately aborts background library scans when a user starts watching.
+2. **Deep [bruor/streamcache](https://github.com/bruor/streamcache) Integration**: Routes stream playback through `streamcache`, hides upstream IPTV credentials from `.strm` files on disk, and employs a boundary-aware **predictive fetch-ahead engine ("Tap & Bail")** to pre-warm upcoming episodes in the cache while watching.
+3. **Lazy On-Demand Catalog Activation**: Uses a two-pass architecture (Pass 1 lightweight placeholder shells ➔ Pass 2 on-demand background hydration upon playback) to slash initial API and disk overhead by 95%+.
+
+`dp2strm` operates strictly as a metadata coordinator and high-speed HTTP `302 Found` redirect handler—it **does not buffer, transcode, or proxy media bytes**.
 
 ---
 
-## ✨ Key Features
+## ✨ Key Capabilities & Architecture
 
-- **Native Dispatcharr VOD Proxy Streaming**:
-  - Automatically redirects playback directly to Dispatcharr's Native VOD Streaming Proxy (`/proxy/vod/movie/{uuid}` and `/proxy/vod/episode/{uuid}`).
-  - Authenticates securely via `DISPATCHARR_API_KEY` without requiring separate XC subscriber usernames or passwords.
+### 🚦 Emby Library Ingestion Rate Control & Scan Orchestration
+- **Universal TaskManager Batch Synchronization & Dynamic ETA**:
+  - Ingesting 20,000–50,000+ titles at once causes Emby to peg CPU at 100% and lock its SQLite database.
+  - `dp2strm` stages updates into micro-batches (`EMBY_BATCH_SIZE=25`), triggers Emby's `Scan media library` scheduled task, and halts the worker queue until Emby reports **100% Idle** before releasing the next batch.
+  - Logs real-time overall progress (`Processed/Total [%]`, remaining batches) and calculates dynamic completion ETAs based on rolling average scan durations.
+- **⭐ VIP On-Demand User Playback (Priority 100)**:
+  - When a user presses Play on an unactivated title, `dp2strm` acquires a reference-counted VIP lock.
+  - Any active global background library scan is aborted instantly via `DELETE /ScheduledTasks/Running/{Id}`, pausing background worker queues so Emby can index and stream the user's item with zero lag.
+  - Concurrent user activations stack safely using reference counting.
+- **Zero-Config Emby Library Auto-Discovery**:
+  - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status. Supports multi-library environments with optional name overrides (`EMBY_TV_LIBRARY`, `EMBY_MOVIES_LIBRARY`).
+- **Targeted Online Provider ID Refresh (`POST /Items/{Id}/Refresh`)**:
+  - Refreshes series and movies directly via TMDB/IMDb IDs (`AnyProviderIdEquals=tmdb.XXXXX`), rescanning only that specific item's directory in `<1s` without running global library scans.
+
+### 🛡️ Native `bruor/streamcache` Integration & Predictive Cache Warming
+- **Transparent Streamcache URL Rewriting**:
+  - Natively rewrites Dispatcharr content URLs to [bruor/streamcache](https://github.com/bruor/streamcache) endpoints (`<STREAMCACHE_URL>/stream?url=<escaped_target>`).
+  - Completely obfuscates upstream subscriber credentials from `.strm` files on disk and player access logs.
+  - Supports external address overrides (`STREAMCACHE_DISPATCHARR_URL`) when internal Docker network hostnames differ from external reverse proxies.
+- **Predictive Fetch-Ahead Engine ("Tap & Bail")**:
+  - Configured via `FETCH_AHEAD_COUNT` (e.g. 1–2 episodes) and `PREFETCH_DELAY` (default: `5m`).
+  - When a user plays an episode, `dp2strm` waits until playback has been stable for `PREFETCH_DELAY` before sequentially firing lightweight background requests directly to `streamcache` to warm the upcoming episodes.
+  - **Boundary & Variant Aware**: Discovers valid sequential episodes in SQLite, rolls across season boundaries seamlessly (`S01E10` ➔ `S02E01`), matches the user's active playback quality variant (e.g. 4K vs 1080p Base) with fallback, and halts cleanly at season/series finales.
+
+### 🎬 Lazy On-Demand Catalog Activation (TV & Movies)
+- **On-Demand TV Series Activation Lifecycle (`Season 01/S01E01`)**:
+  - **Pass 1 (Lightweight Initial Sync)**: Generates artwork and `Season 01/Show Name - S01E01.strm` accompanied by an instructional NFO (`⚡ Play to Activate Series` with `<watched>false</watched>`, `<playcount>0</playcount>`, `<runtime>1</runtime>`). Series cleanly displays as **Unplayed** in Emby and renders in the **Next Up** rail on the home screen!
+  - **Pass 2 (Instant Playback Handshake)**: Clicking Play on Episode 1 writes all series episodes to disk and issues an instant **HTTP 302 Found** redirect in `<1 second` directly to the real video stream. For shows starting at Season 2+, an embedded video bumper (`activated.mp4`) is streamed to prevent watch history mismatches.
+  - **Asynchronous Session-Aware Metadata Sync**: A background worker holds the VIP lock, prunes temporary instruction NFOs, verifies active playback sessions in Emby (`GET /Sessions`, configurable timeout `ACTIVATION_REFRESH_DELAY=10s`), and triggers a targeted metadata refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) that cleanly updates episode titles without interrupting playback.
+- **On-Demand Movie Quality Activation**:
+  - **Pass 1**: Generates initial `Movie.strm` base file pointing to `/play/movie/{identifier}` with artwork.
+  - **On Play**: `handleMoviePlay` cancels any running background library scans, resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
+  - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
+
+### 🧠 Resilient Fingerprinting, Self-Healing & State Engine
 - **Resilient External ID Routing (`tmdb:` / `imdb:`)**:
   - `.strm` files output resilient, permanent external ID URLs (`/play/movie/tmdb:1739639`, `/play/series/tmdb:218510/1/1`, or `/play/movie/imdb:tt36615831`), falling back to numeric Dispatcharr IDs only for unindexed media.
 - **Content Fingerprint Healing & Upstream ID Supersede**:
   - Automatically matches streams across upstream provider drop/re-add cycles using content fingerprints (`TMDB ID` or `Title + Year`).
   - When Dispatcharr issues a new internal ID for previously indexed content, `dp2strm` transfers user activation/watch state, updates SQLite, immediately purges the old obsolete directory on disk (`os.RemoveAll`), and bypasses the 7-day retention grace period.
 - **Immediate Obsolete Folder Pruning on Metadata Upgrade**:
-  - Distinguishes between true content deletions (safely buffered by `RETENTION_GRACE_DAYS=7`) vs in-place metadata/folder upgrades (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=12345]`).
-  - When writing or reconciling upgraded folders with rich ID metadata, old un-tagged legacy folders are pruned from disk immediately and unregistered from `soft_deleted_items`, eliminating duplicate entries in Emby.
-- **Self-Healing Legacy Playback & Dual-Key Caching**:
-  - If a legacy numeric ID (e.g. `1168810`) returns a 404 upstream from Dispatcharr, `dp2strm` automatically locates the active stream using the stored TMDB ID or Title + Year fingerprint.
-  - Caches the resolved stream in SQLite under both IDs for sub-millisecond future hits and enqueues a background reconciliation to correct the file on disk.
+  - Distinguishes between true content deletions (safely buffered by `RETENTION_GRACE_DAYS=7`) vs in-place metadata/folder upgrades (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=12345]`). Old un-tagged legacy folders are pruned from disk immediately, eliminating duplicate entries in Emby.
 - **In-Place STRM URL Reconciliation Fast-Path**:
-  - When `.strm` files on disk require internal URL updates (e.g. upgrading from numeric ID to `tmdb:`), `dp2strm` rewrites the file in-place and preserves its original modification timestamp (`os.Chtimes`).
-  - In-place URL updates finish in `<1ms`, do **not** increment `EMBY_BATCH_SIZE`, and bypass Emby library scan pauses, ensuring zero playback disruption.
-- **Controlled Folder Migrations (Scheduled Reconciler Only)**:
-  - When an unindexed title receives a TMDB ID later, folder paths remain strictly locked during real-time playback to prevent Emby from encountering 404s during probing.
-  - Folder structure renames (e.g. `Movie (Year)` ➔ `Movie (Year) [tmdbid=...]`) are handled exclusively by the scheduled worker reconciliation pass, where each rename is tracked as a structural update (`STRMCreated = true`), notified to Emby (`NotifyMediaUpdated`), and paced through `EMBY_BATCH_SIZE`.
-- **On-Demand TV Series Activation Lifecycle (`Season 01/S01E01`)**:
-  - **Pass 1 (Lightweight Sync)**: Generates posters and `Season 01/Show Name - S01E01.strm` accompanied by an explicit instructions NFO (`⚡ Play to Activate Series` with `<watched>false</watched>`, `<playcount>0</playcount>`, `<runtime>1</runtime>`). Series cleanly displays as **Unplayed** in Emby and renders in the **Next Up** rail on the home screen!
-  - **Pass 2 (Instant Playback Handshake)**: Clicking Play on Episode 1 writes all series episodes and issues an instant **HTTP 302 Found** redirect in `<1 second` directly to the real episode video (zero bumper delay!). For shows starting at Season 2+, an embedded 5-second video bumper (`activated.mp4`) is streamed to prevent watch history mismatches.
-  - **Asynchronous Session-Aware Metadata Sync**: A background worker holds the VIP lock, prunes all `*S01E01*.nfo` files, verifies the active playback session in Emby (`GET /Sessions`, configurable timeout `ACTIVATION_REFRESH_DELAY=10s`), and triggers a targeted Emby metadata refresh (`POST /Items/{Id}/Refresh?ReplaceAllMetadata=true`) that cleanly fetches TMDB/TVDB episode titles without interrupting active playback!
-- **On-Demand Movie Quality Activation**:
-  - **Pass 1 (Lightweight Sync)**: Generates initial `Movie.strm` base file pointing to `/play/movie/{identifier}` with artwork (and NFO metadata if enabled).
-  - **On Play**: `handleMoviePlay` cancels any running background library scans, resolves backing provider streams via `/api/vod/movies/{id}/providers/`, classifies Base 1080p vs 4K tiers, saves variants to SQLite, writes secondary `Movie - 4K.strm` files to disk for Emby's version dropdown, and marks movie active in `movie_state`.
-  - **Subsequent Passes**: Scheduled sync passes re-verify and update all quality variant `.strm` files (`Movie.strm`, `Movie - 4K.strm`) on disk.
-- **Dedicated Staged-Queue & Worker Pipeline**:
-  - **Catalog Stager (`DISPATCHARR_WORKERS`)**: Fast, lightweight catalog staging runs on a timer (default: `4h`), populating the SQLite `sync_queue` without blocking on disk I/O or Emby scans.
-  - **Universal TaskManager Batch Synchronization & Dynamic ETA**: Micro-batches (configured via `EMBY_BATCH_SIZE`, default: 25) write directly to disk, trigger Emby's `Scan media library` scheduled task (`POST /Library/Refresh`), and halt until Emby returns to **100% Idle** before releasing the next batch. Completely eliminates file collisions and race conditions. Logs real-time overall queue progress (`Processed/Total [%]`, remaining items & batches) and dynamically estimates time-to-sync completion based on rolling average Emby library scan durations.
-  - **⭐ VIP On-Demand Series Playback (Priority 100)**: When a user presses play on an unactivated show (`S00E99`), `dp2strm` acquires a reference-counted VIP lock; any active background global library scan is stopped instantly via `DELETE /ScheduledTasks/Running/{Id}` and background queue workers are paused so Emby can index and stream the activated item with zero delay. Secondary/concurrent activations stack safely with reference counting without interference.
-- **Zero-Config Emby Library Auto-Discovery**:
-  - Automatically queries Emby's VirtualFolders API on startup to detect TV and Movies library IDs, mount locations, and `RealtimeMonitor` status.
-  - Supports multi-library environments with optional name targeting (`EMBY_TV_LIBRARY`, `EMBY_MOVIES_LIBRARY`).
-- **Targeted Online Provider ID Refresh (`POST /Items/{Id}/Refresh`)**:
-  - Refreshes series and movies directly via TMDB/IMDb IDs (`AnyProviderIdEquals=tmdb.XXXXX`), rescanning only that specific show's folder in `<1s` without running global library scans.
-- **Daily Deep Disk Reconciler (`RECONCILE_INTERVAL`)**:
-  - Configurable daily janitor (default: `24h` / `0 3 * * *`) that scans SQLite state (`WHERE is_activated = 0`), automatically converts legacy folder structures to the new `Specials/S00E99` architecture at `PriorityReconcile (50)`, and prunes orphaned files.
-- **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**: 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` using WAL mode (`series_state`, `movie_state`, `sync_queue`, `stream_variants`).
-- **Smart Series Update Scheduling Engine**:
-  - Unactivated series skip fetching episode lists on scheduled sync runs (0 API calls!).
-  - Activated series automatically detect new episode drops during periodic catalog staging when Dispatcharr reports newer `updated_at` timestamps or increased `episode_count`.
-  - Airing episode drops are prioritized at `PriorityAiring` (`30`), jumping ahead of bulk catalog intake (`PriorityBatch` = `10`), with newly created `.strm` files naturally ingested into Emby via standard batch scans.
+  - When `.strm` files on disk require internal URL updates (e.g. upgrading from numeric ID to `tmdb:`), `dp2strm` rewrites the file in-place and preserves its original modification timestamp (`os.Chtimes`), bypassing Emby library scans.
+- **Pure-Go SQLite State Engine (`modernc.org/sqlite`)**:
+  - 100% CGO-free, single static Alpine binary compatible. Stores state in `/data/db/dp2strm.db` using WAL mode (`series_state`, `movie_state`, `sync_queue`, `stream_variants`).
 - **Dynamic Shared-Pool Batching with Budget Rollover (`BATCH_SIZE`)**:
-  - `BATCH_SIZE` limits the total number of **newly created media files** per sync run.
-  - Automatically splits the budget 50/50 between Movies and Series.
-  - **Dynamic Rollover**: If one media type has fewer new items available, its unused quota automatically rolls over to the other type.
-  - Keeps Emby's periodic import window predictable (e.g. `BATCH_SIZE=100` targets ~20 minutes of Emby indexing per hour).
-- **Server-Side Prioritized Ordering (`DISPATCHARR_ORDERING`)**:
-  - Automatically sorts API queries with `?ordering=-created_at` by default.
-  - Ensures brand-new movie additions and TV series with fresh episode drops are placed at the front of the sync queue in every pass.
+  - Limits total newly created media files per sync run, automatically splitting 50/50 between Movies and Series with unused quota rollover.
 - **Duplicate Year & Clean NFO Title Sanitization**:
   - Strips trailing release year from NFO `<title>` and `<originaltitle>` XML tags, preventing Emby from duplicating the release year in its UI.
   - Automatically collapses duplicate consecutive year tags (e.g., `Yahoo+ (2022) (2022)` ➔ `Yahoo+ (2022)`) across all folders and filenames.
-  - Strips quality, codec, and release tags from titles while preserving legitimate release years.
-- **Emby Multi-Version Hierarchy Support**: Automatically classifies 1080p base default versions (`Movie.strm`) vs 4K secondary versions (`Movie - 4K.strm`) for Emby's version dropdown menu.
-- **Auto-Healing URL Normalization**: Automatically appends `:PORT` to `cfg.URL` if port is omitted and non-standard (e.g. `http://dp2strm` ➜ `http://dp2strm:8080`), preventing port 80 connection errors in FFmpeg/Emby.
-- **Single Unified Emby Refresh Trigger**: Emby receives a single refresh webhook at the end of each shared sync pass only when new `.strm` media files are created on disk.
-- **`streamcache` Integration & Boundary-Aware Predictive Pre-Caching**:
-  - Optional integration with `streamcache` transparent proxy (`<STREAMCACHE_URL>/stream?url=<escaped_target>`).
-  - **Predictive Tap & Bail** (`FETCH_AHEAD_COUNT`, default `0` = disabled; `PREFETCH_DELAY`, default `5m`): When watching a series, waits `PREFETCH_DELAY` before sequentially firing lightweight background requests directly to `streamcache` with the upstream Dispatcharr target URL to warm/pre-buffer upcoming episodes without overwhelming upstream connections.
-  - **Boundary & Variant Aware**: Discovers only valid sequential episodes in SQLite, seamlessly rolling over season boundaries (e.g. `S01E10` ➔ `S02E01`), matching the user's active playback variant (e.g. `4k` vs `base`) with per-episode base fallback, and stopping cleanly at season/series finales.
-- **Timezone-Aware Cron Scheduler**: Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).
+- **Timezone-Aware Cron Scheduler**:
+  - Native 5-field cron scheduling (`SYNC_CRON="0 3 * * *"`) and IANA timezone awareness (`TZ="America/New_York"`).
 
 ---
 
@@ -233,7 +228,7 @@ services:
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/your-user/dp2strm.git
+git clone https://github.com/bruor/dp2strm.git
 cd dp2strm
 
 # 2. Build static Go binary
