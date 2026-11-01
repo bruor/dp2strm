@@ -4,12 +4,12 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)](Dockerfile)
 
-`dp2strm` is a high-performance, cloud-native Go application designed to bridge [Dispatcharr](https://github.com/dispatcharr) with [Emby](https://emby.media) and [bruor/streamcache](https://github.com/bruor/streamcache).
+`dp2strm` is a high-performance, cloud-native Go application designed to bridge [Dispatcharr](https://github.com/dispatcharr) with [Emby](https://emby.media) and [streamcache](https://github.com/bruor/streamcache).
 
 Rather than simply dumping tens of thousands of `.strm` files onto disk and overwhelming your media server, `dp2strm` acts as a complete **ingestion rate controller, playback router, and cache orchestrator**:
 
 1. **Active Emby Ingestion Rate Control**: Paces large library ingestions into controlled micro-batches, actively monitors Emby's scheduled task status until idle, logs real-time dynamic completion ETAs, and implements reference-counted **VIP On-Demand Playback** that immediately aborts background library scans when a user starts watching.
-2. **Deep [bruor/streamcache](https://github.com/bruor/streamcache) Integration**: Routes stream playback through `streamcache`, hides upstream IPTV credentials from `.strm` files on disk, and employs a boundary-aware **predictive fetch-ahead engine ("Tap & Bail")** to pre-warm upcoming episodes in the cache while watching.
+2. **Deep [streamcache](https://github.com/bruor/streamcache) Integration**: Routes stream playback through `streamcache`, hides upstream IPTV credentials from `.strm` files on disk, and employs a boundary-aware **predictive fetch-ahead engine ("Tap & Bail")** to pre-warm upcoming episodes in the cache while watching.
 3. **Lazy On-Demand Catalog Activation**: Uses a two-pass architecture (Pass 1 lightweight placeholder shells ➔ Pass 2 on-demand background hydration upon playback) to slash initial API and disk overhead by 95%+.
 
 `dp2strm` operates strictly as a metadata coordinator and high-speed HTTP `302 Found` redirect handler—it **does not buffer, transcode, or proxy media bytes**.
@@ -32,9 +32,9 @@ Rather than simply dumping tens of thousands of `.strm` files onto disk and over
 - **Targeted Online Provider ID Refresh (`POST /Items/{Id}/Refresh`)**:
   - Refreshes series and movies directly via TMDB/IMDb IDs (`AnyProviderIdEquals=tmdb.XXXXX`), rescanning only that specific item's directory in `<1s` without running global library scans.
 
-### 🛡️ Native `bruor/streamcache` Integration & Predictive Cache Warming
+### 🛡️ Native `streamcache` Integration & Predictive Cache Warming
 - **Transparent Streamcache URL Rewriting**:
-  - Natively rewrites Dispatcharr content URLs to [bruor/streamcache](https://github.com/bruor/streamcache) endpoints (`<STREAMCACHE_URL>/stream?url=<escaped_target>`).
+  - Natively rewrites Dispatcharr content URLs to [streamcache](https://github.com/bruor/streamcache) endpoints (`<STREAMCACHE_URL>/stream?url=<escaped_target>`).
   - Completely obfuscates upstream subscriber credentials from `.strm` files on disk and player access logs.
   - Supports external address overrides (`STREAMCACHE_DISPATCHARR_URL`) when internal Docker network hostnames differ from external reverse proxies.
 - **Predictive Fetch-Ahead Engine ("Tap & Bail")**:
