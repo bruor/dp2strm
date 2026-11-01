@@ -80,8 +80,7 @@ Rather than simply dumping tens of thousands of `.strm` files onto disk and over
 services:
   dp2strm:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: https://github.com/bruor/dp2strm.git#main
     container_name: dp2strm
     restart: unless-stopped
     # ports:

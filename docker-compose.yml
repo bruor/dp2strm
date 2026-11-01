@@ -1,8 +1,9 @@
 services:
   dp2strm:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: https://github.com/bruor/dp2strm.git#main
+      # Or build locally if repository is cloned:
+      # context: .
     container_name: dp2strm
     restart: unless-stopped
     # ports:
