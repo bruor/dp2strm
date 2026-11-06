@@ -748,7 +748,7 @@ func (s *Syncer) ResolveSeriesStreamVariants(ctx context.Context, seriesID int) 
 
 		var realTargetURL string
 		if ep.UUID != "" && s.cfg.APIKey != "" {
-			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s?api_key=%s", s.cfg.GetDispatcharrStreamURL(), ep.UUID, s.cfg.APIKey)
+			realTargetURL = fmt.Sprintf("%s/proxy/vod/episode/%s", s.cfg.GetDispatcharrStreamURL(), ep.UUID)
 		} else {
 			realTargetURL = fmt.Sprintf("%s/series/%s/%s/%d.%s", s.cfg.GetDispatcharrStreamURL(), s.cfg.XCUser, s.cfg.XCPassword, ep.ID, ext)
 		}
@@ -1133,7 +1133,7 @@ func (s *Syncer) PopulateActivatedMovie(ctx context.Context, movieID int, cleanT
 
 			var realTargetURL string
 			if targetUUID != "" && s.cfg.APIKey != "" {
-				realTargetURL = fmt.Sprintf("%s/proxy/vod/movie/%s?api_key=%s", s.cfg.GetDispatcharrStreamURL(), targetUUID, s.cfg.APIKey)
+				realTargetURL = fmt.Sprintf("%s/proxy/vod/movie/%s", s.cfg.GetDispatcharrStreamURL(), targetUUID)
 			} else {
 				realTargetURL = fmt.Sprintf("%s/movie/%s/%s/%d.%s", s.cfg.GetDispatcharrStreamURL(), s.cfg.XCUser, s.cfg.XCPassword, movieID, v.Container)
 			}

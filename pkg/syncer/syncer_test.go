@@ -1331,6 +1331,96 @@ func TestStageCatalogDeltaActiveSeriesSweep(t *testing.T) {
 	}
 }
 
+func TestVODStreamProxyTargetURLNoAPIKey(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_vod_url.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	episodeUUID := "ep-uuid-12345"
+	movieUUID := "mov-uuid-67890"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case strings.Contains(r.URL.Path, "/episodes/"):
+			_, _ = w.Write([]byte(fmt.Sprintf(`[
+				{"id": 501, "name": "Episode One", "season_number": 1, "episode_number": 1, "container_extension": "mkv", "uuid": "%s"}
+			]`, episodeUUID)))
+		case strings.HasPrefix(r.URL.Path, "/api/vod/series/"):
+			_, _ = w.Write([]byte(`{"id": 5001, "name": "Test Series", "year": 2024, "tmdb_id": "5001", "episode_count": 1}`))
+		case strings.Contains(r.URL.Path, "/providers/"):
+			_, _ = w.Write([]byte(`[{"id": 1, "stream_id": "6001", "container_extension": "mkv", "category": {"id": 1, "name": "Action"}}]`))
+		case strings.HasPrefix(r.URL.Path, "/api/vod/movies/"):
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"id": 6001, "name": "Test Movie", "year": 2024, "tmdb_id": "6001", "uuid": "%s"}`, movieUUID)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &models.Config{
+		DispatcharrURL: ts.URL,
+		APIKey:         "secret-api-key",
+		XCUser:         "testuser",
+		XCPassword:     "testpass",
+		OutputDir:      tempDir,
+		URL:            "http://localhost:8080",
+	}
+
+	c := client.NewClient(ts.URL, cfg.APIKey)
+	s := NewSyncer(cfg, c, database)
+
+	// 1. Test Series Episode Target URL
+	seriesID := 5001
+	_ = database.UpsertInitialSeriesState(seriesID, "5001", "", "Test Series", 2024, "Test Series (2024)")
+	_, _, _, err = s.ResolveSeriesStreamVariants(context.Background(), seriesID)
+	if err != nil {
+		t.Fatalf("ResolveSeriesStreamVariants failed: %v", err)
+	}
+
+	targetSeriesURL, err := database.GetSeriesTargetURL(seriesID, 1, 1, "base")
+	if err != nil {
+		t.Fatalf("GetSeriesTargetURL failed: %v", err)
+	}
+	expectedSeriesURL := fmt.Sprintf("%s/proxy/vod/episode/%s", ts.URL, episodeUUID)
+	if targetSeriesURL != expectedSeriesURL {
+		t.Errorf("Expected series target URL %q, got %q", expectedSeriesURL, targetSeriesURL)
+	}
+	if strings.Contains(targetSeriesURL, "api_key=") {
+		t.Errorf("Series target URL must not contain api_key: %s", targetSeriesURL)
+	}
+
+	// 2. Test Movie Target URL
+	movieID := 6001
+	_ = database.UpsertInitialMovieState(movieID, "6001", "", "Test Movie", 2024, "Test Movie (2024)")
+	_, _, baseTarget, err := s.PopulateActivatedMovie(context.Background(), movieID, "Test Movie", "", 2024, "6001")
+	if err != nil {
+		t.Fatalf("PopulateActivatedMovie failed: %v", err)
+	}
+	expectedMovieURL := fmt.Sprintf("%s/proxy/vod/movie/%s", ts.URL, movieUUID)
+	if baseTarget != expectedMovieURL {
+		t.Errorf("Expected movie base target URL %q, got %q", expectedMovieURL, baseTarget)
+	}
+	if strings.Contains(baseTarget, "api_key=") {
+		t.Errorf("Movie base target URL must not contain api_key: %s", baseTarget)
+	}
+
+	targetMovieURL, err := database.GetMovieTargetURL(movieID, "base")
+	if err != nil {
+		t.Fatalf("GetMovieTargetURL failed: %v", err)
+	}
+	if targetMovieURL != expectedMovieURL {
+		t.Errorf("Expected movie target URL in DB %q, got %q", expectedMovieURL, targetMovieURL)
+	}
+	if strings.Contains(targetMovieURL, "api_key=") {
+		t.Errorf("Movie target URL in DB must not contain api_key: %s", targetMovieURL)
+	}
+}
+
 
 
 
