@@ -84,10 +84,20 @@ func LoadConfig() *models.Config {
 	} else if v := os.Getenv("DISPATCHARR_STREAM_URL"); v != "" {
 		cfg.StreamcacheDispatcharrURL = v
 	}
-	if v := os.Getenv("FETCH_AHEAD_COUNT"); v != "" {
+	prefetchCountExplicit := false
+	if v := os.Getenv("PREFETCH_COUNT"); v != "" {
 		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
 			cfg.FetchAheadCount = cnt
+			prefetchCountExplicit = true
 		}
+	} else if v := os.Getenv("FETCH_AHEAD_COUNT"); v != "" {
+		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
+			cfg.FetchAheadCount = cnt
+			prefetchCountExplicit = true
+		}
+	}
+	if !prefetchCountExplicit && cfg.StreamcacheURL != "" {
+		cfg.FetchAheadCount = 1
 	}
 	if v := os.Getenv("PREFETCH_DELAY"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= 0 {

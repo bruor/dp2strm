@@ -203,4 +203,38 @@ func TestAdultContentConfig(t *testing.T) {
 	os.Unsetenv("ADULT_GROUP_FILTER")
 }
 
+func TestPrefetchCountConfiguration(t *testing.T) {
+	// 1. Default with StreamcacheURL set -> 1
+	os.Setenv("STREAMCACHE_URL", "http://streamcache:8080")
+	cfg := LoadConfig()
+	if cfg.FetchAheadCount != 1 {
+		t.Errorf("FetchAheadCount with StreamcacheURL = %d, want 1", cfg.FetchAheadCount)
+	}
+
+	// 2. Explicit PREFETCH_COUNT overrides default
+	os.Setenv("PREFETCH_COUNT", "3")
+	cfg2 := LoadConfig()
+	if cfg2.FetchAheadCount != 3 {
+		t.Errorf("FetchAheadCount with PREFETCH_COUNT=3 = %d, want 3", cfg2.FetchAheadCount)
+	}
+
+	// 3. Explicit PREFETCH_COUNT=0 disables fetch ahead
+	os.Setenv("PREFETCH_COUNT", "0")
+	cfg3 := LoadConfig()
+	if cfg3.FetchAheadCount != 0 {
+		t.Errorf("FetchAheadCount with PREFETCH_COUNT=0 = %d, want 0", cfg3.FetchAheadCount)
+	}
+
+	// 4. Fallback to FETCH_AHEAD_COUNT if PREFETCH_COUNT not set
+	os.Unsetenv("PREFETCH_COUNT")
+	os.Setenv("FETCH_AHEAD_COUNT", "2")
+	cfg4 := LoadConfig()
+	if cfg4.FetchAheadCount != 2 {
+		t.Errorf("FetchAheadCount with FETCH_AHEAD_COUNT=2 = %d, want 2", cfg4.FetchAheadCount)
+	}
+
+	os.Unsetenv("STREAMCACHE_URL")
+	os.Unsetenv("FETCH_AHEAD_COUNT")
+}
+
 

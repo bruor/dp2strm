@@ -233,62 +233,48 @@ func TestPredictiveFetchAhead(t *testing.T) {
 
 	srv := NewServer(cfg, database, nil)
 
-	// 1. Play S01E01 with FetchAheadCount=2 -> should tap S01E02 and S02E01 (season rollover)
+	// 1. Play S01E01 with FetchAheadCount=2 -> should append S01E02 and S02E01 (season rollover) via &next_url=
 	req := httptest.NewRequest("GET", "/play/series/500/1/1", nil)
 	rec := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusFound {
-		t.Errorf("Expected 302 Found, got %d", rec.Code)
+		t.Fatalf("Expected 302 Found, got %d", rec.Code)
 	}
 
-	// Wait up to 500ms for async fetch-ahead goroutine to tap mockStreamcache
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(interceptedURLs)
-		mu.Unlock()
-		if count >= 2 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	loc := rec.Header().Get("Location")
+	parsedLoc, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("Failed to parse redirect location: %v", err)
+	}
+	if parsedLoc.Query().Get("url") != "https://dp.example.com/s01e01.mkv" {
+		t.Errorf("url want https://dp.example.com/s01e01.mkv, got %s", parsedLoc.Query().Get("url"))
+	}
+	nextURLs := parsedLoc.Query()["next_url"]
+	if len(nextURLs) != 2 {
+		t.Fatalf("Expected 2 next_url parameters, got %d: %v", len(nextURLs), nextURLs)
+	}
+	if nextURLs[0] != "https://dp.example.com/s01e02.mkv" {
+		t.Errorf("next_url 0 want https://dp.example.com/s01e02.mkv, got %s", nextURLs[0])
+	}
+	if nextURLs[1] != "https://dp.example.com/s02e01.mkv" {
+		t.Errorf("next_url 1 want https://dp.example.com/s02e01.mkv (season rollover), got %s", nextURLs[1])
 	}
 
-	mu.Lock()
-	captured := append([]string{}, interceptedURLs...)
-	interceptedURLs = nil
-	mu.Unlock()
-
-	if len(captured) != 2 {
-		t.Fatalf("Expected 2 fetch-ahead taps, got %d: %v", len(captured), captured)
-	}
-	if captured[0] != "https://dp.example.com/s01e02.mkv" {
-		t.Errorf("Tap 0 want https://dp.example.com/s01e02.mkv, got %s", captured[0])
-	}
-	if captured[1] != "https://dp.example.com/s02e01.mkv" {
-		t.Errorf("Tap 1 want https://dp.example.com/s02e01.mkv (season rollover), got %s", captured[1])
-	}
-
-	// 2. Play S02E01 (series finale / last episode) -> should make 0 fetch-ahead taps
+	// 2. Play S02E01 (series finale / last episode) -> should have 0 next_url parameters
 	req = httptest.NewRequest("GET", "/play/series/500/2/1", nil)
 	rec = httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusFound {
-		t.Errorf("Expected 302 Found, got %d", rec.Code)
+		t.Fatalf("Expected 302 Found, got %d", rec.Code)
+	}
+	parsedLoc, _ = url.Parse(rec.Header().Get("Location"))
+	if len(parsedLoc.Query()["next_url"]) != 0 {
+		t.Errorf("Expected 0 next_urls at end of series, got %v", parsedLoc.Query()["next_url"])
 	}
 
-	time.Sleep(100 * time.Millisecond)
-	mu.Lock()
-	captured = append([]string{}, interceptedURLs...)
-	interceptedURLs = nil
-	mu.Unlock()
-
-	if len(captured) != 0 {
-		t.Errorf("Expected 0 fetch-ahead taps at end of series, got %d: %v", len(captured), captured)
-	}
-
-	// 3. Play S01E01 with StreamcacheURL empty -> 0 fetch-ahead taps
+	// 3. Play S01E01 with StreamcacheURL empty -> raw redirect without &next_url=
 	cfgNoSC := &models.Config{
 		StreamcacheURL:  "",
 		FetchAheadCount: 2,
@@ -300,17 +286,14 @@ func TestPredictiveFetchAhead(t *testing.T) {
 	rec = httptest.NewRecorder()
 	srvNoSC.httpServer.Handler.ServeHTTP(rec, req)
 
-	time.Sleep(100 * time.Millisecond)
-	mu.Lock()
-	captured = append([]string{}, interceptedURLs...)
-	interceptedURLs = nil
-	mu.Unlock()
-
-	if len(captured) != 0 {
-		t.Errorf("Expected 0 taps when StreamcacheURL is empty, got %d", len(captured))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("Expected 302 Found, got %d", rec.Code)
+	}
+	if rec.Header().Get("Location") != "https://dp.example.com/s01e01.mkv" {
+		t.Errorf("Expected direct target URL when StreamcacheURL is empty, got %s", rec.Header().Get("Location"))
 	}
 
-	// 4. Play S01E01 with FetchAheadCount = 0 -> 0 fetch-ahead taps
+	// 4. Play S01E01 with FetchAheadCount = 0 -> 0 next_url parameters
 	cfgZeroCount := &models.Config{
 		StreamcacheURL:  mockStreamcache.URL,
 		FetchAheadCount: 0,
@@ -322,19 +305,15 @@ func TestPredictiveFetchAhead(t *testing.T) {
 	rec = httptest.NewRecorder()
 	srvZeroCount.httpServer.Handler.ServeHTTP(rec, req)
 
-	time.Sleep(100 * time.Millisecond)
-	mu.Lock()
-	captured = append([]string{}, interceptedURLs...)
-	interceptedURLs = nil
-	mu.Unlock()
-
-	if len(captured) != 0 {
-		t.Errorf("Expected 0 taps when FetchAheadCount is 0, got %d", len(captured))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("Expected 302 Found, got %d", rec.Code)
+	}
+	parsedLoc, _ = url.Parse(rec.Header().Get("Location"))
+	if len(parsedLoc.Query()["next_url"]) != 0 {
+		t.Errorf("Expected 0 next_urls when FetchAheadCount is 0, got %v", parsedLoc.Query()["next_url"])
 	}
 
-	// 5. Play S01E01 with variant "4k" -> should tap 4K variant for S01E02 and fallback to base for S02E01
-	// Clear tap cooldown on S02E01 from step 1 so it can be tapped again during this fallback test
-	_ = database.MarkStreamVariantTapped(seriesID, 2, 1, "base", time.Time{})
+	// 5. Play S01E01 with variant "4k" -> should resolve 4K variant for S01E02 and fallback to base for S02E01
 	_ = database.SaveStreamVariant(&db.StreamVariant{
 		ItemID:     seriesID,
 		ItemType:   "series",
@@ -358,33 +337,18 @@ func TestPredictiveFetchAhead(t *testing.T) {
 	srv4k.httpServer.Handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusFound {
-		t.Errorf("Expected 302 Found for 4k play, got %d", rec.Code)
+		t.Fatalf("Expected 302 Found for 4k play, got %d", rec.Code)
 	}
-
-	deadline = time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(interceptedURLs)
-		mu.Unlock()
-		if count >= 2 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	parsedLoc, _ = url.Parse(rec.Header().Get("Location"))
+	nextURLs = parsedLoc.Query()["next_url"]
+	if len(nextURLs) != 2 {
+		t.Fatalf("Expected 2 variant next_urls, got %d: %v", len(nextURLs), nextURLs)
 	}
-
-	mu.Lock()
-	captured = append([]string{}, interceptedURLs...)
-	interceptedURLs = nil
-	mu.Unlock()
-
-	if len(captured) != 2 {
-		t.Fatalf("Expected 2 variant fetch-ahead taps, got %d: %v", len(captured), captured)
+	if nextURLs[0] != "https://dp.example.com/s01e02_4k.mkv" {
+		t.Errorf("next_url[0] want 4k URL https://dp.example.com/s01e02_4k.mkv, got %s", nextURLs[0])
 	}
-	if captured[0] != "https://dp.example.com/s01e02_4k.mkv" {
-		t.Errorf("Tap 0 want 4k URL https://dp.example.com/s01e02_4k.mkv, got %s", captured[0])
-	}
-	if captured[1] != "https://dp.example.com/s02e01.mkv" {
-		t.Errorf("Tap 1 want base fallback URL https://dp.example.com/s02e01.mkv, got %s", captured[1])
+	if nextURLs[1] != "https://dp.example.com/s02e01.mkv" {
+		t.Errorf("next_url[1] want base fallback URL https://dp.example.com/s02e01.mkv, got %s", nextURLs[1])
 	}
 }
 
@@ -631,360 +595,178 @@ func TestPredictiveFetchAheadQueueFIFOAndDeduplication(t *testing.T) {
 	}
 	defer database.Close()
 
-	var mu sync.Mutex
-	var tapHistory []string
-	mockSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		tapHistory = append(tapHistory, r.URL.Query().Get("url"))
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("mock video chunk data for fetch ahead testing"))
-	}))
-	defer mockSC.Close()
-
 	seriesID := 555
-	_ = database.SaveStreamVariant(&db.StreamVariant{
-		ItemID:     seriesID,
-		ItemType:   "series",
-		SeasonNum:  1,
-		EpisodeNum: 1,
-		VariantKey: "base",
-		TargetURL:  "https://dp.example.com/s01e01.mkv",
-	})
-	_ = database.SaveStreamVariant(&db.StreamVariant{
-		ItemID:     seriesID,
-		ItemType:   "series",
-		SeasonNum:  1,
-		EpisodeNum: 2,
-		VariantKey: "base",
-		TargetURL:  "https://dp.example.com/s01e02.mkv",
-	})
-	_ = database.SaveStreamVariant(&db.StreamVariant{
-		ItemID:     seriesID,
-		ItemType:   "series",
-		SeasonNum:  1,
-		EpisodeNum: 3,
-		VariantKey: "base",
-		TargetURL:  "https://dp.example.com/s01e03.mkv",
-	})
+	_ = database.UpsertInitialSeriesState(seriesID, "555", "", "Test Show", 2024, "Test Show (2024)")
+	_ = database.SetSeriesActivated(seriesID, "555", "Test Show")
 
-	cfg := &models.Config{
-		StreamcacheURL:  mockSC.URL,
-		FetchAheadCount: 2,
-		PrefetchDelay:   0, // Instant FIFO execution in test
-		Port:            8080,
-	}
-	srv := NewServer(cfg, database, nil)
-	defer func() { _ = srv.Stop(context.Background()) }()
-
-	// Trigger fetch-ahead for S01E01 -> enqueues S01E02 and S01E03
-	srv.triggerFetchAhead(seriesID, 1, 1, "base", 2)
-	// Duplicate call immediately -> deduplication should prevent redundant queue entries
-	srv.triggerFetchAhead(seriesID, 1, 1, "base", 2)
-
-	// Wait up to 500ms for worker to finish
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(tapHistory)
-		mu.Unlock()
-		if count >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	mu.Lock()
-	captured := append([]string{}, tapHistory...)
-	mu.Unlock()
-
-	if len(captured) != 2 {
-		t.Fatalf("Expected exactly 2 taps (S01E02, S01E03) with deduplication, got %d: %v", len(captured), captured)
-	}
-	if captured[0] != "https://dp.example.com/s01e02.mkv" {
-		t.Errorf("Want first tap s01e02, got %s", captured[0])
-	}
-	if captured[1] != "https://dp.example.com/s01e03.mkv" {
-		t.Errorf("Want second tap s01e03, got %s", captured[1])
-	}
-}
-
-func TestPredictiveFetchAheadCancellationOnLivePlay(t *testing.T) {
-	var mu sync.Mutex
-	var tappedURLs []string
-
-	mockSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		tappedURLs = append(tappedURLs, r.URL.Query().Get("url"))
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer mockSC.Close()
-
-	tempDir := t.TempDir()
-	database, err := db.Open(filepath.Join(tempDir, "cancel_test.db"))
-	if err != nil {
-		t.Fatalf("Failed to open DB: %v", err)
-	}
-	defer database.Close()
-
-	seriesID := 888
-	_ = database.UpsertInitialSeriesState(seriesID, "888", "", "Cancel Show", 2024, "Cancel Show (2024)")
-	_ = database.SetSeriesActivated(seriesID, "888", "Cancel Show")
-
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= 5; i++ {
 		_ = database.SaveStreamVariant(&db.StreamVariant{
 			ItemID:     seriesID,
 			ItemType:   "series",
 			SeasonNum:  1,
 			EpisodeNum: i,
 			VariantKey: "base",
-			TargetURL:  fmt.Sprintf("https://dp.example.com/s01e%02d.mkv", i),
+			TargetURL:  fmt.Sprintf("http://dispatcharr:9191/proxy/vod/episode/ep%d", i),
 		})
 	}
 
-	// Use a 100ms prefetch delay so we can simulate user clicking next episode during delay
 	cfg := &models.Config{
-		StreamcacheURL:  mockSC.URL,
+		StreamcacheURL:  "http://streamcache:8080",
 		FetchAheadCount: 2,
-		PrefetchDelay:   100 * time.Millisecond,
 		Port:            8080,
 	}
 	srv := NewServer(cfg, database, nil)
 	defer func() { _ = srv.Stop(context.Background()) }()
 
-	// 1. Play S01E01 -> enqueues S01E02 and S01E03
-	req := httptest.NewRequest("GET", "/play/series/888/1/1", nil)
+	// Play ep1 with FetchAheadCount=2 -> should return next_urls for ep2 and ep3
+	req := httptest.NewRequest("GET", "/play/series/555/1/1", nil)
 	rec := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 
-	// 2. User clicks S01E02 after 20ms (while worker is waiting for S01E02 delay)
-	time.Sleep(20 * time.Millisecond)
-	req2 := httptest.NewRequest("GET", "/play/series/888/1/2", nil)
-	rec2 := httptest.NewRecorder()
-	srv.httpServer.Handler.ServeHTTP(rec2, req2)
-
-	if rec2.Code != http.StatusFound {
-		t.Fatalf("Expected 302 Found for S01E02, got %d", rec2.Code)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("Expected 302 Found, got %d", rec.Code)
 	}
 
-	// Wait 250ms for worker to process any remaining queued items
-	time.Sleep(250 * time.Millisecond)
-
-	mu.Lock()
-	tapped := append([]string{}, tappedURLs...)
-	mu.Unlock()
-
-	// S01E02 should have been CANCELED and never tapped because client played it directly!
-	for _, u := range tapped {
-		if u == "https://dp.example.com/s01e02.mkv" {
-			t.Errorf("S01E02 should have been canceled from prefetch tap because client played it directly!")
-		}
+	loc := rec.Header().Get("Location")
+	parsed, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("Failed to parse redirect Location: %v", err)
+	}
+	if parsed.Query().Get("url") != "http://dispatcharr:9191/proxy/vod/episode/ep1" {
+		t.Errorf("url want ep1, got %s", parsed.Query().Get("url"))
+	}
+	nextURLs := parsed.Query()["next_url"]
+	if len(nextURLs) != 2 {
+		t.Fatalf("Expected 2 next_urls, got %d: %v", len(nextURLs), nextURLs)
+	}
+	if nextURLs[0] != "http://dispatcharr:9191/proxy/vod/episode/ep2" {
+		t.Errorf("next_url[0] want ep2, got %s", nextURLs[0])
+	}
+	if nextURLs[1] != "http://dispatcharr:9191/proxy/vod/episode/ep3" {
+		t.Errorf("next_url[1] want ep3, got %s", nextURLs[1])
 	}
 }
 
-func TestPredictiveFetchAheadSequentialDelay(t *testing.T) {
-	var mu sync.Mutex
-	var tapTimes []time.Time
-	var tapURLs []string
+func TestFormat302TargetWithNext(t *testing.T) {
+	rawURL := "http://dispatcharr:9191/proxy/vod/episode/ep1"
+	nextURLs := []string{
+		"http://dispatcharr:9191/proxy/vod/episode/ep2",
+		"http://dispatcharr:9191/proxy/vod/episode/ep3",
+	}
 
-	mockSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		tapTimes = append(tapTimes, time.Now())
-		tapURLs = append(tapURLs, r.URL.Query().Get("url"))
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer mockSC.Close()
+	// 1. Without StreamcacheURL -> returns rawURL
+	got := format302TargetWithNext(rawURL, nextURLs, "", "", "")
+	if got != rawURL {
+		t.Errorf("format302TargetWithNext without streamcache = %q; want %q", got, rawURL)
+	}
 
+	// 2. With StreamcacheURL -> returns stream URL with encoded url and next_url params
+	gotSC := format302TargetWithNext(rawURL, nextURLs, "http://streamcache:8080", "", "")
+	parsed, err := url.Parse(gotSC)
+	if err != nil {
+		t.Fatalf("Failed to parse URL: %v", err)
+	}
+	if parsed.Path != "/stream" {
+		t.Errorf("Path = %q; want /stream", parsed.Path)
+	}
+	if parsed.Query().Get("url") != rawURL {
+		t.Errorf("Query 'url' = %q; want %q", parsed.Query().Get("url"), rawURL)
+	}
+	gotNexts := parsed.Query()["next_url"]
+	if len(gotNexts) != 2 {
+		t.Fatalf("Query 'next_url' len = %d; want 2", len(gotNexts))
+	}
+	if gotNexts[0] != nextURLs[0] || gotNexts[1] != nextURLs[1] {
+		t.Errorf("Query 'next_url' = %v; want %v", gotNexts, nextURLs)
+	}
+
+	// 3. With StreamcacheDispatcharrURL rewrite
+	gotRewrite := format302TargetWithNext(
+		rawURL,
+		nextURLs,
+		"http://streamcache:8080",
+		"http://dispatcharr-internal:9191",
+		"http://dispatcharr:9191",
+	)
+	parsedRewrite, err := url.Parse(gotRewrite)
+	if err != nil {
+		t.Fatalf("Failed to parse URL: %v", err)
+	}
+	if parsedRewrite.Query().Get("url") != "http://dispatcharr-internal:9191/proxy/vod/episode/ep1" {
+		t.Errorf("Rewritten url = %q", parsedRewrite.Query().Get("url"))
+	}
+	rewrittenNexts := parsedRewrite.Query()["next_url"]
+	if len(rewrittenNexts) != 2 {
+		t.Fatalf("Expected 2 rewritten next_urls, got %d", len(rewrittenNexts))
+	}
+	if rewrittenNexts[0] != "http://dispatcharr-internal:9191/proxy/vod/episode/ep2" {
+		t.Errorf("Rewritten next_url[0] = %q", rewrittenNexts[0])
+	}
+}
+
+func TestSeriesPlayWithNextURLSequentialOrdering(t *testing.T) {
 	tempDir := t.TempDir()
-	database, err := db.Open(filepath.Join(tempDir, "proxy_delay_test.db"))
+	database, err := db.Open(filepath.Join(tempDir, "sequential_test.db"))
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
 	defer database.Close()
 
 	seriesID := 777
-	_ = database.UpsertInitialSeriesState(seriesID, "999", "", "Delay Show", 2024, "Delay Show (2024)")
-	_ = database.SetSeriesActivated(seriesID, "999", "Delay Show")
+	_ = database.UpsertInitialSeriesState(seriesID, "777", "", "Multi-Season Show", 2024, "Multi-Season Show (2024)")
+	_ = database.SetSeriesActivated(seriesID, "777", "Multi-Season Show")
 
-	for i := 1; i <= 3; i++ {
-		_ = database.SaveStreamVariant(&db.StreamVariant{
-			ItemID:     seriesID,
-			ItemType:   "series",
-			SeasonNum:  1,
-			EpisodeNum: i,
-			VariantKey: "base",
-			TargetURL:  fmt.Sprintf("https://dp.example.com/s01e%02d.mkv", i),
-		})
-	}
-
-	delay := 50 * time.Millisecond
-	cfg := &models.Config{
-		StreamcacheURL:  mockSC.URL,
-		FetchAheadCount: 2,
-		PrefetchDelay:   delay,
-		Port:            8080,
-	}
-	srv := NewServer(cfg, database, nil)
-	defer func() { _ = srv.Stop(context.Background()) }()
-
-	startTime := time.Now()
-	srv.triggerFetchAhead(seriesID, 1, 1, "base", 2)
-
-	// Wait up to 500ms for both sequential taps to complete
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(tapURLs)
-		mu.Unlock()
-		if count >= 2 {
-			break
+	// S1: E1, E2
+	// S2: E1, E2
+	for s := 1; s <= 2; s++ {
+		for e := 1; e <= 2; e++ {
+			_ = database.SaveStreamVariant(&db.StreamVariant{
+				ItemID:     seriesID,
+				ItemType:   "series",
+				SeasonNum:  s,
+				EpisodeNum: e,
+				VariantKey: "base",
+				TargetURL:  fmt.Sprintf("http://dispatcharr:9191/s%02de%02d.mkv", s, e),
+			})
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
-	mu.Lock()
-	capturedTimes := append([]time.Time{}, tapTimes...)
-	capturedURLs := append([]string{}, tapURLs...)
-	mu.Unlock()
-
-	if len(capturedURLs) != 2 {
-		t.Fatalf("Expected 2 sequential taps, got %d: %v", len(capturedURLs), capturedURLs)
-	}
-
-	if capturedURLs[0] != "https://dp.example.com/s01e02.mkv" {
-		t.Errorf("First tap want s01e02, got %s", capturedURLs[0])
-	}
-	if capturedURLs[1] != "https://dp.example.com/s01e03.mkv" {
-		t.Errorf("Second tap want s01e03, got %s", capturedURLs[1])
-	}
-
-	// Verify first tap waited at least `delay` from start
-	firstDelay := capturedTimes[0].Sub(startTime)
-	if firstDelay < delay-10*time.Millisecond {
-		t.Errorf("First tap fired too fast: %v (want >= %v)", firstDelay, delay)
-	}
-
-	// Verify second tap waited at least `delay` after the first tap
-	secondDelay := capturedTimes[1].Sub(capturedTimes[0])
-	if secondDelay < delay-10*time.Millisecond {
-		t.Errorf("Second tap fired too fast after first: %v (want >= %v)", secondDelay, delay)
-	}
-}
-
-func TestPredictiveFetchAheadQueuePopResetsDelayTimer(t *testing.T) {
-	var mu sync.Mutex
-	var tapTimes []time.Time
-	var tapURLs []string
-
-	mockSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		tapTimes = append(tapTimes, time.Now())
-		tapURLs = append(tapURLs, r.URL.Query().Get("url"))
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer mockSC.Close()
-
-	tempDir := t.TempDir()
-	database, err := db.Open(filepath.Join(tempDir, "proxy_reset_test.db"))
-	if err != nil {
-		t.Fatalf("Failed to open DB: %v", err)
-	}
-	defer database.Close()
-
-	seriesID := 999
-	_ = database.UpsertInitialSeriesState(seriesID, "999", "", "Reset Test Show", 2024, "Reset Test Show (2024)")
-	_ = database.SetSeriesActivated(seriesID, "999", "Reset Test Show")
-
-	for i := 1; i <= 4; i++ {
-		_ = database.SaveStreamVariant(&db.StreamVariant{
-			ItemID:     seriesID,
-			ItemType:   "series",
-			SeasonNum:  1,
-			EpisodeNum: i,
-			VariantKey: "base",
-			TargetURL:  fmt.Sprintf("https://dp.example.com/s01e%02d.mkv", i),
-		})
-	}
-
-	delay := 150 * time.Millisecond
 	cfg := &models.Config{
-		StreamcacheURL:  mockSC.URL,
+		StreamcacheURL:  "http://streamcache:8080",
 		FetchAheadCount: 3,
-		PrefetchDelay:   delay,
 		Port:            8080,
 	}
 	srv := NewServer(cfg, database, nil)
 	defer func() { _ = srv.Stop(context.Background()) }()
 
-	// 1. Play S01E01 -> enqueues E02, E03, E04.
-	// Worker immediately pops E02 and begins waiting the 150ms delay.
-	req1 := httptest.NewRequest("GET", "/play/series/999/1/1", nil)
-	rec1 := httptest.NewRecorder()
-	srv.httpServer.Handler.ServeHTTP(rec1, req1)
-	if rec1.Code != http.StatusFound {
-		t.Fatalf("Expected 302 Found for S01E01, got %d", rec1.Code)
+	// Play S01E01 with FetchAheadCount=3 -> next_urls should be S01E02, S02E01, S02E02
+	req := httptest.NewRequest("GET", "/play/series/777/1/1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("Expected 302 Found, got %d", rec.Code)
 	}
-
-	// 2. Wait 75ms (halfway through E02's 150ms delay)
-	time.Sleep(75 * time.Millisecond)
-
-	// 3. User jumps ahead and plays S01E03 directly!
-	// S01E03 is popped from the queue.
-	// This must cancel E02's current timer and reset E02 to wait a full fresh 150ms quiet window.
-	resetTime := time.Now()
-	req3 := httptest.NewRequest("GET", "/play/series/999/1/3", nil)
-	rec3 := httptest.NewRecorder()
-	srv.httpServer.Handler.ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusFound {
-		t.Fatalf("Expected 302 Found for S01E03, got %d", rec3.Code)
+	parsed, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("Failed to parse Location: %v", err)
 	}
-
-	// Wait up to 600ms for prefetch taps to complete
-	deadline := time.Now().Add(600 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(tapURLs)
-		mu.Unlock()
-		if count >= 2 {
-			break
+	nextURLs := parsed.Query()["next_url"]
+	if len(nextURLs) != 3 {
+		t.Fatalf("Expected 3 next_urls across seasons, got %d: %v", len(nextURLs), nextURLs)
+	}
+	expected := []string{
+		"http://dispatcharr:9191/s01e02.mkv",
+		"http://dispatcharr:9191/s02e01.mkv",
+		"http://dispatcharr:9191/s02e02.mkv",
+	}
+	for i, exp := range expected {
+		if nextURLs[i] != exp {
+			t.Errorf("next_url[%d] = %q; want %q", i, nextURLs[i], exp)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	mu.Lock()
-	capturedTimes := append([]time.Time{}, tapTimes...)
-	capturedURLs := append([]string{}, tapURLs...)
-	mu.Unlock()
-
-	// S01E03 was played directly, so it must NEVER have been tapped by prefetch
-	for _, u := range capturedURLs {
-		if u == "https://dp.example.com/s01e03.mkv" {
-			t.Errorf("S01E03 was played directly and should never have been tapped by prefetch!")
-		}
-	}
-
-	if len(capturedURLs) < 1 {
-		t.Fatalf("Expected at least 1 tap (E02), got %d: %v", len(capturedURLs), capturedURLs)
-	}
-
-	if capturedURLs[0] != "https://dp.example.com/s01e02.mkv" {
-		t.Errorf("First tap want s01e02, got %s", capturedURLs[0])
-	}
-
-	// Verify that E02 waited at least 140ms AFTER resetTime (proving the 150ms timer was reset)
-	// rather than firing in the remaining 75ms of its old window.
-	elapsedSinceReset := capturedTimes[0].Sub(resetTime)
-	if elapsedSinceReset < delay-20*time.Millisecond {
-		t.Errorf("Delay timer was not reset! E02 tapped %v after client play, expected >= %v",
-			elapsedSinceReset, delay-20*time.Millisecond)
 	}
 }
+
 
 
 
