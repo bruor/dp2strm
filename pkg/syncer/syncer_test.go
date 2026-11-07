@@ -1421,6 +1421,211 @@ func TestVODStreamProxyTargetURLNoAPIKey(t *testing.T) {
 	}
 }
 
+func TestAdultContentFilter(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Mock Dispatcharr Server
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case r.URL.Path == "/api/vod/categories/":
+			// Returns categories including adult categories
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "name": "Action Movies", "category_type": "movie"},
+				{"id": 2, "name": "Adult 18+", "category_type": "movie"},
+				{"id": 3, "name": "XXX Uncensored Shows", "category_type": "series"}
+			]`))
+		case r.URL.Path == "/api/vod/movies/":
+			catQuery := r.URL.Query().Get("category")
+			if catQuery == "Adult 18+" {
+				// Category item IDs query from refreshExcludedContentGroups
+				_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 999}]}`))
+				return
+			}
+			// Regular movies page scan
+			// Note: "XXX State of the Union" (ID 202) has "XXX" in title but belongs to normal Action group
+			// so it must NOT be excluded by the group filter!
+			_, _ = w.Write([]byte(`{"count": 4, "results": [
+				{"id": 101, "name": "Family Adventure", "year": 2024, "tmdb_id": "101", "genre": "Family"},
+				{"id": 202, "name": "XXX State of the Union", "year": 2024, "tmdb_id": "202", "genre": "Action"},
+				{"id": 303, "name": "Flagged Adult Film", "year": 2024, "tmdb_id": "303", "genre": "Drama", "is_adult": true},
+				{"id": 999, "name": "Adult Group Film", "year": 2024, "tmdb_id": "999", "genre": "Drama"}
+			]}`))
+		case r.URL.Path == "/api/vod/series/":
+			catQuery := r.URL.Query().Get("category")
+			if catQuery == "XXX Uncensored Shows" {
+				// Category item IDs query from refreshExcludedContentGroups
+				_, _ = w.Write([]byte(`{"count": 1, "results": [{"id": 602}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"count": 2, "results": [
+				{"id": 501, "name": "Regular Drama Series", "year": 2024, "tmdb_id": "501", "genre": "Drama"},
+				{"id": 602, "name": "Late Night Adult Series", "year": 2024, "tmdb_id": "602", "genre": "Drama"}
+			]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	// Pre-create an adult group movie folder on disk and DB to verify purge
+	prePurgeFolder := "Adult Group Film (2024) [tmdbid=999]"
+	prePurgePath := filepath.Join(tempDir, "Movies", prePurgeFolder)
+	if err := os.MkdirAll(prePurgePath, 0755); err != nil {
+		t.Fatalf("Failed to create pre-existing adult dir: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(prePurgePath, "dummy.strm"), []byte("dummy"), 0644)
+	_ = database.UpsertInitialMovieState(999, "999", "", "Adult Group Film", 2024, prePurgeFolder)
+
+	// Also pre-create an adult series folder on disk and DB
+	prePurgeSeriesFolder := "Late Night Adult Series (2024) [tmdbid=602]"
+	prePurgeSeriesPath := filepath.Join(tempDir, "TV Shows", prePurgeSeriesFolder)
+	if err := os.MkdirAll(prePurgeSeriesPath, 0755); err != nil {
+		t.Fatalf("Failed to create pre-existing adult series dir: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(prePurgeSeriesPath, "dummy.strm"), []byte("dummy"), 0644)
+	_ = database.UpsertInitialSeriesState(602, "602", "", "Late Night Adult Series", 2024, prePurgeSeriesFolder)
+
+	// Config with default adult filtering (disabled)
+	cfg := &models.Config{
+		DispatcharrURL:        ts.URL,
+		APIKey:                "test-api-key",
+		OutputDir:             tempDir,
+		URL:                   "http://localhost:8080",
+		PageSize:              50,
+		PageWorkers:           2,
+		CircuitBreakerEnabled: true,
+		AdultContent:          "disabled",
+		AdultGroupFilter:      []string{"18+", "adult", "porn", "xxx", "nutflix"},
+	}
+
+	c := client.NewClient(ts.URL, "test-api-key")
+	s := NewSyncer(cfg, c, database)
+
+	// 1. Sync movies
+	if err := s.SyncMovies(context.Background(), false); err != nil {
+		t.Fatalf("SyncMovies failed: %v", err)
+	}
+
+	// Movie 101 should exist
+	movie101Folder := filepath.Join(tempDir, "Movies", "Family Adventure (2024) [tmdbid=101]")
+	if _, err := os.Stat(filepath.Join(movie101Folder, "Family Adventure (2024).strm")); os.IsNotExist(err) {
+		t.Errorf("Expected allowed movie 101 STRM to exist")
+	}
+
+	// Movie 202 ("XXX State of the Union") must exist because its group is NOT adult!
+	movie202Folder := filepath.Join(tempDir, "Movies", "XXX State of the Union (2024) [tmdbid=202]")
+	if _, err := os.Stat(filepath.Join(movie202Folder, "XXX State of the Union (2024).strm")); os.IsNotExist(err) {
+		t.Errorf("Expected movie 202 with 'XXX' in title to exist since it is in non-adult group")
+	}
+
+	// Adult movies (303 = is_adult flag, 999 = adult group) should NOT exist
+	entries, err := os.ReadDir(filepath.Join(tempDir, "Movies"))
+	if err != nil {
+		t.Fatalf("Failed to read Movies dir: %v", err)
+	}
+	for _, entry := range entries {
+		for _, adultTmdb := range []string{"303", "999"} {
+			if strings.Contains(entry.Name(), fmt.Sprintf("[tmdbid=%s]", adultTmdb)) {
+				t.Errorf("Expected adult movie with tmdbid %s to be skipped or purged, found: %s", adultTmdb, entry.Name())
+			}
+		}
+	}
+
+	// Pre-existing folder for 999 should be purged from disk and DB
+	if _, err := os.Stat(prePurgePath); !os.IsNotExist(err) {
+		t.Errorf("Expected pre-existing adult movie directory %s to be purged", prePurgePath)
+	}
+	if st, _ := database.GetMovieState(999); st != nil {
+		t.Errorf("Expected adult movie 999 DB state to be removed, got: %+v", st)
+	}
+
+	// 2. Sync series
+	if err := s.SyncSeries(context.Background(), false); err != nil {
+		t.Fatalf("SyncSeries failed: %v", err)
+	}
+
+	// Series 501 should exist
+	series501Folder := filepath.Join(tempDir, "TV Shows", "Regular Drama Series (2024) [tmdbid=501]")
+	if _, err := os.Stat(filepath.Join(series501Folder, "Season 01", "Regular Drama Series - S01E01.strm")); os.IsNotExist(err) {
+		t.Errorf("Expected allowed series 501 STRM to exist")
+	}
+
+	// Pre-existing adult group series 602 should be purged from disk and DB
+	if _, err := os.Stat(prePurgeSeriesPath); !os.IsNotExist(err) {
+		t.Errorf("Expected pre-existing adult series directory %s to be purged", prePurgeSeriesPath)
+	}
+	if st, _ := database.GetSeriesState(602); st != nil {
+		t.Errorf("Expected adult series 602 DB state to be removed, got: %+v", st)
+	}
+}
+
+func TestAdultContentEnabled(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open DB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Mock Dispatcharr Server
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case r.URL.Path == "/api/vod/categories/":
+			_, _ = w.Write([]byte(`[{"id": 1, "name": "Adult 18+", "category_type": "movie"}]`))
+		case r.URL.Path == "/api/vod/movies/":
+			_, _ = w.Write([]byte(`{"count": 2, "results": [
+				{"id": 101, "name": "Family Adventure", "year": 2024, "tmdb_id": "101", "genre": "Family"},
+				{"id": 999, "name": "Adult Group Film", "year": 2024, "tmdb_id": "999", "genre": "Drama", "is_adult": true}
+			]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	// Config with AdultContent: "enabled"
+	cfg := &models.Config{
+		DispatcharrURL:        ts.URL,
+		APIKey:                "test-api-key",
+		OutputDir:             tempDir,
+		URL:                   "http://localhost:8080",
+		PageSize:              50,
+		PageWorkers:           2,
+		CircuitBreakerEnabled: true,
+		AdultContent:          "enabled",
+		AdultGroupFilter:      []string{"18+", "adult", "porn", "xxx", "nutflix"},
+	}
+
+	c := client.NewClient(ts.URL, "test-api-key")
+	s := NewSyncer(cfg, c, database)
+
+	if err := s.SyncMovies(context.Background(), false); err != nil {
+		t.Fatalf("SyncMovies failed: %v", err)
+	}
+
+	// Both movies should exist when adult content is enabled
+	movie101Folder := filepath.Join(tempDir, "Movies", "Family Adventure (2024) [tmdbid=101]")
+	if _, err := os.Stat(filepath.Join(movie101Folder, "Family Adventure (2024).strm")); os.IsNotExist(err) {
+		t.Errorf("Expected movie 101 STRM to exist")
+	}
+
+	movie999Folder := filepath.Join(tempDir, "Movies", "Adult Group Film (2024) [tmdbid=999]")
+	if _, err := os.Stat(filepath.Join(movie999Folder, "Adult Group Film (2024).strm")); os.IsNotExist(err) {
+		t.Errorf("Expected adult movie 999 STRM to exist when AdultContent is enabled")
+	}
+}
+
+
+
 
 
 

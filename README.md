@@ -98,6 +98,10 @@ services:
       - PORT=8080
       - URL=http://dp2strm:8080
 
+      # Content Filtering Options
+      - ADULT_CONTENT=disabled # Control adult content: disabled (default) or enabled
+      - ADULT_GROUP_FILTER=18+,adult,porn,xxx,nutflix # Comma-separated content group (category) filters
+
       # Timezone & Scheduling
       - TZ=America/Toronto
       - SYNC_INTERVAL=4h
@@ -215,6 +219,8 @@ services:
 | `SKIP_STARTUP_SYNC` | `false` | Set to `true` to skip initial staging pass on container startup |
 | `BATCH_SIZE` | `0` | Shared batch creation limit per run (`0` = Unlimited) |
 | `DISPATCHARR_ORDERING` | `-created_at` | Server-side ordering parameter for Dispatcharr VOD endpoints |
+| `ADULT_CONTENT` | `disabled` | Control adult content filtering: `disabled` (default, skips and purges adult items) or `enabled` |
+| `ADULT_GROUP_FILTER` | `18+,adult,porn,xxx,nutflix` | Comma-separated list of substring filters matched against content categories / groups |
 | `EMBY_URL` | `""` | Optional Emby server URL for library refresh hooks |
 | `EMBY_API_KEY` | `""` | Optional Emby API key |
 | `EMBY_MEDIA_PATH` | `""` | Optional override: internal Emby mount path for `.strm` media folder |

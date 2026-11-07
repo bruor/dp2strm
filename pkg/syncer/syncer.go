@@ -46,9 +46,18 @@ type Syncer struct {
 	completedScanCount int64
 	totalScanDuration  time.Duration
 	lastScanDuration   time.Duration
+
+	// Adult content filter state
+	filterMu            sync.RWMutex
+	excludedMovieIDs    map[int]bool
+	excludedSeriesIDs   map[int]bool
+	lastCategoryRefresh time.Time
 }
 
 func NewSyncer(cfg *models.Config, client *client.Client, database *db.DB) *Syncer {
+	if client != nil && cfg.IsAdultContentDisabled() {
+		client.SetExcludeAdult(true)
+	}
 	s := &Syncer{
 		cfg:        cfg,
 		client:     client,
@@ -80,6 +89,135 @@ func (s *Syncer) resetCircuitBreaker() {
 	s.circuitTripped = false
 }
 
+// refreshExcludedContentGroups queries Dispatcharr categories matching ADULT_GROUP_FILTER
+// and resolves their item IDs into fast in-memory exclusion sets.
+func (s *Syncer) refreshExcludedContentGroups(ctx context.Context) {
+	if s.client == nil || !s.cfg.IsAdultContentDisabled() || len(s.cfg.AdultGroupFilter) == 0 {
+		return
+	}
+
+	s.filterMu.RLock()
+	if time.Since(s.lastCategoryRefresh) < 1*time.Hour && s.excludedMovieIDs != nil && s.excludedSeriesIDs != nil {
+		s.filterMu.RUnlock()
+		return
+	}
+	s.filterMu.RUnlock()
+
+	categories, err := s.client.FetchCategories(ctx)
+	if err != nil {
+		log.Printf("[Syncer] Warning: Could not fetch categories for adult group filtering: %v", err)
+		return
+	}
+
+	var matchedMovieCats []string
+	var matchedSeriesCats []string
+
+	for _, cat := range categories {
+		catNameLower := strings.ToLower(cat.Name)
+		for _, filter := range s.cfg.AdultGroupFilter {
+			if filter != "" && strings.Contains(catNameLower, filter) {
+				if cat.CategoryType == "movie" || cat.CategoryType == "" {
+					matchedMovieCats = append(matchedMovieCats, cat.Name)
+				}
+				if cat.CategoryType == "series" || cat.CategoryType == "" {
+					matchedSeriesCats = append(matchedSeriesCats, cat.Name)
+				}
+				break
+			}
+		}
+	}
+
+	movieIDs := make(map[int]bool)
+	for _, catName := range matchedMovieCats {
+		ids, err := s.client.FetchItemIDsByCategory(ctx, "movies", catName)
+		if err != nil {
+			log.Printf("[Syncer] Warning: Could not fetch movie IDs for excluded category %q: %v", catName, err)
+			continue
+		}
+		for _, id := range ids {
+			movieIDs[id] = true
+		}
+	}
+
+	seriesIDs := make(map[int]bool)
+	for _, catName := range matchedSeriesCats {
+		ids, err := s.client.FetchItemIDsByCategory(ctx, "series", catName)
+		if err != nil {
+			log.Printf("[Syncer] Warning: Could not fetch series IDs for excluded category %q: %v", catName, err)
+			continue
+		}
+		for _, id := range ids {
+			seriesIDs[id] = true
+		}
+	}
+
+	s.filterMu.Lock()
+	s.excludedMovieIDs = movieIDs
+	s.excludedSeriesIDs = seriesIDs
+	s.lastCategoryRefresh = time.Now()
+	s.filterMu.Unlock()
+
+	log.Printf("[Syncer] Adult group filter active: %d movie category matches (%d excluded movies), %d series category matches (%d excluded series)",
+		len(matchedMovieCats), len(movieIDs), len(matchedSeriesCats), len(seriesIDs))
+}
+
+// shouldSkipMovie checks if a movie matches the adult content filter.
+func (s *Syncer) shouldSkipMovie(movie models.Movie) bool {
+	if !s.cfg.IsAdultContentDisabled() {
+		return false
+	}
+	if movie.IsAdult {
+		return true
+	}
+	s.filterMu.RLock()
+	if s.excludedMovieIDs != nil && s.excludedMovieIDs[movie.ID] {
+		s.filterMu.RUnlock()
+		return true
+	}
+	s.filterMu.RUnlock()
+
+	// Check provider relation categories if present
+	for _, p := range movie.Providers {
+		if p.Category != nil && p.Category.Name != "" {
+			catLower := strings.ToLower(p.Category.Name)
+			for _, f := range s.cfg.AdultGroupFilter {
+				if f != "" && strings.Contains(catLower, f) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// shouldSkipSeries checks if a TV series matches the adult content filter.
+func (s *Syncer) shouldSkipSeries(series models.Series) bool {
+	if !s.cfg.IsAdultContentDisabled() {
+		return false
+	}
+	s.filterMu.RLock()
+	if s.excludedSeriesIDs != nil && s.excludedSeriesIDs[series.ID] {
+		s.filterMu.RUnlock()
+		return true
+	}
+	s.filterMu.RUnlock()
+
+	// Check provider relation categories if present
+	for _, p := range series.Providers {
+		if p.Category != nil && p.Category.Name != "" {
+			catLower := strings.ToLower(p.Category.Name)
+			for _, f := range s.cfg.AdultGroupFilter {
+				if f != "" && strings.Contains(catLower, f) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // SyncMovies executes a full movie sync pass from Dispatcharr REST API to disk.
 func (s *Syncer) SyncMovies(ctx context.Context, dryRun bool) error {
 	created, err := s.SyncMoviesWithLimit(ctx, s.cfg.BatchSize, dryRun)
@@ -94,6 +232,7 @@ func (s *Syncer) SyncMoviesWithLimit(ctx context.Context, maxNewItems int, dryRu
 	log.Printf("[Syncer] Starting Parallel Movie Sync Pass (Max New Items: %d)...", maxNewItems)
 	start := time.Now()
 	s.resetCircuitBreaker()
+	s.refreshExcludedContentGroups(ctx)
 
 	pageSize := s.cfg.PageSize
 	if pageSize <= 0 {
@@ -161,6 +300,20 @@ func (s *Syncer) SyncMoviesWithLimit(ctx context.Context, maxNewItems int, dryRu
 			}
 			if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
 				break
+			}
+			if s.cfg.IsAdultContentDisabled() && s.shouldSkipMovie(m) {
+				cleanTitle := sanitizer.CleanTitle(m.Name)
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, m.Year, m.TMDBID, m.IMDBID)
+				movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)
+				if _, statErr := os.Stat(movieDir); statErr == nil {
+					_ = os.RemoveAll(movieDir)
+					if s.database != nil {
+						_ = s.database.RemoveSoftDeletedItem(movieDir)
+						_ = s.database.DeleteMovieState(m.ID)
+					}
+					log.Printf("[Syncer] Purged adult movie directory: %q (matched adult content filter)", folderName)
+				}
+				continue
 			}
 			wg.Add(1)
 			sem <- struct{}{}
@@ -275,6 +428,7 @@ func (s *Syncer) SyncSeriesWithLimit(ctx context.Context, maxNewItems int, dryRu
 	log.Printf("[Syncer] Starting Pass 1 Parallel TV Series Sync Pass (Max New Items: %d)...", maxNewItems)
 	start := time.Now()
 	s.resetCircuitBreaker()
+	s.refreshExcludedContentGroups(ctx)
 
 	pageSize := s.cfg.PageSize
 	if pageSize <= 0 {
@@ -342,6 +496,20 @@ func (s *Syncer) SyncSeriesWithLimit(ctx context.Context, maxNewItems int, dryRu
 			}
 			if maxNewItems > 0 && atomic.LoadInt64(&newStrmCreated) >= int64(maxNewItems) {
 				break
+			}
+			if s.cfg.IsAdultContentDisabled() && s.shouldSkipSeries(srs) {
+				cleanTitle := sanitizer.CleanTitle(srs.Name)
+				folderName := sanitizer.BuildMovieFolderName(cleanTitle, srs.Year, srs.TMDBID, srs.IMDBID)
+				seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
+				if _, statErr := os.Stat(seriesDir); statErr == nil {
+					_ = os.RemoveAll(seriesDir)
+					if s.database != nil {
+						_ = s.database.RemoveSoftDeletedItem(seriesDir)
+						_ = s.database.DeleteSeriesState(srs.ID)
+					}
+					log.Printf("[Syncer] Purged adult TV series directory: %q (matched adult content filter)", folderName)
+				}
+				continue
 			}
 			wg.Add(1)
 			sem <- struct{}{}
@@ -522,6 +690,9 @@ func (s *Syncer) processSingleSeriesPass1(ctx context.Context, series models.Ser
 }
 
 func (s *Syncer) processSingleSeriesPass1Profiled(ctx context.Context, series models.Series, dryRun bool) (created, preserved int, strmCreated bool, artDur, diskDur time.Duration, err error) {
+	if s.cfg.IsAdultContentDisabled() && s.shouldSkipSeries(series) {
+		return 0, 0, false, 0, 0, nil
+	}
 	cleanTitle := sanitizer.CleanTitle(series.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, series.Year, series.TMDBID, series.IMDBID)
 	seriesDir := filepath.Join(s.cfg.OutputDir, "TV Shows", folderName)
@@ -954,6 +1125,9 @@ func (s *Syncer) processSingleMovie(ctx context.Context, movie models.Movie, dry
 }
 
 func (s *Syncer) processSingleMovieProfiled(ctx context.Context, movie models.Movie, dryRun bool) (created, preserved int, strmCreated bool, artDur, diskDur time.Duration, err error) {
+	if s.cfg.IsAdultContentDisabled() && s.shouldSkipMovie(movie) {
+		return 0, 0, false, 0, 0, nil
+	}
 	cleanTitle := sanitizer.CleanTitle(movie.Name)
 	folderName := sanitizer.BuildMovieFolderName(cleanTitle, movie.Year, movie.TMDBID, movie.IMDBID)
 	movieDir := filepath.Join(s.cfg.OutputDir, "Movies", folderName)

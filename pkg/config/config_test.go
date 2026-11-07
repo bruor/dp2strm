@@ -137,3 +137,70 @@ func TestActiveSeriesRefreshIntervalConfig(t *testing.T) {
 	os.Unsetenv("ACTIVE_SERIES_REFRESH_INTERVAL")
 }
 
+func TestAdultContentConfig(t *testing.T) {
+	// 1. Default should be "disabled" and have default filter terms
+	cfgDefault := DefaultConfig()
+	if cfgDefault.AdultContent != "disabled" {
+		t.Errorf("Default AdultContent = %q, want 'disabled'", cfgDefault.AdultContent)
+	}
+	if !cfgDefault.IsAdultContentDisabled() {
+		t.Errorf("Default IsAdultContentDisabled() = false, want true")
+	}
+	expectedFilter := []string{"18+", "adult", "porn", "xxx", "nutflix"}
+	if len(cfgDefault.AdultGroupFilter) != len(expectedFilter) {
+		t.Fatalf("Default AdultGroupFilter len = %d, want %d", len(cfgDefault.AdultGroupFilter), len(expectedFilter))
+	}
+	for i, f := range expectedFilter {
+		if cfgDefault.AdultGroupFilter[i] != f {
+			t.Errorf("Default AdultGroupFilter[%d] = %q, want %q", i, cfgDefault.AdultGroupFilter[i], f)
+		}
+	}
+
+	// 2. ADULT_CONTENT=enabled
+	os.Setenv("ADULT_CONTENT", "enabled")
+	cfgEnabled := LoadConfig()
+	if cfgEnabled.AdultContent != "enabled" {
+		t.Errorf("AdultContent = %q, want 'enabled'", cfgEnabled.AdultContent)
+	}
+	if cfgEnabled.IsAdultContentDisabled() {
+		t.Errorf("IsAdultContentDisabled() = true for enabled, want false")
+	}
+
+	// 3. ADULT_CONTENT=true synonym
+	os.Setenv("ADULT_CONTENT", "true")
+	cfgTrue := LoadConfig()
+	if cfgTrue.IsAdultContentDisabled() {
+		t.Errorf("IsAdultContentDisabled() = true for 'true', want false")
+	}
+
+	// 4. ADULT_CONTENT=disabled / false synonym
+	os.Setenv("ADULT_CONTENT", "disabled")
+	cfgDisabled := LoadConfig()
+	if !cfgDisabled.IsAdultContentDisabled() {
+		t.Errorf("IsAdultContentDisabled() = false for 'disabled', want true")
+	}
+
+	os.Setenv("ADULT_CONTENT", "false")
+	cfgFalse := LoadConfig()
+	if !cfgFalse.IsAdultContentDisabled() {
+		t.Errorf("IsAdultContentDisabled() = false for 'false', want true")
+	}
+
+	// 5. Custom ADULT_GROUP_FILTER
+	os.Setenv("ADULT_GROUP_FILTER", "18+, Mature , Erotica, XXX ")
+	cfgFilter := LoadConfig()
+	expectedCustom := []string{"18+", "mature", "erotica", "xxx"}
+	if len(cfgFilter.AdultGroupFilter) != len(expectedCustom) {
+		t.Fatalf("Custom AdultGroupFilter len = %d, want %d", len(cfgFilter.AdultGroupFilter), len(expectedCustom))
+	}
+	for i, f := range expectedCustom {
+		if cfgFilter.AdultGroupFilter[i] != f {
+			t.Errorf("Custom AdultGroupFilter[%d] = %q, want %q", i, cfgFilter.AdultGroupFilter[i], f)
+		}
+	}
+
+	os.Unsetenv("ADULT_CONTENT")
+	os.Unsetenv("ADULT_GROUP_FILTER")
+}
+
+

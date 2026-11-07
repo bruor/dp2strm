@@ -46,6 +46,14 @@ type Config struct {
 	EnableNFO              bool          `json:"enable_nfo"`
 	ActivationRefreshDelay time.Duration `json:"activation_refresh_delay"`
 	ActiveSeriesRefreshInterval time.Duration `json:"active_series_refresh_interval"`
+	AdultContent           string        `json:"adult_content"`
+	AdultGroupFilter       []string      `json:"adult_group_filter"`
+}
+
+// IsAdultContentDisabled returns true if adult content is disabled (the default).
+func (c *Config) IsAdultContentDisabled() bool {
+	v := strings.ToLower(strings.TrimSpace(c.AdultContent))
+	return v != "enabled" && v != "true" && v != "1"
 }
 
 // GetDispatcharrStreamURL returns StreamcacheDispatcharrURL if set, otherwise falls back to DispatcharrURL.

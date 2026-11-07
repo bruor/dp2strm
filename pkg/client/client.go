@@ -19,10 +19,11 @@ var ErrRateLimited = fmt.Errorf("HTTP 429 Too Many Requests (Rate Limited)")
 
 // Client handles REST API interactions with the Dispatcharr server.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	ordering   string
-	httpClient *http.Client
+	baseURL      string
+	apiKey       string
+	ordering     string
+	excludeAdult bool
+	httpClient   *http.Client
 }
 
 // NewClient initializes a new Dispatcharr REST API Client with optional ordering.
@@ -33,9 +34,10 @@ func NewClient(baseURL, apiKey string, ordering ...string) *Client {
 		ord = ordering[0]
 	}
 	return &Client{
-		baseURL:  normalized,
-		apiKey:   apiKey,
-		ordering: ord,
+		baseURL:      normalized,
+		apiKey:       apiKey,
+		ordering:     ord,
+		excludeAdult: false,
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
@@ -50,6 +52,11 @@ func NewClient(baseURL, apiKey string, ordering ...string) *Client {
 // SetOrdering sets the server-side ordering query parameter (e.g. "-updated_at,-id").
 func (c *Client) SetOrdering(ordering string) {
 	c.ordering = ordering
+}
+
+// SetExcludeAdult sets whether to append is_adult=false to movie queries.
+func (c *Client) SetExcludeAdult(exclude bool) {
+	c.excludeAdult = exclude
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values) (*http.Response, error) {
@@ -92,6 +99,9 @@ func (c *Client) FetchMoviePage(ctx context.Context, page, pageSize int) (*model
 	query.Set("page_size", fmt.Sprintf("%d", pageSize))
 	if c.ordering != "" {
 		query.Set("ordering", c.ordering)
+	}
+	if c.excludeAdult {
+		query.Set("is_adult", "false")
 	}
 
 	resp, err := c.doRequest(ctx, http.MethodGet, "/api/vod/movies/", query)
@@ -401,4 +411,100 @@ func (c *Client) FetchMyProfile(ctx context.Context) (username, xcPassword strin
 	}
 
 	return data.Username, data.CustomProperties.XCPassword, nil
+}
+
+// FetchCategories retrieves VOD categories from GET /api/vod/categories/
+// Optional categoryType can be "movie" or "series".
+func (c *Client) FetchCategories(ctx context.Context, categoryType ...string) ([]models.Category, error) {
+	var query url.Values
+	if len(categoryType) > 0 && categoryType[0] != "" {
+		query = url.Values{}
+		query.Set("category_type", categoryType[0])
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/api/vod/categories/", query)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read categories body: %w", err)
+	}
+
+	// 1. Try decoding as paginated object {"results": [...]}
+	var paginated struct {
+		Results []models.Category `json:"results"`
+	}
+	if err := json.Unmarshal(bodyBytes, &paginated); err == nil && paginated.Results != nil {
+		return paginated.Results, nil
+	}
+
+	// 2. Try decoding as direct JSON array [...]
+	var list []models.Category
+	if err := json.Unmarshal(bodyBytes, &list); err == nil {
+		return list, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse /api/vod/categories/ response")
+}
+
+// FetchItemIDsByCategory retrieves all item IDs belonging to a given category name.
+// itemType should be "movies" or "series".
+func (c *Client) FetchItemIDsByCategory(ctx context.Context, itemType string, categoryName string) ([]int, error) {
+	var ids []int
+	page := 1
+	pageSize := 100
+	endpoint := fmt.Sprintf("/api/vod/%s/", itemType)
+
+	type ItemStub struct {
+		ID int `json:"id"`
+	}
+
+	for {
+		query := url.Values{}
+		query.Set("category", categoryName)
+		query.Set("page", fmt.Sprintf("%d", page))
+		query.Set("page_size", fmt.Sprintf("%d", pageSize))
+
+		resp, err := c.doRequest(ctx, http.MethodGet, endpoint, query)
+		if err != nil {
+			return nil, err
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		var paginated struct {
+			Count   int        `json:"count"`
+			Next    *string    `json:"next"`
+			Results []ItemStub `json:"results"`
+		}
+		if err := json.Unmarshal(bodyBytes, &paginated); err == nil && paginated.Results != nil {
+			for _, item := range paginated.Results {
+				ids = append(ids, item.ID)
+			}
+			if paginated.Next == nil || len(paginated.Results) == 0 {
+				break
+			}
+			page++
+			continue
+		}
+
+		var list []ItemStub
+		if err := json.Unmarshal(bodyBytes, &list); err == nil {
+			for _, item := range list {
+				ids = append(ids, item.ID)
+			}
+			break
+		}
+
+		break
+	}
+
+	return ids, nil
 }

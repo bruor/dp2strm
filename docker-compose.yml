@@ -25,6 +25,10 @@ services:
       - PORT=8080
       - URL=http://dp2strm:8080
 
+      # --- Content Filtering Options ---
+      - ADULT_CONTENT=disabled # Control adult content inclusion: disabled (default) or enabled
+      - ADULT_GROUP_FILTER=18+,adult,porn,xxx,nutflix # Comma-separated list of content group (category) keywords to exclude
+
       # --- Scheduling & Worker Pipeline Options ---
       - TZ=America/Toronto
       - SYNC_INTERVAL=4h # Dispatcharr catalog delta ingest interval (Default: 4h)

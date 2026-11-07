@@ -270,4 +270,128 @@ func TestTriggerSeriesProviderInfo(t *testing.T) {
 	}
 }
 
+func TestClientExcludeAdultQueryParam(t *testing.T) {
+	var capturedQuery url.Values
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.Query()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"count": 0, "results": []}`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "test-api-key")
+
+	// 1. By default, is_adult should not be set
+	_, err := c.FetchMoviePage(context.Background(), 1, 50)
+	if err != nil {
+		t.Fatalf("FetchMoviePage failed: %v", err)
+	}
+	if capturedQuery.Get("is_adult") != "" {
+		t.Errorf("Expected is_adult to be empty by default, got: %q", capturedQuery.Get("is_adult"))
+	}
+
+	// 2. When SetExcludeAdult(true), is_adult=false must be present
+	c.SetExcludeAdult(true)
+	_, err = c.FetchMoviePage(context.Background(), 1, 50)
+	if err != nil {
+		t.Fatalf("FetchMoviePage failed: %v", err)
+	}
+	if capturedQuery.Get("is_adult") != "false" {
+		t.Errorf("Expected is_adult=false, got: %q", capturedQuery.Get("is_adult"))
+	}
+
+	// 3. When SetExcludeAdult(false), is_adult is cleared
+	c.SetExcludeAdult(false)
+	_, err = c.FetchMoviePage(context.Background(), 1, 50)
+	if err != nil {
+		t.Fatalf("FetchMoviePage failed: %v", err)
+	}
+	if capturedQuery.Get("is_adult") != "" {
+		t.Errorf("Expected is_adult to be empty, got: %q", capturedQuery.Get("is_adult"))
+	}
+}
+
+func TestClientFetchCategories(t *testing.T) {
+	// Paginated response
+	tsPaginated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/vod/categories/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"count": 2, "results": [{"id": 1, "name": "Action", "category_type": "movie"}, {"id": 2, "name": "Adult 18+", "category_type": "movie"}]}`))
+	}))
+	defer tsPaginated.Close()
+
+	c := NewClient(tsPaginated.URL, "test-key")
+	cats, err := c.FetchCategories(context.Background(), "movie")
+	if err != nil {
+		t.Fatalf("FetchCategories paginated failed: %v", err)
+	}
+	if len(cats) != 2 {
+		t.Fatalf("Expected 2 categories, got %d", len(cats))
+	}
+	if cats[0].Name != "Action" || cats[1].Name != "Adult 18+" {
+		t.Errorf("Unexpected categories: %+v", cats)
+	}
+
+	// Array response
+	tsArray := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/vod/categories/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id": 3, "name": "XXX Series", "category_type": "series"}]`))
+	}))
+	defer tsArray.Close()
+
+	c2 := NewClient(tsArray.URL, "test-key")
+	cats2, err := c2.FetchCategories(context.Background())
+	if err != nil {
+		t.Fatalf("FetchCategories array failed: %v", err)
+	}
+	if len(cats2) != 1 || cats2[0].Name != "XXX Series" {
+		t.Errorf("Unexpected categories: %+v", cats2)
+	}
+}
+
+func TestClientFetchItemIDsByCategory(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/vod/movies/" {
+			page := r.URL.Query().Get("page")
+			cat := r.URL.Query().Get("category")
+			if cat != "Adult" {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			if page == "1" {
+				_, _ = w.Write([]byte(`{"count": 3, "next": "http://.../?page=2", "results": [{"id": 10}, {"id": 20}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"count": 3, "next": null, "results": [{"id": 30}]}`))
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "test-key")
+	ids, err := c.FetchItemIDsByCategory(context.Background(), "movies", "Adult")
+	if err != nil {
+		t.Fatalf("FetchItemIDsByCategory failed: %v", err)
+	}
+	expectedIDs := []int{10, 20, 30}
+	if len(ids) != len(expectedIDs) {
+		t.Fatalf("Expected %d IDs, got %d (%v)", len(expectedIDs), len(ids), ids)
+	}
+	for i, id := range expectedIDs {
+		if ids[i] != id {
+			t.Errorf("ids[%d] = %d, want %d", i, ids[i], id)
+		}
+	}
+}
+
+
 

@@ -51,6 +51,8 @@ func DefaultConfig() *models.Config {
 		EnableNFO:              false,
 		ActivationRefreshDelay: 10 * time.Second,
 		ActiveSeriesRefreshInterval: 4 * time.Hour,
+		AdultContent:           "disabled",
+		AdultGroupFilter:       []string{"18+", "adult", "porn", "xxx", "nutflix"},
 	}
 }
 
@@ -135,6 +137,22 @@ func LoadConfig() *models.Config {
 	}
 	if v := os.Getenv("SKIP_STARTUP_SYNC"); v != "" {
 		cfg.SkipStartupSync = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("ADULT_CONTENT"); v != "" {
+		cfg.AdultContent = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := os.Getenv("ADULT_GROUP_FILTER"); v != "" {
+		parts := strings.Split(v, ",")
+		var cleaned []string
+		for _, p := range parts {
+			trimmed := strings.ToLower(strings.TrimSpace(p))
+			if trimmed != "" {
+				cleaned = append(cleaned, trimmed)
+			}
+		}
+		if len(cleaned) > 0 {
+			cfg.AdultGroupFilter = cleaned
+		}
 	}
 
 	if v := os.Getenv("PORT"); v != "" {
