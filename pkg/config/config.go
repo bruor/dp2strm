@@ -85,7 +85,12 @@ func LoadConfig() *models.Config {
 		cfg.StreamcacheDispatcharrURL = v
 	}
 	prefetchCountExplicit := false
-	if v := os.Getenv("PREFETCH_COUNT"); v != "" {
+	if v := os.Getenv("PREHYDRATE_COUNT"); v != "" {
+		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
+			cfg.FetchAheadCount = cnt
+			prefetchCountExplicit = true
+		}
+	} else if v := os.Getenv("PREFETCH_COUNT"); v != "" {
 		if cnt, err := strconv.Atoi(v); err == nil && cnt >= 0 {
 			cfg.FetchAheadCount = cnt
 			prefetchCountExplicit = true

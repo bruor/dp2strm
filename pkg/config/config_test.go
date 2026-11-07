@@ -211,7 +211,15 @@ func TestPrefetchCountConfiguration(t *testing.T) {
 		t.Errorf("FetchAheadCount with StreamcacheURL = %d, want 1", cfg.FetchAheadCount)
 	}
 
-	// 2. Explicit PREFETCH_COUNT overrides default
+	// 2. Explicit PREHYDRATE_COUNT overrides default
+	os.Setenv("PREHYDRATE_COUNT", "4")
+	cfgPre := LoadConfig()
+	if cfgPre.FetchAheadCount != 4 {
+		t.Errorf("FetchAheadCount with PREHYDRATE_COUNT=4 = %d, want 4", cfgPre.FetchAheadCount)
+	}
+	os.Unsetenv("PREHYDRATE_COUNT")
+
+	// 3. Explicit PREFETCH_COUNT overrides default
 	os.Setenv("PREFETCH_COUNT", "3")
 	cfg2 := LoadConfig()
 	if cfg2.FetchAheadCount != 3 {
